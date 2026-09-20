@@ -1,0 +1,7 @@
+{
+  "eligible": true,
+  "operations": [
+    { "kind": "databasePatch", "table": "items" },
+    { "kind": "databaseDelete", "table": "items" }
+  ]
+}

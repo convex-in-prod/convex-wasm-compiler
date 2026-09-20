@@ -1,0 +1,12 @@
+{
+  "documentProperties": [
+    {
+      "property": "label",
+      "reason": "opaque-property-read",
+      "table": "documents",
+      "valueType": "opaque"
+    }
+  ],
+  "eligible": true,
+  "operations": [{ "kind": "databaseGet", "table": "documents" }]
+}

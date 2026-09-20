@@ -1,0 +1,7 @@
+{
+  "eligible": true,
+  "operations": [
+    { "kind": "databaseGet", "table": "items" },
+    { "kind": "databaseGet", "table": "items" }
+  ]
+}

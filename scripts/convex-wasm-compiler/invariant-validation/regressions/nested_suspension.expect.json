@@ -1,0 +1,8 @@
+{
+  "diagnosticCodes": ["unsupported-direct-promise-all"],
+  "eligible": false,
+  "operations": [
+    { "kind": "databaseGet", "table": "items" },
+    { "kind": "databaseGet", "table": "items" }
+  ]
+}

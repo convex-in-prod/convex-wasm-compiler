@@ -1,0 +1,571 @@
+{
+  "kind": "convex-wasm-static-hermes-global-inventory",
+  "sourceIdentity": {
+    "buildRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
+    "sourceRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
+    "observedCheckoutRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
+    "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
+    "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
+    "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
+    "hostCmakeCacheSha256": "73aab26bdd3bd6a4bcf4479b3c36d17b642a37cfbfa70099d8acacfc24bda4f5",
+    "hostShermesSha256": "cf0dc0cb425e0ac4cd2d531d99bc3ca38b7005a9a5965ccb03126b2e473979bf",
+    "wasmCmakeCacheSha256": "1b844271f2728e89632a7e8387a2a85541b569c07abb757f24e757eacbe66f3a",
+    "wasmLibhermesvmArchiveSha256": "340e483853b3e870bb541f58299173fef3ffb43abcc442ea5d93d0386178ce75"
+  },
+  "buildConfiguration": {
+    "coreExtensions": true,
+    "contribExtensions": true,
+    "debugger": false,
+    "intl": false
+  },
+  "registrationConditions": {
+    "coreExtensions": { "enabled": true, "globals": ["TextEncoder"] },
+    "contribExtensions": { "enabled": true, "globals": ["TextDecoder"] },
+    "debuggerBuild": { "enabled": false, "omittedGlobals": ["DebuggerInternal"] },
+    "es6Proxy": { "enabled": true, "globals": ["Proxy", "Reflect"] },
+    "hermesInternal": { "enabled": true, "globals": ["gc"] },
+    "intlBuildAndRuntime": { "enabled": false, "omittedGlobals": ["Intl"] },
+    "runtimeMicrotaskQueue": {
+      "enabled": true,
+      "globals": ["FinalizationRegistry", "WeakRef", "queueMicrotask"]
+    },
+    "workerIntegrator": { "enabled": false, "omittedGlobals": ["Worker"] }
+  },
+  "targetRuntimeProbe": {
+    "kind": "static-hermes-no-console-sh-init-global-probe",
+    "reportFileSha256": "c2f4bafb7ed6605f3cc5cbf9e284c19226eff167e5b07b0d251e660425d14113",
+    "reportSha256": "72ded429ccc12cbadf48625f44045769261bea3f1e5af057d1d9e141ad6fc429",
+    "globals": [
+      "$SHBuiltin",
+      "AggregateError",
+      "Array",
+      "ArrayBuffer",
+      "BigInt",
+      "BigInt64Array",
+      "BigUint64Array",
+      "Boolean",
+      "DataView",
+      "Date",
+      "Error",
+      "EvalError",
+      "FinalizationRegistry",
+      "Float16Array",
+      "Float32Array",
+      "Float64Array",
+      "Function",
+      "HermesAsyncIteratorsInternal",
+      "HermesInternal",
+      "Infinity",
+      "Int16Array",
+      "Int32Array",
+      "Int8Array",
+      "Iterator",
+      "JSON",
+      "Map",
+      "Math",
+      "NaN",
+      "Number",
+      "Object",
+      "Promise",
+      "Proxy",
+      "QuitError",
+      "RangeError",
+      "ReferenceError",
+      "Reflect",
+      "RegExp",
+      "Set",
+      "String",
+      "Symbol",
+      "SyntaxError",
+      "TextDecoder",
+      "TextEncoder",
+      "TimeoutError",
+      "TypeError",
+      "URIError",
+      "Uint16Array",
+      "Uint32Array",
+      "Uint8Array",
+      "Uint8ClampedArray",
+      "WeakMap",
+      "WeakRef",
+      "WeakSet",
+      "atob",
+      "btoa",
+      "decodeURI",
+      "decodeURIComponent",
+      "encodeURI",
+      "encodeURIComponent",
+      "escape",
+      "eval",
+      "gc",
+      "globalThis",
+      "isFinite",
+      "isNaN",
+      "parseFloat",
+      "parseInt",
+      "print",
+      "queueMicrotask",
+      "undefined",
+      "unescape"
+    ]
+  },
+  "staticHermesTypedDeclarations": {
+    "kind": "libhermes-runtime-declarations-plus-typed-arrays",
+    "globals": [
+      "$SHBuiltin",
+      "AggregateError",
+      "Array",
+      "ArrayBuffer",
+      "BigInt",
+      "BigInt64Array",
+      "BigUint64Array",
+      "Boolean",
+      "DataView",
+      "Date",
+      "Error",
+      "EvalError",
+      "Float16Array",
+      "Float32Array",
+      "Float64Array",
+      "Function",
+      "Hermes",
+      "HermesAsyncIteratorsInternal",
+      "HermesInternal",
+      "Infinity",
+      "Int16Array",
+      "Int32Array",
+      "Int8Array",
+      "JSON",
+      "Map",
+      "Math",
+      "NaN",
+      "Number",
+      "Object",
+      "Proxy",
+      "RangeError",
+      "ReferenceError",
+      "Reflect",
+      "RegExp",
+      "Set",
+      "String",
+      "Symbol",
+      "SyntaxError",
+      "TextEncoder",
+      "TypeError",
+      "URIError",
+      "Uint16Array",
+      "Uint32Array",
+      "Uint8Array",
+      "Uint8ClampedArray",
+      "WeakMap",
+      "WeakSet",
+      "Worker",
+      "decodeURI",
+      "decodeURIComponent",
+      "encodeURI",
+      "encodeURIComponent",
+      "escape",
+      "eval",
+      "gc",
+      "globalThis",
+      "isFinite",
+      "isNaN",
+      "parseFloat",
+      "parseInt",
+      "print",
+      "undefined",
+      "unescape"
+    ]
+  },
+  "reviewedAbsentGlobals": ["DOMException", "Intl", "URL", "URLSearchParams"],
+  "accessPolicy": {
+    "applicationGlobalFacade": "inventory-derived-extensible-null-prototype-immutable-builtins",
+    "applicationGlobalFacadeComputedAccess": "admitted",
+    "applicationGlobalFacadeFlow": "admitted",
+    "globalBindingWrites": "rejected",
+    "rawGlobalObjectFlow": "rejected"
+  },
+  "semantics": {
+    "$SHBuiltin": {
+      "class": "engine-internal",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "AggregateError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "ArrayBuffer": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "BigInt": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "BigInt64Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "BigUint64Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Boolean": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "DOMException": {
+      "class": "deterministic-web-like",
+      "provider": "shared-untyped-runtime-support",
+      "read": { "state": "admitted" }
+    },
+    "DataView": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Date": {
+      "class": "nondeterministic-time",
+      "provider": "target-adapter",
+      "read": { "state": "admitted", "restriction": "authenticated-date-subset" }
+    },
+    "Error": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "EvalError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "FinalizationRegistry": {
+      "class": "gc-observable",
+      "provider": "engine-runtime-untyped",
+      "read": { "state": "rejected" }
+    },
+    "Float16Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Float32Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Float64Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Function": {
+      "class": "dynamic-code",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "Hermes": {
+      "class": "engine-internal",
+      "provider": "typed-declaration-only",
+      "read": { "state": "rejected" }
+    },
+    "HermesAsyncIteratorsInternal": {
+      "class": "engine-internal",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "HermesInternal": {
+      "class": "engine-internal",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "Infinity": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Int16Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Int32Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Int8Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Intl": {
+      "class": "deterministic-ecmascript",
+      "provider": "shared-untyped-runtime-support",
+      "read": { "state": "admitted" }
+    },
+    "Iterator": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-runtime-untyped+typed-bridge",
+      "read": { "state": "admitted" }
+    },
+    "JSON": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Map": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Math": {
+      "class": "nondeterministic-random",
+      "provider": "engine-typed",
+      "read": { "state": "admitted", "restriction": "authenticated-math-subset" }
+    },
+    "NaN": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Number": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Object": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Promise": {
+      "class": "deterministic-ecmascript",
+      "provider": "target-adapter",
+      "read": { "state": "admitted" }
+    },
+    "Proxy": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "QuitError": {
+      "class": "host-authority",
+      "provider": "engine-runtime-untyped",
+      "read": { "state": "rejected" }
+    },
+    "RangeError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "ReferenceError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Reflect": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "RegExp": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Set": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "String": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Symbol": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "SyntaxError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "TextDecoder": {
+      "class": "deterministic-web-like",
+      "provider": "engine-runtime-untyped+typed-bridge",
+      "read": { "state": "admitted" }
+    },
+    "TextEncoder": {
+      "class": "deterministic-web-like",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "TimeoutError": {
+      "class": "host-authority",
+      "provider": "engine-runtime-untyped",
+      "read": { "state": "rejected" }
+    },
+    "TypeError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "URIError": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "URL": {
+      "class": "deterministic-web-like",
+      "provider": "shared-untyped-runtime-support",
+      "read": { "state": "admitted" }
+    },
+    "URLSearchParams": {
+      "class": "deterministic-web-like",
+      "provider": "shared-untyped-runtime-support",
+      "read": { "state": "admitted" }
+    },
+    "Uint16Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Uint32Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Uint8Array": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Uint8ClampedArray": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "WeakMap": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "WeakRef": {
+      "class": "gc-observable",
+      "provider": "engine-runtime-untyped",
+      "read": { "state": "rejected" }
+    },
+    "WeakSet": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "Worker": {
+      "class": "host-authority",
+      "provider": "typed-declaration-only",
+      "read": { "state": "rejected" }
+    },
+    "atob": {
+      "class": "deterministic-web-like",
+      "provider": "engine-runtime-untyped+typed-bridge",
+      "read": { "state": "admitted" }
+    },
+    "btoa": {
+      "class": "deterministic-web-like",
+      "provider": "engine-runtime-untyped+typed-bridge",
+      "read": { "state": "admitted" }
+    },
+    "decodeURI": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "decodeURIComponent": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "encodeURI": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "encodeURIComponent": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "escape": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "eval": {
+      "class": "dynamic-code",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "gc": { "class": "gc-observable", "provider": "engine-typed", "read": { "state": "rejected" } },
+    "globalThis": {
+      "class": "ambient-global-object",
+      "provider": "engine-typed",
+      "read": { "state": "rejected" }
+    },
+    "isFinite": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "isNaN": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "parseFloat": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "parseInt": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "print": {
+      "class": "host-authority",
+      "provider": "mediated-host",
+      "read": { "state": "rejected" }
+    },
+    "queueMicrotask": {
+      "class": "deterministic-web-like",
+      "provider": "engine-runtime-untyped+typed-bridge",
+      "read": { "state": "admitted" }
+    },
+    "undefined": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    },
+    "unescape": {
+      "class": "deterministic-ecmascript",
+      "provider": "engine-typed",
+      "read": { "state": "admitted" }
+    }
+  }
+}

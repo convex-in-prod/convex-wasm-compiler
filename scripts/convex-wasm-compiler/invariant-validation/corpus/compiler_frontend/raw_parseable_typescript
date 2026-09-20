@@ -1,0 +1,8 @@
+// invariant-validation:raw
+export const selected = query({
+  args: {},
+  handler: async (_ctx, args) => {
+    const { value = "🙂" } = args satisfies { value?: string };
+    return (value as string)!;
+  },
+});

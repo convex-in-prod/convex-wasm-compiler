@@ -1,0 +1,28 @@
+{
+  "contextReuseHardRules": ["module-state-write", "top-level-mutable-binding"],
+  "diagnosticCodes": ["top-level-mutable-binding", "module-state-write"],
+  "diagnostics": [
+    {
+      "code": "top-level-mutable-binding",
+      "dependencyChain": [
+        "convex/reachable_helper_global_mutation.ts#selected",
+        "convex/reachable_helper_global_mutation.helper.ts#nextValue"
+      ],
+      "file": "convex/reachable_helper_global_mutation.helper.ts"
+    },
+    {
+      "code": "module-state-write",
+      "dependencyChain": [
+        "convex/reachable_helper_global_mutation.ts#selected",
+        "convex/reachable_helper_global_mutation.helper.ts#nextValue"
+      ],
+      "file": "convex/reachable_helper_global_mutation.helper.ts"
+    }
+  ],
+  "eligible": false,
+  "loadedContextReuseHardRules": [
+    "convex/reachable_helper_global_mutation.helper.ts:module-state-write",
+    "convex/reachable_helper_global_mutation.helper.ts:top-level-mutable-binding"
+  ],
+  "operations": []
+}

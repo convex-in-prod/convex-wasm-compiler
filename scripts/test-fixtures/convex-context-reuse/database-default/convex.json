@@ -1,0 +1,11 @@
+{
+  "bundler": {
+    "experimentalContextReuse": {
+      "default": true,
+      "exclusions": {
+        "excluded.ts": "This database-UDF fixture models one explicitly reviewed temporary source exclusion.",
+        "notDatabase.ts": "This fixture exclusion is intentionally unused so the checker must reject it."
+      }
+    }
+  }
+}

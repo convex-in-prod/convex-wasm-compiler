@@ -1,0 +1,14 @@
+{
+  "eligible": true,
+  "operations": [
+    {
+      "index": "by_owner",
+      "indexConstraints": [{ "field": "owner", "operator": "eq", "valueSource": "owner" }],
+      "kind": "databaseIndexQuery",
+      "limit": null,
+      "order": "ascending",
+      "table": "items",
+      "terminal": "collect"
+    }
+  ]
+}

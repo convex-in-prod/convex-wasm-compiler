@@ -1,0 +1,9 @@
+{
+  "contextReuseHardRules": [],
+  "eligible": true,
+  "loadedContextReuseHardRules": [
+    "convex/unreferenced_global_mutation.unused.ts:module-state-write",
+    "convex/unreferenced_global_mutation.unused.ts:top-level-mutable-binding"
+  ],
+  "operations": []
+}

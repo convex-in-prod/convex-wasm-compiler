@@ -1,0 +1,94 @@
+{
+  "kind": "convex-context-reuse-reviewed-third-party-policy",
+  "schemaVersion": 1,
+  "surfaces": [
+    {
+      "id": "convex-helpers-pagination",
+      "fingerprints": ["f9bc24434119dae66e000124c8075d76101576e44fbfd62c799b42e12926aed7"],
+      "admission": {
+        "mode": "named-imports",
+        "exports": ["getPage"],
+        "reason": "The imported pagination surface is not limited to the reviewed getPage named import."
+      }
+    },
+    {
+      "id": "convex-helpers-stream-index-fields",
+      "fingerprints": ["e61e3e27064bce27ae6053974961260c57a4b854f743cd6e75ce4ec090263c5e"],
+      "admission": {
+        "mode": "named-imports",
+        "exports": ["getIndexFields"],
+        "reason": "The imported stream surface is not limited to the reviewed getIndexFields named import."
+      }
+    },
+    {
+      "id": "convex-helpers-validator-construction",
+      "fingerprints": ["69cb9545ea5724ac7108ed03557459d8e560847ac4f79f98eccc6617a40f5782"],
+      "admission": {
+        "mode": "named-imports",
+        "exports": ["addFieldsToValidator", "systemFields"],
+        "reason": "The imported validator surface is not limited to the reviewed addFieldsToValidator and systemFields named imports."
+      }
+    },
+    {
+      "id": "stateless",
+      "fingerprints": [
+        "31d42aefdec6078fefb8b4063b44a24b626b7119a8897e2b73ee1f5d7fd1465f",
+        "3f1aefe660a5eaedef8790a579c558597dcaa3f61018c0d0a49e32a5e71bc06b"
+      ],
+      "admission": {
+        "mode": "accept",
+        "reason": "The reviewed exact dependency closures contain only stateless runtime behavior."
+      }
+    },
+    {
+      "id": "zod",
+      "fingerprints": [
+        "0eb44446fd6106d86d3290d7f85b7278030f701f4a9fe0876fb66751e5ea870b",
+        "48cca9ed62ef3c27c770dbd0f3e20af950ae5b7c31cb47a65eb2e2e8ec518a02"
+      ],
+      "admission": {
+        "mode": "named-derived-members",
+        "imports": ["default", "z"],
+        "members": [
+          "NEVER",
+          "ZodError",
+          "ZodIssueCode",
+          "array",
+          "boolean",
+          "coerce",
+          "date",
+          "discriminatedUnion",
+          "enum",
+          "infer",
+          "ipv4",
+          "iso",
+          "literal",
+          "looseObject",
+          "null",
+          "number",
+          "object",
+          "preprocess",
+          "record",
+          "strictObject",
+          "string",
+          "toJSONSchema",
+          "tuple",
+          "undefined",
+          "union",
+          "unknown"
+        ],
+        "forbiddenDerivedMembers": ["describe", "meta", "register"],
+        "reason": "The imported schema surface is not limited to reviewed constructors, parsing, and local conversion APIs."
+      }
+    },
+    {
+      "id": "zod-converters",
+      "fingerprints": ["14f77f5e2ac37c7ea332ee94479c7449300225f25abe1d58e4db72d5d0376de3"],
+      "admission": {
+        "mode": "named-imports",
+        "exports": ["zodOutputToConvex", "zodToConvex"],
+        "reason": "The imported converter surface includes an API that can write package registry state."
+      }
+    }
+  ]
+}

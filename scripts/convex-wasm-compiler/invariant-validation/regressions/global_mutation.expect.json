@@ -1,0 +1,5 @@
+{
+  "diagnosticCodes": ["top-level-mutable-binding", "module-state-write"],
+  "eligible": false,
+  "operations": []
+}

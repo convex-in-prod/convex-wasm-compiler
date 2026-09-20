@@ -1,0 +1,6 @@
+{
+  "diagnosticCodes": ["unsupported-direct-promise-all"],
+  "eligible": false,
+  "forbiddenOperations": ["databaseGet", "databaseIndexQuery", "databasePatch"],
+  "operations": []
+}
