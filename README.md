@@ -45,6 +45,13 @@ Release binaries are native executables. Build and test macOS binaries on the
 matching Apple Silicon or Intel macOS host; build and test Linux binaries on the
 matching Linux host.
 
+Tagged releases publish the authenticated compiler and precompiler packages for
+all three supported hosts. The release workflow keeps the control manifests,
+package IDs, and native binaries together as immutable release assets. A
+downstream tool can therefore select a release by tag and verify the manifest
+and binary hashes before placing the package in its content-addressed cache.
+The repository does not require a downstream checkout to consume a release.
+
 The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 640 MiB, matching the self-hosted runtime artifact contract.
 Its AOT and engine-identity output paths must not already exist.
