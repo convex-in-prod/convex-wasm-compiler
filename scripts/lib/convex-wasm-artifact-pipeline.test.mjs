@@ -1132,14 +1132,27 @@ async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKin
 test("public artifact pipeline constructs and reuses a complete package", async (t) => {
   const fixture = await createFixture(t);
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  let launchedStaticHermesWithNode = false;
   fixture.options.resourceGuard = {
     kind: convexWasmBuildResourceGuardKind,
     launchPolicy,
     released: false,
-    runCommand: runBoundedNativeCommand,
+    runCommand: async (options) => {
+      const launcher = options.arguments.find((argument) =>
+        argument.endsWith("/run-convex-wasm-static-hermes-precompiler.mjs")
+      );
+      if (launcher !== undefined) {
+        const separator = options.arguments.indexOf("--");
+        assert.equal(options.arguments[separator + 1], process.execPath);
+        assert.equal(options.arguments[separator + 2], launcher);
+        launchedStaticHermesWithNode = true;
+      }
+      return await runBoundedNativeCommand(options);
+    },
     describeTermination: describeNativeCommandTermination,
   };
   const first = await compileConvexWasmArtifact(fixture.options);
+  assert.equal(launchedStaticHermesWithNode, true);
   const initialCommandCount = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
   const second = await compileConvexWasmArtifact(fixture.options);
   assert.equal(first.buildReport.package.cache, "miss");

@@ -6122,9 +6122,16 @@ async function runBoundedCommand(
     reportCommand === undefined
       ? identityOperationalArguments
       : identityOperationalArguments.slice(3);
+  // The phase PATH may intentionally exclude Node. Keep the authenticated launcher as the
+  // logical command, but execute it with the Node binary running this build.
+  const directCommand =
+    command.executable === STATIC_HERMES_PRECOMPILER_LAUNCHER ||
+    command.executable === PACKAGED_PRECOMPILER_LAUNCHER
+      ? { executable: process.execPath, arguments: [command.executable, ...operationalArguments] }
+      : { executable: command.executable, arguments: operationalArguments };
   const launchedCommand =
     readOnlyInputBoundary === undefined
-      ? { executable: command.executable, arguments: operationalArguments }
+      ? directCommand
       : {
           executable: readOnlyInputBoundary.bubblewrapExecutable,
           arguments: [
@@ -6154,8 +6161,8 @@ async function runBoundedCommand(
             "--chdir",
             cwd,
             "--",
-            command.executable,
-            ...operationalArguments,
+            directCommand.executable,
+            ...directCommand.arguments,
           ],
         };
   const timeArguments = [

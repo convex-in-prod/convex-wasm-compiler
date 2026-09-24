@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "bin": {
@@ -79,7 +79,7 @@
     "test:artifact-material": "node --test scripts/lib/convex-wasm-artifact-material.test.mjs scripts/lib/convex-wasm-native-duplicate-work.test.mjs scripts/lib/convex-wasm-static-hermes-c-bundle.test.mjs scripts/lib/convex-wasm-static-hermes-member-archive.test.mjs",
     "test:module-graph": "node --test scripts/lib/convex-context-reuse-cohort-identity.test.mjs scripts/lib/convex-deployed-runtime-identity.test.mjs scripts/lib/convex-wasm-preactivation-runtime-authority.test.mjs scripts/lib/convex-wasm-compiler-topology-witness.test.mjs scripts/lib/convex-wasm-contract-reader.test.mjs scripts/lib/convex-wasm-module-graph-cohort-contract.test.mjs scripts/lib/convex-wasm-module-graph-common-partition.test.mjs scripts/lib/convex-wasm-module-graph-contract.test.mjs scripts/lib/convex-wasm-module-graph-deployment-binding.test.mjs scripts/lib/convex-wasm-module-graph-membership.test.mjs scripts/lib/convex-wasm-module-graph-package.test.mjs scripts/lib/convex-wasm-module-graph-selector-sources.test.mjs scripts/lib/convex-wasm-native-symbol-identity.test.mjs scripts/lib/convex-wasm-official-output-chunk-contract.test.mjs scripts/lib/convex-wasm-official-output-cohort-schedule.test.mjs scripts/lib/convex-wasm-module-graph-planning.test.mjs scripts/lib/convex-wasm-output-closure.test.mjs scripts/lib/convex-wasm-physical-shard-planner.test.mjs scripts/lib/convex-wasm-selector-source.test.mjs scripts/lib/convex-wasm-v8-exclusions.test.mjs",
     "test:native-build": "node --test scripts/lib/convex-wasm-artifact-commands.test.mjs scripts/lib/convex-wasm-artifact-pipeline.test.mjs scripts/lib/convex-wasm-generated-c-build.test.mjs scripts/lib/convex-wasm-native-artifact-build.test.mjs scripts/lib/convex-wasm-native-command-runner.test.mjs scripts/lib/convex-wasm-native-object-build.test.mjs scripts/lib/convex-wasm-static-hermes-precompile-protocol.test.mjs scripts/lib/convex-wasm-static-hermes-stage.test.mjs scripts/run-convex-wasm-static-hermes-precompiler.test.mjs",
-    "test:native-scheduling": "node --test scripts/lib/convex-wasm-native-launch-scheduling.test.mjs",
+    "test:native-scheduling": "node --test scripts/lib/convex-wasm-native-launch-scheduling.test.mjs scripts/lib/convex-wasm-build-latency.test.mjs",
     "test:native-package-acquisition": "node --test scripts/lib/convex-wasm-native-package-acquisition.test.mjs scripts/lib/convex-wasm-native-release-selection.test.mjs",
     "test:lowering": "node --test scripts/lib/convex-wasm-lowering.test.mjs",
     "test:source-preparation": "node --test scripts/lib/convex-context-reuse-application-admission.test.mjs scripts/lib/convex-wasm-application-package-set.test.mjs scripts/lib/convex-wasm-compile-profile.test.mjs scripts/lib/convex-wasm-deployment-graph.test.mjs scripts/lib/convex-wasm-git-blob-material.test.mjs scripts/lib/convex-wasm-git-source-snapshot.test.mjs scripts/lib/convex-wasm-project-build-inputs.test.mjs scripts/lib/convex-wasm-registration-source-analysis.test.mjs scripts/lib/convex-wasm-source-envelope.test.mjs scripts/lib/convex-wasm-source-graph.test.mjs scripts/lib/convex-wasm-source-graph-snapshot.test.mjs scripts/lib/convex-wasm-source-graph-snapshot-cache.test.mjs",
