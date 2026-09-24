@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import {
   createFrozenGraphInputAuthority,
@@ -510,28 +510,8 @@ export async function inspectRuntimeContentHelper(path) {
   return { path: canonicalPath, sha256: identity.sha256, size: identity.size };
 }
 
-async function executeHelper({
-  externalDepsPackagePath,
-  externalDepsStorageKey,
-  helperPath,
-  sourcePackageOutputPath,
-  startPushPath,
-}) {
-  const arguments_ = [
-    "--start-push",
-    startPushPath,
-    "--source-package-output",
-    sourcePackageOutputPath,
-    ...(externalDepsPackagePath === undefined
-      ? []
-      : [
-          "--external-deps-package",
-          externalDepsPackagePath,
-          "--external-deps-storage-key",
-          externalDepsStorageKey,
-        ]),
-  ];
-  const child = spawn(helperPath, arguments_, { stdio: ["ignore", "pipe", "pipe"] });
+async function runHelperProcess(command, arguments_) {
+  const child = spawn(command, arguments_, { stdio: ["ignore", "pipe", "pipe"] });
   const stdout = [];
   let stdoutBytes = 0;
   let stderrBytes = 0;
@@ -579,6 +559,95 @@ async function executeHelper({
   } catch (error) {
     throw new Error("Convex Wasm preactivation runtime authority: helper returned invalid JSON", {
       cause: error,
+    });
+  }
+}
+
+async function executeHelper({
+  externalDepsPackagePath,
+  externalDepsStorageKey,
+  helperPath,
+  sourcePackageOutputPath,
+  startPushPath,
+}) {
+  return runHelperProcess(helperPath, [
+    "--start-push",
+    startPushPath,
+    "--source-package-output",
+    sourcePackageOutputPath,
+    ...(externalDepsPackagePath === undefined
+      ? []
+      : [
+          "--external-deps-package",
+          externalDepsPackagePath,
+          "--external-deps-storage-key",
+          externalDepsStorageKey,
+        ]),
+  ]);
+}
+
+export async function executeRuntimeContentHelperInBackendImage({
+  backendImageId,
+  externalDepsPackagePath,
+  externalDepsStorageKey,
+  sourcePackageOutputPath,
+  startPushPath,
+}) {
+  if (typeof backendImageId !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(backendImageId)) {
+    fail("backend image ID must be an immutable SHA-256 identity");
+  }
+  for (const [path, description] of [
+    [startPushPath, "start_push input"],
+    [sourcePackageOutputPath, "source-package output"],
+    ...(externalDepsPackagePath === undefined
+      ? []
+      : [[externalDepsPackagePath, "external dependency archive"]]),
+  ]) {
+    if (
+      typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path ||
+      /[:,\r\n]/u.test(path)
+    ) {
+      fail(`${description} must be a normalized absolute path without Docker mount delimiters`);
+    }
+  }
+  if (externalDepsPackagePath !== undefined && typeof externalDepsStorageKey !== "string") {
+    fail("external dependency storage key is missing");
+  }
+  if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+    fail("image-backed helper requires a Unix user identity");
+  }
+  const containerName = `convex-source-helper-${randomBytes(8).toString("hex")}`;
+  const arguments_ = [
+    "run", "--rm", "--name", containerName,
+    "--network", "none", "--read-only", "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges=true", "--memory", "1g",
+    "--cpus", "1", "--pids-limit", "64",
+    "--user", `${process.getuid()}:${process.getgid()}`,
+    "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
+    "--mount", `type=bind,src=${startPushPath},dst=/input/start-push.json,readonly`,
+    ...(externalDepsPackagePath === undefined
+      ? []
+      : ["--mount", `type=bind,src=${externalDepsPackagePath},dst=/input/external-deps.zip,readonly`]),
+    "--mount", `type=bind,src=${dirname(sourcePackageOutputPath)},dst=/output`,
+    "--entrypoint", "/convex/source_package_preactivation_authority",
+    backendImageId,
+    "--start-push", "/input/start-push.json",
+    "--source-package-output", `/output/${basename(sourcePackageOutputPath)}`,
+    ...(externalDepsPackagePath === undefined
+      ? []
+      : [
+          "--external-deps-package", "/input/external-deps.zip",
+          "--external-deps-storage-key", externalDepsStorageKey,
+        ]),
+  ];
+  try {
+    return await runHelperProcess("docker", arguments_);
+  } finally {
+    // A timed-out Docker client can leave its container running. The name is
+    // unique to this call, so removal cannot affect another authority run.
+    spawnSync("docker", ["rm", "--force", containerName], {
+      stdio: "ignore",
+      timeout: 10_000,
     });
   }
 }

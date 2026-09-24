@@ -913,8 +913,9 @@ export async function publishRuntimeContentProducerCertificate({
     await fs.rm(temporaryPath, { force: true, recursive: true });
   }
   if (existingEntry) {
-    // One producer identity can certify later source requests. Return the retained certificate,
-    // whose request fields name the conformance sample, and reject changed dependency material.
+    // One producer identity can certify later source requests, but a fresh backend can assign a
+    // different storage key or archive bytes to the same dependency set. Keep its new certificate
+    // for the caller without replacing the retained cache entry under this producer key.
     const retained = await materializeRuntimeContentProducerCertificate({
       cacheRoot,
       expectedIdentity: identity,
@@ -922,10 +923,9 @@ export async function publishRuntimeContentProducerCertificate({
     if (retained === undefined) {
       fail("runtime-content producer certificate disappeared after publication collision");
     }
-    if (canonicalJson(retained.externalDepsPackage) !== canonicalJson(externalDepsDescriptor)) {
-      fail("runtime-content producer dependency archive changed under the same producer identity");
-    }
-    return retained;
+    return canonicalJson(retained.externalDepsPackage) === canonicalJson(externalDepsDescriptor)
+      ? retained
+      : { ...certificate, cache: "uncached", cacheKey: identity.cacheKey };
   }
   return { ...certificate, cache: "miss", cacheKey: identity.cacheKey };
 }

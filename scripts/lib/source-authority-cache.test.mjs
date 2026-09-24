@@ -388,19 +388,18 @@ test("runtime-content producer certificates bind the backend, helper, dependenci
 
     const changedArchivePath = join(directory, "changed-external-deps-package.zip");
     await fs.writeFile(changedArchivePath, Buffer.from("different archive"), { mode: 0o600 });
-    await assert.rejects(
-      publishRuntimeContentProducerCertificate({
-        backendAuthoritySha256: "1".repeat(64),
-        cacheRoot,
-        expectedIdentity: identity,
-        externalDepsPackagePath: changedArchivePath,
-        externalDepsStorageKey: "external-deps-storage-key",
-        request: { sha256: "2".repeat(64), size: 66 },
-        runtimeContentSha256: "3".repeat(64),
-        sourcePackage: { sha256: "4".repeat(64), size: 77 },
-      }),
-      /dependency archive changed under the same producer identity/u
-    );
+    const changedArchiveCertificate = await publishRuntimeContentProducerCertificate({
+      backendAuthoritySha256: "1".repeat(64),
+      cacheRoot,
+      expectedIdentity: identity,
+      externalDepsPackagePath: changedArchivePath,
+      externalDepsStorageKey: "external-deps-storage-key",
+      request: { sha256: "2".repeat(64), size: 66 },
+      runtimeContentSha256: "3".repeat(64),
+      sourcePackage: { sha256: "4".repeat(64), size: 77 },
+    });
+    assert.equal(changedArchiveCertificate.cache, "uncached");
+    assert.notEqual(changedArchiveCertificate.certificateSha256, published.certificateSha256);
 
     const materializedPath = join(directory, "materialized-external-deps.zip");
     const evidenceOnly = await materializeRuntimeContentProducerCertificate({

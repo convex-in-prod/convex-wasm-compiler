@@ -13,6 +13,7 @@ import {
 import {
   convexRuntimeContentAlgorithm,
   createPreactivationRuntimeAuthority,
+  executeRuntimeContentHelperInBackendImage,
   inspectRuntimeContentHelper,
   normalizePreactivationHelperAuthority,
 } from "./convex-wasm-preactivation-runtime-authority.mjs";
@@ -463,4 +464,20 @@ test("runtime-content helper inspection authenticates a canonical owner-controll
       /canonical owner-controlled executable/u
     );
   });
+});
+
+test("image-backed helper rejects mutable image names and mount delimiters before Docker", async () => {
+  const input = {
+    backendImageId: `sha256:${"a".repeat(64)}`,
+    sourcePackageOutputPath: "/tmp/source-package.zip",
+    startPushPath: "/tmp/start-push.json",
+  };
+  await assert.rejects(
+    executeRuntimeContentHelperInBackendImage({ ...input, backendImageId: "backend:latest" }),
+    /immutable SHA-256 identity/u
+  );
+  await assert.rejects(
+    executeRuntimeContentHelperInBackendImage({ ...input, startPushPath: "/tmp/input,readonly=false" }),
+    /Docker mount delimiters/u
+  );
 });

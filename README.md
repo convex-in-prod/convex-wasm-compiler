@@ -220,49 +220,56 @@ docker build \
   -f self-hosted/docker-build/Dockerfile.backend .
 ```
 
-On a Linux host, obtain the immutable image ID and extract the helper from that
-same local image:
+Obtain the immutable image ID:
 
 ```sh
-mkdir -p .local
 backend_image_id=$(docker image inspect --format '{{.Id}}' patched-convex-backend)
-docker create --name convex-wasm-helper-export "$backend_image_id"
-docker cp convex-wasm-helper-export:/convex/source_package_preactivation_authority .local/source-package-authority
-docker rm convex-wasm-helper-export
-chmod 0700 .local/source-package-authority
 ```
 
-Set `sourceAuthority.backendImageId` to that image ID, and choose a new container
-name when one is already in use. The binary is not included unless
-the image was built with that option. For a macOS project, run the build and
-authority commands together in a compatible Linux environment, or build a
-matching host helper from the patched backend source. Configure the executable
-and producer certificate under `sourceAuthority`, then run:
+Set `sourceAuthority.backendImageId` to that image ID. Backend-report installs
+the embedded helper at `sourceAuthority.helper` when it is absent. On Linux, an
+image without the helper can use a matching host executable at that path; the
+authority command checks it against backend-produced output. On macOS, the
+image must include the helper. Authority checks its bytes and runs it inside
+that immutable image with no network access. Configure the helper path and
+producer certificate under `sourceAuthority`, then run:
 
 ```sh
-npx convex-wasm-authority --config convex-wasm.project.json \
+npx convex-wasm-backend-report --config convex-wasm.project.json \
   --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json
-```
-
-The command writes `source-package.zip` and `source-authority.json` beside the
-report. For a request with external Node dependencies, `sourceAuthority` also
-requires `externalDepsPackage` and `targetExternalDepsPackage` paths naming the
-matched archive and its admitted descriptor. Supply a genuine report from the
-matching patched backend's isolated source-package producer to establish the
-producer certificate in the same command:
-
-```sh
 npx convex-wasm-authority --config convex-wasm.project.json \
   --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json \
-  --backend-report .local/backend-source-package-report.json
+  --backend-report .cache/convex-wasm-work/build-.../backend-source-package-report.json
 ```
 
-The report must name the backend-produced authority, source package, and any
-external dependency archive. The command compares those files with output from
-the configured helper before caching the certificate. Without `--backend-report`,
-`producerCertificate` must already name a complete
+The first command runs the immutable patched backend image in a fresh local
+SQLite deployment on an isolated Docker network. It sends the build's verified
+complete source request, then reads the backend-produced source package and
+authority into owner-only files beside the artifact report. It requires a local
+Docker daemon and the pinned `alpine/socat` proxy image. It does not contact the
+configured production deployment. The second command compares that backend
+output with the helper extracted from the same image, writes
+`source-package.zip` and `source-authority.json` beside the artifact report,
+and caches the matching producer certificate. For a request with external Node
+dependencies, set `sourceAuthority.allowNodeDependencyEgress: true`; the
+dependency archive is written beside that build's artifact report. An explicit
+`sourceAuthority.externalDepsPackage` path overrides that location when needed.
+Set `targetExternalDepsPackage` to the admitted destination descriptor before
+publishing to a backend that needs the archive. The disposable
+backend receives temporary dependency egress only while `start_push` runs.
+The authority command atomically replaces the configured certificate with the
+latest certified sample when a fresh backend assigns a different dependency
+archive or storage key.
+If source analysis needs Convex environment variables, set
+`sourceAuthority.analysisEnvironment` to a current-user-owned mode-0600 file
+containing canonical JSON such as `{"AUTH_KEY":"test-value"}` followed by one
+newline. The backend-report command installs those variables only in its fresh
+disposable deployment before `start_push`; its report records their names and
+value digests, and the authority command checks the same file. Keep the file
+outside tracked source.
+Without `--backend-report`, `producerCertificate` must already name a complete
 `convex-runtime-content-producer-certificate-v1` file for that backend image and
-helper. This package does not supply a patched-backend helper or backend report.
+helper. This package does not supply the patched backend image or helper.
 
 The reusable certificate and authority-cache operations live in
 `scripts/lib/source-producer-conformance.mjs` and
@@ -341,6 +348,24 @@ generation before transferring only reachable payloads. It retains the
 destination's existing catalog entries, installs payloads before control files,
 and verifies the destination control-file hashes. Registry construction,
 backend readiness, and activation are separate operations.
+
+`selectedExports`, staged source, dependency policy, and the verified gate
+determine which routes and bytes can be compiled. `--publication shadow-only`
+or `--publication primary` controls which lane the local registry permits; it
+does not change the running backend's primary, shadow-sampling, or fallback
+settings. The backend operator selects those settings and activates an exact
+source/generation pair after transfer and readiness checks. Changing the live
+routing mode for the same accepted pair does not require rebuilding its
+artifacts.
+
+If the build cannot resolve the generated server module, run the installed
+Convex SDK's codegen against the project's configured backend and stage the
+generated source under its functions directory. If gate verification fails, run
+`convex-wasm-setup-gate` against the same `gateRoot` and policy before retrying.
+If source authority or binding rejects a report, first check that backend-report
+and authority both used the artifact report printed by the current build. The
+commands authenticate the complete request and source package, so an older
+report cannot stand in for it.
 
 ## Development
 

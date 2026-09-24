@@ -29,18 +29,21 @@ image that produced the configured authority helper.
    source again after any project edit before building.
 2. Install the pinned gate with `npx convex-wasm-setup-gate --gate-root
    .local/convex-wasm-gate --jobs 2`. The command builds native tools on the
-   first run. Set `sourceAuthority.helper` and
-   `sourceAuthority.producerCertificate` to material authenticated against the
-   same patched backend image, following the helper and certificate instructions
-   in the main README.
+   first run. The backend-report command installs `sourceAuthority.helper` from
+   the patched image named by `sourceAuthority.backendImageId` when it is absent.
+   On macOS, the authority command runs that helper inside the same image. The
+   backend-report and authority commands create the certificate at
+   `sourceAuthority.producerCertificate` as described in the main README.
 3. Run `npx convex-wasm-build --config convex-wasm.project.json`. Use the
    `artifactReport` path printed by that command in the following commands:
 
    ```sh
    ARTIFACT_REPORT=/absolute/path/printed/by/convex-wasm-build
+   npx convex-wasm-backend-report --config convex-wasm.project.json \
+     --artifact-report "$ARTIFACT_REPORT"
    npx convex-wasm-authority --config convex-wasm.project.json \
      --artifact-report "$ARTIFACT_REPORT" \
-     --backend-report .local/backend-source-package-report.json
+     --backend-report "$(dirname "$ARTIFACT_REPORT")/backend-source-package-report.json"
    npx convex-wasm-bind --config convex-wasm.project.json \
      --artifact-report "$ARTIFACT_REPORT" \
      --output .cache/deployment-v8.json
@@ -54,8 +57,8 @@ image that produced the configured authority helper.
    ```
 
 Replace the example `ARTIFACT_REPORT` value with the exact printed path. The
-backend report must come from the matching patched backend's isolated source
-package producer. The publisher creates a local registry. Have that backend
+backend-report command creates its report from a fresh disposable instance of
+the configured patched backend image. The publisher creates a local registry. Have that backend
 preflight the registry and separately arrange transfer, readiness, and
 activation; the publication command does not activate routes. For an execution
 check, activate the generation as a V8-primary shadow, invoke

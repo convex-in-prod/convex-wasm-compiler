@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { canonicalJson } from "./lib/convex-wasm-artifact-contract.mjs";
+import {
+  MAX_ANALYSIS_ENVIRONMENT_BYTES,
+  parseSyntheticAnalysisEnvironment,
+} from "./lib/convex-wasm-analysis-environment.mjs";
 import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
 import {
   readConvexWasmPrivateEvidence,
   readConvexWasmPrivateEvidenceJson,
 } from "./lib/convex-wasm-private-evidence.mjs";
 import { parseProjectConfig } from "./lib/convex-wasm-project-build-inputs.mjs";
+import { ensureRuntimeContentHelper } from "./backend-report.mjs";
 import {
   createPreactivationRuntimeAuthority,
   convexRuntimeContentAlgorithm,
+  executeRuntimeContentHelperInBackendImage,
   inspectRuntimeContentHelper,
 } from "./lib/convex-wasm-preactivation-runtime-authority.mjs";
 import {
@@ -35,12 +42,26 @@ async function writeProducerCertificate(path, certificate) {
     throw new Error("producer certificate directory must be a canonical current-user-owned mode-0700 directory");
   }
   const { cache: ignoredCache, cacheKey: ignoredCacheKey, ...payload } = certificate;
+  validateProducerCertificate(payload, certificate.identity, certificate.externalDepsPackage);
   const bytes = Buffer.from(`${canonicalJson(payload)}\n`);
+  const temporaryPath = join(directory, `.producer-certificate-${randomBytes(8).toString("hex")}`);
   try {
-    // Exclusive creation makes an existing certificate an explicit identity check.
-    await fs.writeFile(path, bytes, { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+    const handle = await fs.open(temporaryPath, "wx", 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporaryPath, path);
+    const directoryHandle = await fs.open(directory, "r");
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+  } finally {
+    await fs.rm(temporaryPath, { force: true });
   }
   const written = await readConvexWasmPrivateEvidenceJson(
     path,
@@ -68,18 +89,12 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
   ) {
     throw new Error("project artifact report lacks source-authority inputs");
   }
-  const [sourceEnvelope, startPush, helper, externalDepsPackage, targetExternalDepsPackage] =
+  const buildDirectory = dirname(artifactReportPath);
+  const [sourceEnvelope, startPush, helper, targetExternalDepsPackage] =
     await Promise.all([
       readConvexWasmPrivateEvidenceJson(report.sourceEnvelope.path, "project source envelope"),
       readConvexWasmPrivateEvidence(report.startPush.path, "project source request", 256 * 1024 * 1024),
       inspectRuntimeContentHelper(config.sourceAuthority.helperPath),
-      config.sourceAuthority.externalDepsPackagePath === undefined
-        ? Promise.resolve(null)
-        : readConvexWasmPrivateEvidence(
-            config.sourceAuthority.externalDepsPackagePath,
-            "source-package external dependencies",
-            256 * 1024 * 1024
-          ),
       config.sourceAuthority.targetExternalDepsPackagePath === undefined
         ? Promise.resolve(undefined)
         : readConvexWasmPrivateEvidenceJson(
@@ -99,13 +114,25 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
   if (!Array.isArray(request.nodeDependencies)) {
     throw new Error("project source request lacks Node dependency declarations");
   }
+  if (request.nodeDependencies.length === 0 && config.sourceAuthority.externalDepsPackagePath !== undefined) {
+    throw new Error("an external dependency output was configured without Node dependencies");
+  }
+  const externalDepsPackagePath = request.nodeDependencies.length === 0
+    ? undefined
+    : (config.sourceAuthority.externalDepsPackagePath ?? join(buildDirectory, "external-deps-package.zip"));
+  const externalDepsPackage = externalDepsPackagePath === undefined
+    ? null
+    : await readConvexWasmPrivateEvidence(
+        externalDepsPackagePath,
+        "source-package external dependencies",
+        256 * 1024 * 1024
+      );
   const producerIdentity = createRuntimeContentProducerCacheIdentity({
     backendImageId: config.sourceAuthority.backendImageId,
     dependencies: request.nodeDependencies.map(({ name, version }) => ({ package: name, version })),
     helper: { sha256: helper.sha256, size: helper.size },
     runtimeContentAlgorithm: convexRuntimeContentAlgorithm,
   });
-  const buildDirectory = dirname(artifactReportPath);
   const status = await fs.lstat(buildDirectory);
   if (
     !status.isDirectory() ||
@@ -115,13 +142,51 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
   ) {
     throw new Error("project build directory must be a canonical current-user-owned mode-0700 directory");
   }
+  let createAuthority = createPreactivationRuntimeAuthority;
+  if (process.platform === "darwin") {
+    const scratch = await fs.mkdtemp(join(buildDirectory, ".image-helper-"));
+    try {
+      const imageHelper = await ensureRuntimeContentHelper({
+        backendImageId: config.sourceAuthority.backendImageId,
+        buildDirectory,
+        helperPath: join(scratch, "source-package-helper"),
+      });
+      if (imageHelper.sha256 !== helper.sha256 || imageHelper.size !== helper.size) {
+        throw new Error("configured source-package helper differs from the backend image");
+      }
+    } finally {
+      await fs.rm(scratch, { force: true, recursive: true });
+    }
+    createAuthority = (input) => createPreactivationRuntimeAuthority(input, {
+      executeHelperImplementation: (arguments_) => executeRuntimeContentHelperInBackendImage({
+        ...arguments_,
+        backendImageId: config.sourceAuthority.backendImageId,
+      }),
+    });
+  }
   if (backendReportPath !== undefined) {
     const backend = (
       await readConvexWasmPrivateEvidenceJson(backendReportPath, "backend source-package report")
     ).value;
+    const analysisEnvironment = config.sourceAuthority.analysisEnvironmentPath === undefined
+      ? undefined
+      : parseSyntheticAnalysisEnvironment((await readConvexWasmPrivateEvidence(
+          config.sourceAuthority.analysisEnvironmentPath,
+          "analysis environment",
+          MAX_ANALYSIS_ENVIRONMENT_BYTES
+        )).bytes);
     if (
       backend.backendImageId !== config.sourceAuthority.backendImageId ||
       backend.sourceScope !== "current-complete-frozen-graph-v1" ||
+      (analysisEnvironment === undefined
+        ? backend.environmentScope !== "fresh-empty" ||
+          backend.analysisEnvironmentFileSha256 !== undefined ||
+          backend.analysisEnvironmentNames !== undefined ||
+          backend.analysisEnvironmentValueSha256 !== undefined
+        : backend.environmentScope !== "synthetic-analysis-only" ||
+          backend.analysisEnvironmentFileSha256 !== analysisEnvironment.evidence.fileSha256 ||
+          canonicalJson(backend.analysisEnvironmentNames) !== canonicalJson(analysisEnvironment.evidence.names) ||
+          canonicalJson(backend.analysisEnvironmentValueSha256) !== canonicalJson(analysisEnvironment.evidence.values)) ||
       backend.requestSha256 !== startPush.sha256 ||
       backend.requestSize !== startPush.size ||
       backend.sourceEnvelopeFileSha256 !== sourceEnvelope.sha256 ||
@@ -173,7 +238,7 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
               throw new Error("source-package helper changed during backend conformance");
             }
           },
-          createPreactivationAuthority: createPreactivationRuntimeAuthority,
+          createPreactivationAuthority: createAuthority,
           publishCertificate: publishRuntimeContentProducerCertificate,
           readMaterial: async (path, maximumBytes, description) =>
             (await readConvexWasmPrivateEvidence(path, description, maximumBytes)).bytes,
@@ -197,9 +262,9 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
   );
   const authorityOutputPath = join(buildDirectory, "source-authority.json");
   const sourcePackageOutputPath = join(buildDirectory, "source-package.zip");
-  const result = await createPreactivationRuntimeAuthority({
+  const result = await createAuthority({
     authorityOutputPath,
-    externalDepsPackagePath: config.sourceAuthority.externalDepsPackagePath,
+    externalDepsPackagePath,
     helper,
     producerCertificate: certificate,
     sourceEnvelope: sourceEnvelope.value,

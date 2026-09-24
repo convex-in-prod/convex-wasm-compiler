@@ -9,6 +9,7 @@ import {
   parseProjectConfig,
   prepareConvexWasmProjectBuildInputs,
 } from "./lib/convex-wasm-project-build-inputs.mjs";
+import { inspectFrozenStartPushRequest } from "./lib/convex-frozen-deployment-request.mjs";
 import { buildConvexWasmProjectPackage } from "./lib/convex-wasm-project-package.mjs";
 import { createConvexWasmProjectStartPush } from "./lib/convex-wasm-project-start-push.mjs";
 import { normalizeConvexWasmNativeLaunchPolicy } from "./lib/convex-wasm-native-launch-scheduling.mjs";
@@ -37,6 +38,12 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
       projectRoot: config.projectRoot,
       signal,
     });
+    const frozenRequest = inspectFrozenStartPushRequest({
+      graphSession: built.graphSession,
+      inventory: inputs.inventory,
+      requestBytes: await fs.readFile(startPush.path),
+      sourceAuthority: built.sourceEnvelope,
+    });
     const artifacts = built.artifact.artifacts ?? [built.artifact];
     const runtimeModules = [
       ...new Set(built.sourceEnvelope.selectedRoutes.map(({ runtimeModulePath }) => runtimeModulePath)),
@@ -53,6 +60,7 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
       cohortContracts: built.cohortContracts,
       cohortSchedule: built.schedule,
       contextReusePolicy: built.graphSession.contextReusePolicy,
+      frozenRequestEvidence: frozenRequest.evidence,
       graphs: artifacts.map(({ graphManifest, package: packageRecord }) => ({
         graphManifestSha256: graphManifest.graphManifestSha256,
         packagePath: packageRecord.path,

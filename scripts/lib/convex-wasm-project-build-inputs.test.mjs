@@ -46,9 +46,25 @@ test("project build inputs resolve a selected release and staged source authorit
     backendImageId: `sha256:${"a".repeat(64)}`,
     helperPath: "/project/backend/source-authority",
     producerCertificatePath: "/project/config/producer.json",
+    analysisEnvironmentPath: undefined,
     externalDepsPackagePath: undefined,
     targetExternalDepsPackagePath: undefined,
   });
+  config.sourceAuthority.analysisEnvironment = "./analysis-environment.json";
+  assert.equal(
+    parseProjectConfig(config, configPath).sourceAuthority.analysisEnvironmentPath,
+    "/project/config/analysis-environment.json"
+  );
+  config.sourceAuthority.allowNodeDependencyEgress = true;
+  assert.equal(
+    parseProjectConfig(config, configPath).sourceAuthority.allowNodeDependencyEgress,
+    true
+  );
+  config.sourceAuthority.allowNodeDependencyEgress = "true";
+  assert.throws(
+    () => parseProjectConfig(config, configPath),
+    /sourceAuthority.allowNodeDependencyEgress must be a boolean/u
+  );
 });
 
 test("project build inputs require one native package source and staged paths", () => {

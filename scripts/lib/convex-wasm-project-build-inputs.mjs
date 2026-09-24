@@ -163,10 +163,16 @@ export function parseProjectConfig(value, configPath) {
       ? undefined
       : requireKeys(
           config.sourceAuthority,
-          ["backendImageId", "helper", "producerCertificate", "externalDepsPackage", "targetExternalDepsPackage"],
+          ["backendImageId", "helper", "producerCertificate", "externalDepsPackage", "targetExternalDepsPackage", "allowNodeDependencyEgress", "analysisEnvironment"],
           ["backendImageId", "helper", "producerCertificate"],
           "sourceAuthority"
         );
+  if (
+    sourceAuthority?.allowNodeDependencyEgress !== undefined &&
+    typeof sourceAuthority.allowNodeDependencyEgress !== "boolean"
+  ) {
+    throw new Error("sourceAuthority.allowNodeDependencyEgress must be a boolean");
+  }
   const jobs = requirePositiveInteger(config.jobs, "jobs");
   const aotWorkers = requirePositiveInteger(config.aotWorkers, "aotWorkers");
   if (aotWorkers > jobs) {
@@ -198,11 +204,18 @@ export function parseProjectConfig(value, configPath) {
               sourceAuthority.backendImageId,
               "sourceAuthority.backendImageId"
             ),
+            ...(sourceAuthority.allowNodeDependencyEgress === undefined
+              ? {}
+              : { allowNodeDependencyEgress: sourceAuthority.allowNodeDependencyEgress }),
             helperPath: path(sourceAuthority.helper, "sourceAuthority.helper"),
             producerCertificatePath: path(
               sourceAuthority.producerCertificate,
               "sourceAuthority.producerCertificate"
             ),
+            analysisEnvironmentPath:
+              sourceAuthority.analysisEnvironment === undefined
+                ? undefined
+                : path(sourceAuthority.analysisEnvironment, "sourceAuthority.analysisEnvironment"),
             externalDepsPackagePath:
               sourceAuthority.externalDepsPackage === undefined
                 ? undefined
