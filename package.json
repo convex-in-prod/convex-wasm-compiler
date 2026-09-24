@@ -3,24 +3,67 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": [
+    "scripts/*.mjs",
+    "scripts/*.json",
+    "scripts/lib/**",
+    "scripts/vendor/**",
+    "scripts/test-fixtures/convex-wasm-runtime-surface/static-hermes-global-probe.js",
+    "scripts/test-fixtures/convex-wasm-request-envelope/canonical-vectors.json",
+    "!scripts/**/*.test.mjs",
+    "!scripts/smoke-*.mjs",
+    "!scripts/check-javascript.mjs",
+    "!scripts/build-native-release.mjs",
+    "!scripts/create-native-*.mjs",
+    "!scripts/package-convex-wasm-*.mjs"
+  ],
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
-    "@babel/parser": "7.29.7"
+    "@babel/parser": "7.29.7",
+    "domexception": "4.0.0",
+    "esbuild": "0.27.0",
+    "whatwg-url": "14.2.0",
+    "typescript": "6.0.3",
+    "zod": "^4.4.3"
   },
   "scripts": {
     "build:compiler": "cargo build --locked --release --manifest-path scripts/convex-wasm-compiler/Cargo.toml",
     "build:precompiler": "cargo build --locked --release --manifest-path scripts/convex-wasm-precompiler/Cargo.toml",
+    "acquire:native": "node scripts/acquire-convex-wasm-native-release.mjs",
+    "build:project": "node scripts/build-convex-wasm.mjs",
+    "cache:maintain": "node scripts/maintain-convex-wasm-cache.mjs",
+    "matrix:authority": "node scripts/create-convex-wasm-request-envelope-evidence-authority.mjs",
+    "matrix:codec": "node scripts/run-convex-wasm-committed-value-codec-matrix.mjs",
+    "matrix:request": "node scripts/run-convex-wasm-request-envelope-matrix.mjs",
     "check:js": "node scripts/check-javascript.mjs",
+    "check:runtime-support": "node scripts/generate-convex-wasm-runtime-support.mjs",
     "package:compiler": "node scripts/package-convex-wasm-compiler.mjs",
     "package:precompiler": "node scripts/package-convex-wasm-precompiler.mjs",
     "release:native": "node scripts/build-native-release.mjs",
     "smoke:compiler": "node scripts/smoke-packaged-convex-wasm-compiler.mjs",
     "smoke:precompiler": "node scripts/smoke-packaged-convex-wasm-precompiler.mjs",
-    "test": "npm run test:compiler && npm run test:precompiler && npm run test:invariants",
+    "verify:source-to-aot": "node scripts/verify-convex-wasm-source-to-aot.mjs",
+    "test": "npm run test:compiler && npm run test:precompiler && npm run test:invariants && npm run test:runtime-support && npm run test:runtime-policy && npm run test:artifact-material && npm run test:module-graph && npm run test:native-build && npm run test:native-scheduling && npm run test:native-package-acquisition && npm run test:lowering && npm run test:matrices && npm run test:source-preparation && npm run test:cache-layout && npm run test:cache-retention && npm run test:producer-identity",
+    "test:matrices": "node --test scripts/lib/convex-wasm-committed-value-codec-matrix.test.mjs scripts/lib/convex-wasm-committed-value-codec-report.test.mjs scripts/lib/convex-wasm-request-envelope-matrix.test.mjs scripts/lib/convex-wasm-request-envelope-matrix-shermes.test.mjs scripts/lib/convex-wasm-request-envelope-report.test.mjs",
+    "test:runtime-support": "node --test scripts/lib/convex-wasm-runtime-support.test.mjs",
+    "test:runtime-policy": "node --test scripts/lib/convex-wasm-artifact-contract.test.mjs scripts/lib/convex-wasm-intrinsic-hardening.test.mjs scripts/lib/convex-wasm-runtime-api-blocker-reconciliation.test.mjs scripts/lib/convex-wasm-runtime-surface.test.mjs scripts/lib/convex-wasm-static-hermes-engine-globals.test.mjs",
+    "test:artifact-material": "node --test scripts/lib/convex-wasm-artifact-material.test.mjs scripts/lib/convex-wasm-native-duplicate-work.test.mjs scripts/lib/convex-wasm-static-hermes-c-bundle.test.mjs scripts/lib/convex-wasm-static-hermes-member-archive.test.mjs",
+    "test:module-graph": "node --test scripts/lib/convex-context-reuse-cohort-identity.test.mjs scripts/lib/convex-deployed-runtime-identity.test.mjs scripts/lib/convex-wasm-compiler-topology-witness.test.mjs scripts/lib/convex-wasm-contract-reader.test.mjs scripts/lib/convex-wasm-module-graph-cohort-contract.test.mjs scripts/lib/convex-wasm-module-graph-common-partition.test.mjs scripts/lib/convex-wasm-module-graph-contract.test.mjs scripts/lib/convex-wasm-module-graph-deployment-binding.test.mjs scripts/lib/convex-wasm-module-graph-membership.test.mjs scripts/lib/convex-wasm-module-graph-package.test.mjs scripts/lib/convex-wasm-module-graph-selector-sources.test.mjs scripts/lib/convex-wasm-native-symbol-identity.test.mjs scripts/lib/convex-wasm-official-output-chunk-contract.test.mjs scripts/lib/convex-wasm-official-output-cohort-schedule.test.mjs scripts/lib/convex-wasm-module-graph-planning.test.mjs scripts/lib/convex-wasm-output-closure.test.mjs scripts/lib/convex-wasm-physical-shard-planner.test.mjs scripts/lib/convex-wasm-selector-source.test.mjs scripts/lib/convex-wasm-v8-exclusions.test.mjs",
+    "test:native-build": "node --test scripts/lib/convex-wasm-artifact-commands.test.mjs scripts/lib/convex-wasm-artifact-pipeline.test.mjs scripts/lib/convex-wasm-generated-c-build.test.mjs scripts/lib/convex-wasm-native-artifact-build.test.mjs scripts/lib/convex-wasm-native-command-runner.test.mjs scripts/lib/convex-wasm-native-object-build.test.mjs scripts/lib/convex-wasm-static-hermes-precompile-protocol.test.mjs scripts/lib/convex-wasm-static-hermes-stage.test.mjs scripts/run-convex-wasm-static-hermes-precompiler.test.mjs",
+    "test:native-scheduling": "node --test scripts/lib/convex-wasm-native-launch-scheduling.test.mjs",
+    "test:native-package-acquisition": "node --test scripts/lib/convex-wasm-native-package-acquisition.test.mjs scripts/lib/convex-wasm-native-release-selection.test.mjs",
+    "test:lowering": "node --test scripts/lib/convex-wasm-lowering.test.mjs",
+    "test:source-preparation": "node --test scripts/lib/convex-context-reuse-application-admission.test.mjs scripts/lib/convex-wasm-application-package-set.test.mjs scripts/lib/convex-wasm-compile-profile.test.mjs scripts/lib/convex-wasm-deployment-graph.test.mjs scripts/lib/convex-wasm-git-blob-material.test.mjs scripts/lib/convex-wasm-git-source-snapshot.test.mjs scripts/lib/convex-wasm-project-build-inputs.test.mjs scripts/lib/convex-wasm-registration-source-analysis.test.mjs scripts/lib/convex-wasm-source-envelope.test.mjs scripts/lib/convex-wasm-source-graph.test.mjs scripts/lib/convex-wasm-source-graph-snapshot.test.mjs scripts/lib/convex-wasm-source-graph-snapshot-cache.test.mjs",
+    "test:cache-layout": "node --test scripts/lib/convex-wasm-artifact-cache-entry.test.mjs scripts/lib/convex-wasm-artifact-stage.test.mjs scripts/lib/convex-wasm-cache-layout.test.mjs scripts/lib/convex-wasm-private-cache.test.mjs scripts/lib/convex-wasm-private-evidence.test.mjs scripts/lib/convex-wasm-runtime-header-snapshot-cache.test.mjs",
+    "test:cache-retention": "node --test scripts/lib/convex-wasm-cache-lock.test.mjs scripts/lib/convex-wasm-cache-retention.test.mjs scripts/maintain-convex-wasm-cache.test.mjs",
+    "test:producer-identity": "node --test scripts/lib/convex-wasm-producer-identity.test.mjs",
     "test:compiler": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/Cargo.toml",
     "test:invariants": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/invariant-validation/Cargo.toml",
     "test:precompiler": "cargo test --locked --manifest-path scripts/convex-wasm-precompiler/Cargo.toml"
+  },
+  "devDependencies": {
+    "convex": "https://convex-in-prod.github.io/packages/convex/b84ea0f70be09575fbf4f6136b285d5681387ccf/convex.tgz"
   }
 }

@@ -135,6 +135,7 @@ export async function createPackagedCompilerSmokeRequest({ entryPath, exportName
     kind: "convex-wasm-compiler-batch-request",
     commonGraph: {
       kind: "convex-wasm-esbuild-graph",
+      functionsRoot: "convex",
       metafile: {
         inputs: {
           [entryPath]: {

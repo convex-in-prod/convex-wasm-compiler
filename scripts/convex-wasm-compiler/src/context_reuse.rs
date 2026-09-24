@@ -207,6 +207,7 @@ impl ContextModuleSummary {
 struct ContextInput {
     kind: String,
     repo_root: PathBuf,
+    functions_root: String,
     roots: Vec<String>,
     // Standalone callers omit this; build callers supply every reviewed runtime input.
     source_texts: Option<BTreeMap<String, String>>,
@@ -5694,6 +5695,7 @@ pub(crate) fn build_source_inventory(
     modules: &mut BTreeMap<String, LoadedModule>,
     phases: &mut PhaseMeasurements,
     registration_adapter: &RegistrationAdapterMaterial,
+    functions_root: &str,
 ) -> Result<SourceInventory> {
     let mut functions = Vec::new();
     let mut diagnostics = Vec::new();
@@ -5732,6 +5734,7 @@ pub(crate) fn build_source_inventory(
                 entry,
                 registration,
                 registration_adapter,
+                functions_root,
             )?
             else {
                 continue;
@@ -5777,6 +5780,7 @@ pub(crate) fn build_source_inventory(
                         &registration_module,
                         &registration,
                         registration_adapter,
+                        functions_root,
                     )? {
                         Some(udf_kind) => functions.push(InventoryFunction {
                             entry_path: entry.clone(),
@@ -5882,6 +5886,7 @@ fn inventory_registration_kind(
     module_key: &str,
     registration: &ContextRegistration,
     registration_adapter: &RegistrationAdapterMaterial,
+    functions_root: &str,
 ) -> Result<Option<String>> {
     let module = modules
         .get(module_key)
@@ -5931,7 +5936,7 @@ fn inventory_registration_kind(
     else {
         return Ok(None);
     };
-    if is_resolved_generated_server_module(&resolved) {
+    if is_resolved_generated_server_module(&resolved, functions_root) {
         return Ok(generated_server_udf_kind(&binding.imported).map(str::to_string));
     }
     let matches = registration_adapter
@@ -6202,8 +6207,16 @@ fn analyze_context_reuse_with_encoding_and_policy(
     policy_fingerprint: &str,
 ) -> Result<ContextOutput> {
     ensure!(
-        !input.roots.is_empty(),
-        "context-reuse roots must not be empty"
+        crate::is_normalized_functions_root(&input.functions_root)
+            && input.roots.contains(&input.functions_root),
+        "context-reuse functions root must be normalized and included in the reviewed roots"
+    );
+    ensure!(
+        input
+            .entry_candidates
+            .iter()
+            .all(|entry| entry.starts_with(&format!("{}/", input.functions_root))),
+        "context-reuse entries must be under the configured functions root"
     );
     let modules = preload_context_modules(
         input,
@@ -6985,6 +6998,7 @@ fn generated_source_diagnostics(
                 entry,
                 registration,
                 &input.registration_adapter,
+                &input.functions_root,
             )? {
                 source_functions.insert(
                     (entry.clone(), registration.export_name.clone()),
@@ -7017,6 +7031,7 @@ fn generated_source_diagnostics(
                 &registration_module,
                 &registration,
                 &input.registration_adapter,
+                &input.functions_root,
             )? {
                 source_functions.insert(
                     (entry.clone(), reexport.export_name.clone()),
@@ -7978,6 +7993,7 @@ mod tests {
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
             source_texts: None,
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates,
             database_functions: Vec::new(),
@@ -8109,6 +8125,7 @@ mod tests {
         let input = ContextInput {
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string()],
             source_texts: Some(BTreeMap::from([(entry.clone(), source.to_string())])),
             entry_candidates: vec![entry.clone()],
@@ -8265,6 +8282,7 @@ mod tests {
             &mut modules,
             &mut PhaseMeasurements::default(),
             &input.registration_adapter,
+            &input.functions_root,
         )
         .unwrap();
         assert!(inventory.diagnostics.is_empty());
@@ -11046,6 +11064,7 @@ void value;
         let input = ContextInput {
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string(), "shared".to_string()],
             source_texts: None,
             entry_candidates: vec![entry.to_string()],
@@ -11584,6 +11603,7 @@ load("./not-a-static-edge");
             source_texts: None,
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: Vec::new(),
             database_functions: Vec::new(),
@@ -11834,6 +11854,7 @@ load("./not-a-static-edge");
             source_texts: None,
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: Vec::new(),
             database_functions: Vec::new(),
@@ -11986,6 +12007,7 @@ void value;
             source_texts: None,
             kind: INPUT_KIND.to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: vec![entry.to_string()],
             database_functions: Vec::new(),
@@ -12289,15 +12311,15 @@ void value;
         let root = TemporaryDirectory(
             env::temp_dir().join(format!("convex-source-inventory-alias-{unique}")),
         );
-        let alias_entry = "convex/alias.ts";
-        let direct_entry = "convex/direct.ts";
-        let local_entry = "convex/local.ts";
-        let custom_entry = "convex/customEntry.ts";
-        let object_entry = "convex/object.ts";
-        let reexport_entry = "convex/reexport.ts";
-        let wrapper_entry = "convex/wrapper.ts";
-        let generated_server = "convex/_generated/server.js";
-        let custom_builder = "convex/custom.ts";
+        let alias_entry = "functions/alias.ts";
+        let direct_entry = "functions/direct.ts";
+        let local_entry = "functions/local.ts";
+        let custom_entry = "functions/customEntry.ts";
+        let object_entry = "functions/object.ts";
+        let reexport_entry = "functions/reexport.ts";
+        let wrapper_entry = "functions/wrapper.ts";
+        let generated_server = "functions/_generated/server.js";
+        let custom_builder = "functions/custom.ts";
         for (module, source) in [
             (
                 alias_entry,
@@ -12456,6 +12478,7 @@ export const unsupportedWrapper = wrapped({ args: {}, handler: async () => null 
             &mut BTreeMap::new(),
             &mut PhaseMeasurements::default(),
             &test_registration_adapter_material(),
+            "functions",
         )
         .unwrap();
 
@@ -12551,6 +12574,7 @@ export const unsupportedWrapper = wrapped({ args: {}, handler: async () => null 
             &mut BTreeMap::new(),
             &mut PhaseMeasurements::default(),
             &test_registration_adapter_material(),
+            "convex",
         )
         .unwrap();
         let value = serde_json::to_value(inventory).unwrap();

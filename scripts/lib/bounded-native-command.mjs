@@ -22,6 +22,9 @@ export function describeNativeCommandTermination(termination) {
   if (termination.kind === "timeout") {
     return `exceeded the ${termination.timeoutMs} ms timeout`;
   }
+  if (termination.kind === "aborted") {
+    return "was cancelled";
+  }
   throw new Error(`unsupported native command termination ${termination.kind}`);
 }
 
@@ -32,6 +35,7 @@ export async function runBoundedNativeCommand({
   environment,
   maxOutputBytes,
   operation,
+  signal,
   timeoutMs,
 }) {
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
@@ -39,6 +43,19 @@ export async function runBoundedNativeCommand({
   }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`${operation} timeout must be a positive safe integer`);
+  }
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new Error(`${operation} cancellation signal must be an AbortSignal`);
+  }
+  if (signal?.aborted) {
+    return {
+      code: null,
+      output: Buffer.alloc(0),
+      signal: null,
+      stderr: Buffer.alloc(0),
+      stdout: Buffer.alloc(0),
+      termination: { kind: "aborted" },
+    };
   }
 
   const child = spawn(command, argumentsList, {
@@ -83,6 +100,9 @@ export async function runBoundedNativeCommand({
   };
   child.stdout.on("data", append(stdout));
   child.stderr.on("data", append(stderr));
+  const onAbort = () => stop({ kind: "aborted" });
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const timeout = setTimeout(() => stop({ kind: "timeout", timeoutMs }), timeoutMs);
   timeout.unref();
   try {
@@ -100,5 +120,6 @@ export async function runBoundedNativeCommand({
   } finally {
     clearTimeout(timeout);
     clearTimeout(forcedTermination);
+    signal?.removeEventListener("abort", onAbort);
   }
 }

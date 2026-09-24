@@ -265,7 +265,7 @@ pub(super) fn apply_registration_adapter(
         return Ok(None);
     }
     let resolved = resolve_graph_import(graph, &graph.entry_path, &binding.specifier)?;
-    if is_resolved_generated_server_module(&resolved)
+    if is_resolved_generated_server_module(&resolved, &graph.functions_root)
         && let Some(udf_kind) = generated_server_udf_kind(&binding.imported)
     {
         // The imported generated-server name is the authority. Local aliases have no registration

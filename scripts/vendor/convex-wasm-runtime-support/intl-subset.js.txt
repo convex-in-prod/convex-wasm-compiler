@@ -1,0 +1,733 @@
+const DATE_LIMIT_MS = 8640000000000000;
+const DAY_MS = 86400000;
+const DAY_SECONDS = 86400;
+const DEFAULT_LOCALE = "en-US";
+const localeNames = Object.freeze({
+  en: "en",
+  "en-ca": "en-CA",
+  "en-us": "en-US",
+  "ru-ru": "ru-RU",
+});
+const englishWeekdays = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+const russianWeekdays = Object.freeze(["вс", "пн", "вт", "ср", "чт", "пт", "сб"]);
+const dateTimeSlots = new WeakMap();
+const numberSlots = new WeakMap();
+
+function modulo(value, divisor) {
+  const remainder = value % divisor;
+  return remainder < 0 ? remainder + divisor : remainder;
+}
+
+function floorDiv(value, divisor) {
+  return Math.floor(value / divisor);
+}
+
+function civilFromDays(daysSinceEpoch) {
+  const shifted = daysSinceEpoch + 719468;
+  const era = floorDiv(shifted, 146097);
+  const dayOfEra = shifted - era * 146097;
+  const yearOfEra = floorDiv(
+    dayOfEra - floorDiv(dayOfEra, 1460) + floorDiv(dayOfEra, 36524) - floorDiv(dayOfEra, 146096),
+    365
+  );
+  let year = yearOfEra + era * 400;
+  const dayOfYear =
+    dayOfEra - (365 * yearOfEra + floorDiv(yearOfEra, 4) - floorDiv(yearOfEra, 100));
+  const monthPrime = floorDiv(5 * dayOfYear + 2, 153);
+  const day = dayOfYear - floorDiv(153 * monthPrime + 2, 5) + 1;
+  const month = monthPrime + (monthPrime < 10 ? 3 : -9);
+  if (month <= 2) year += 1;
+  return { day, month, year };
+}
+
+function daysFromCivil(year, month, day) {
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = floorDiv(adjustedYear, 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const monthPrime = month + (month > 2 ? -3 : 9);
+  const dayOfYear = floorDiv(153 * monthPrime + 2, 5) + day - 1;
+  const dayOfEra = yearOfEra * 365 + floorDiv(yearOfEra, 4) - floorDiv(yearOfEra, 100) + dayOfYear;
+  return era * 146097 + dayOfEra - 719468;
+}
+
+function daysInMonth(year, month) {
+  if (month === 2) {
+    return modulo(year, 4) === 0 && (modulo(year, 100) !== 0 || modulo(year, 400) === 0) ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+function canonicalLocale(locales) {
+  let requested;
+  if (locales === undefined) return DEFAULT_LOCALE;
+  if (typeof locales === "string") {
+    requested = [locales];
+  } else if (Array.isArray(locales)) {
+    requested = locales;
+  } else {
+    throw new TypeError("Intl locales must be a string or an array of strings");
+  }
+  if (requested.length === 0) return DEFAULT_LOCALE;
+  for (const locale of requested) {
+    if (typeof locale !== "string") throw new TypeError("Intl locale entries must be strings");
+    const canonical = localeNames[locale.toLowerCase()];
+    if (canonical === undefined) {
+      throw new RangeError(`Unsupported Intl locale ${JSON.stringify(locale)}`);
+    }
+  }
+  return localeNames[requested[0].toLowerCase()];
+}
+
+function optionsObject(options) {
+  if (options === undefined) return {};
+  if (options === null) throw new TypeError("Intl options cannot be null");
+  return Object(options);
+}
+
+function rejectPresentOptions(options, names, family) {
+  for (const name of names) {
+    if (options[name] !== undefined) {
+      throw new RangeError(`Unsupported Intl.${family} option ${name}`);
+    }
+  }
+}
+
+function requireOptionValue(value, allowed, family, name) {
+  if (value !== undefined && !allowed.includes(value)) {
+    throw new RangeError(`Unsupported Intl.${family} ${name} value ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function offsetTimeZone(value) {
+  // ECMA-402 OffsetTimeZoneIdentifier accepts signed two-digit hours with optional minutes.
+  const match = /^([+-])(\d{2})(?::?(\d{2}))?$/u.exec(value);
+  if (match === null) return undefined;
+  const hours = Number(match[2]);
+  const minutes = match[3] === undefined ? 0 : Number(match[3]);
+  if (hours > 23 || minutes > 59) return undefined;
+  const offsetSeconds = (hours * 60 + minutes) * 60;
+  return {
+    canonical:
+      offsetSeconds === 0
+        ? "+00:00"
+        : `${match[1]}${match[2]}:${String(minutes).padStart(2, "0")}`,
+    offsetSeconds: match[1] === "-" ? -offsetSeconds : offsetSeconds,
+  };
+}
+
+function parseSignedTime(text, description) {
+  const match = /^([+-]?)(\d{1,3})(?::(\d{1,2}))?(?::(\d{1,2}))?$/u.exec(text);
+  if (match === null) throw new Error(`Invalid pinned timezone ${description}`);
+  const sign = match[1] === "-" ? -1 : 1;
+  const minutes = match[3] === undefined ? 0 : Number(match[3]);
+  const seconds = match[4] === undefined ? 0 : Number(match[4]);
+  if (minutes > 59 || seconds > 59) throw new Error(`Invalid pinned timezone ${description}`);
+  return sign * (Number(match[2]) * 3600 + minutes * 60 + seconds);
+}
+
+function parsePosixName(text, cursor) {
+  if (text[cursor] === "<") {
+    const end = text.indexOf(">", cursor + 1);
+    if (end === -1) throw new Error("Invalid pinned POSIX timezone name");
+    return { cursor: end + 1, name: text.slice(cursor + 1, end) };
+  }
+  const match = /^[A-Za-z]{3,}/u.exec(text.slice(cursor));
+  if (match === null) throw new Error("Invalid pinned POSIX timezone name");
+  return { cursor: cursor + match[0].length, name: match[0] };
+}
+
+function parsePosixOffset(text, cursor, description) {
+  const match = /^[+-]?\d{1,3}(?::\d{1,2})?(?::\d{1,2})?/u.exec(text.slice(cursor));
+  if (match === null) throw new Error(`Invalid pinned POSIX ${description}`);
+  return {
+    cursor: cursor + match[0].length,
+    offsetSeconds: -parseSignedTime(match[0], description),
+  };
+}
+
+function parsePosixRule(text) {
+  const match = /^M(\d{1,2})\.(\d)\.(\d)(?:\/(.+))?$/u.exec(text);
+  if (match === null) throw new Error("Pinned timezone uses an unsupported POSIX transition rule");
+  const month = Number(match[1]);
+  const week = Number(match[2]);
+  const weekday = Number(match[3]);
+  if (month < 1 || month > 12 || week < 1 || week > 5 || weekday > 6) {
+    throw new Error("Pinned timezone has an invalid POSIX transition rule");
+  }
+  return {
+    month,
+    seconds: match[4] === undefined ? 7200 : parseSignedTime(match[4], "transition time"),
+    week,
+    weekday,
+  };
+}
+
+function parsePosixFooter(text) {
+  if (text.length === 0) return null;
+  const standardName = parsePosixName(text, 0);
+  const standard = parsePosixOffset(text, standardName.cursor, "standard offset");
+  if (standard.cursor === text.length) {
+    return Object.freeze({
+      daylightOffsetSeconds: null,
+      standardOffsetSeconds: standard.offsetSeconds,
+    });
+  }
+  const daylightName = parsePosixName(text, standard.cursor);
+  let cursor = daylightName.cursor;
+  let daylightOffsetSeconds = standard.offsetSeconds + 3600;
+  if (text[cursor] !== ",") {
+    const daylight = parsePosixOffset(text, cursor, "daylight offset");
+    daylightOffsetSeconds = daylight.offsetSeconds;
+    cursor = daylight.cursor;
+  }
+  if (text[cursor] !== ",") throw new Error("Pinned timezone is missing POSIX transition rules");
+  const rules = text.slice(cursor + 1).split(",");
+  if (rules.length !== 2) throw new Error("Pinned timezone has invalid POSIX transition rules");
+  return Object.freeze({
+    daylightOffsetSeconds,
+    end: Object.freeze(parsePosixRule(rules[1])),
+    standardOffsetSeconds: standard.offsetSeconds,
+    start: Object.freeze(parsePosixRule(rules[0])),
+  });
+}
+
+function transitionUtcSeconds(year, rule, previousOffsetSeconds) {
+  const firstWeekday = modulo(daysFromCivil(year, rule.month, 1) + 4, 7);
+  let day = 1 + modulo(rule.weekday - firstWeekday, 7) + (rule.week - 1) * 7;
+  const maximumDay = daysInMonth(year, rule.month);
+  if (day > maximumDay) day -= 7;
+  return daysFromCivil(year, rule.month, day) * DAY_SECONDS + rule.seconds - previousOffsetSeconds;
+}
+
+function posixOffsetAt(timestampSeconds, footer) {
+  if (footer === null || footer.daylightOffsetSeconds === null) {
+    return footer === null ? undefined : footer.standardOffsetSeconds;
+  }
+  const approximateLocalDays = floorDiv(
+    timestampSeconds + footer.standardOffsetSeconds,
+    DAY_SECONDS
+  );
+  const year = civilFromDays(approximateLocalDays).year;
+  const start = transitionUtcSeconds(year, footer.start, footer.standardOffsetSeconds);
+  const end = transitionUtcSeconds(year, footer.end, footer.daylightOffsetSeconds);
+  const inDaylight =
+    start < end
+      ? timestampSeconds >= start && timestampSeconds < end
+      : timestampSeconds >= start || timestampSeconds < end;
+  return inDaylight ? footer.daylightOffsetSeconds : footer.standardOffsetSeconds;
+}
+
+export function createIntl(timeZoneData) {
+  if (timeZoneData.kind !== "convex-wasm-iana-tzdata-2026c-v1") {
+    throw new Error("Pinned Convex Wasm timezone data kind changed");
+  }
+  const offsets = Object.freeze(
+    timeZoneData.offsets.split("|").map((offset) => Number.parseInt(offset, 36))
+  );
+  const packedZones = Object.create(null);
+  const canonicalByUppercase = Object.create(null);
+  for (const packedZone of timeZoneData.zones) {
+    const delimiter = packedZone.indexOf("|");
+    const name = packedZone.slice(0, delimiter);
+    packedZones[name] = packedZone.slice(delimiter + 1);
+    canonicalByUppercase[name.toUpperCase()] = name;
+  }
+  for (const packedAlias of timeZoneData.aliases) {
+    const delimiter = packedAlias.indexOf("|");
+    const alias = packedAlias.slice(0, delimiter);
+    const canonical = packedAlias.slice(delimiter + 1);
+    if (packedZones[canonical] === undefined) {
+      throw new Error("Pinned timezone alias has no canonical zone");
+    }
+    canonicalByUppercase[alias.toUpperCase()] = canonical;
+  }
+  Object.freeze(packedZones);
+  Object.freeze(canonicalByUppercase);
+  const parsedZoneCache = Object.create(null);
+
+  function canonicalTimeZone(value) {
+    const requested = value === undefined ? "UTC" : String(value);
+    const offset = offsetTimeZone(requested);
+    if (offset !== undefined) return offset.canonical;
+    const canonical = canonicalByUppercase[requested.toUpperCase()];
+    if (canonical === undefined) {
+      throw new RangeError(`Invalid time zone ${JSON.stringify(requested)}`);
+    }
+    return canonical === "Etc/UTC" || canonical === "Etc/GMT" ? "UTC" : canonical;
+  }
+
+  function parseZone(canonical) {
+    const dataName = canonical === "UTC" ? "Etc/UTC" : canonical;
+    let zone = parsedZoneCache[dataName];
+    if (zone !== undefined) return zone;
+    const fields = packedZones[dataName].split("|");
+    const footerField = fields.pop();
+    if (!footerField.startsWith("~")) throw new Error("Pinned timezone footer is missing");
+    const periods = fields.map((field) => {
+      const delimiter = field.indexOf(",");
+      const timestamp = field.slice(0, delimiter);
+      const offsetIndex = Number.parseInt(field.slice(delimiter + 1), 36);
+      if (offsets[offsetIndex] === undefined) throw new Error("Pinned timezone offset is missing");
+      return Object.freeze({
+        offsetSeconds: offsets[offsetIndex],
+        startSeconds: timestamp === "" ? -Infinity : Number.parseInt(timestamp, 36),
+      });
+    });
+    zone = Object.freeze({
+      footer: parsePosixFooter(footerField.slice(1)),
+      periods: Object.freeze(periods),
+    });
+    parsedZoneCache[dataName] = zone;
+    return zone;
+  }
+
+  function offsetAt(canonical, timestampMs) {
+    const fixedOffset = offsetTimeZone(canonical);
+    if (fixedOffset !== undefined) return fixedOffset.offsetSeconds;
+    const zone = parseZone(canonical);
+    const timestampSeconds = timestampMs / 1000;
+    const lastPeriod = zone.periods[zone.periods.length - 1];
+    if (timestampSeconds > lastPeriod.startSeconds) {
+      const footerOffset = posixOffsetAt(timestampSeconds, zone.footer);
+      if (footerOffset !== undefined) return footerOffset;
+    }
+    let low = 0;
+    let high = zone.periods.length;
+    while (low + 1 < high) {
+      const middle = floorDiv(low + high, 2);
+      if (zone.periods[middle].startSeconds <= timestampSeconds) low = middle;
+      else high = middle;
+    }
+    return zone.periods[low].offsetSeconds;
+  }
+
+  function dateFields(timestampMs, timeZone) {
+    const localMs = timestampMs + offsetAt(timeZone, timestampMs) * 1000;
+    const days = floorDiv(localMs, DAY_MS);
+    const withinDayMs = localMs - days * DAY_MS;
+    const civil = civilFromDays(days);
+    return {
+      day: civil.day,
+      hour: floorDiv(withinDayMs, 3600000),
+      minute: floorDiv(withinDayMs % 3600000, 60000),
+      month: civil.month,
+      second: floorDiv(withinDayMs % 60000, 1000),
+      weekday: modulo(days + 4, 7),
+      year: civil.year,
+    };
+  }
+
+  function normalizeDateTimeOptions(locale, rawOptions) {
+    const options = optionsObject(rawOptions);
+    rejectPresentOptions(
+      options,
+      [
+        "dateStyle",
+        "dayPeriod",
+        "era",
+        "formatMatcher",
+        "fractionalSecondDigits",
+        "localeMatcher",
+        "timeStyle",
+        "timeZoneName",
+      ],
+      "DateTimeFormat"
+    );
+    const calendar = requireOptionValue(
+      options.calendar,
+      ["gregory"],
+      "DateTimeFormat",
+      "calendar"
+    );
+    const numberingSystem = requireOptionValue(
+      options.numberingSystem,
+      ["latn"],
+      "DateTimeFormat",
+      "numberingSystem"
+    );
+    const components = {
+      day: requireOptionValue(options.day, ["numeric", "2-digit"], "DateTimeFormat", "day"),
+      hour: requireOptionValue(options.hour, ["numeric", "2-digit"], "DateTimeFormat", "hour"),
+      minute: requireOptionValue(
+        options.minute,
+        ["numeric", "2-digit"],
+        "DateTimeFormat",
+        "minute"
+      ),
+      month: requireOptionValue(options.month, ["numeric", "2-digit"], "DateTimeFormat", "month"),
+      second: requireOptionValue(
+        options.second,
+        ["numeric", "2-digit"],
+        "DateTimeFormat",
+        "second"
+      ),
+      weekday: requireOptionValue(options.weekday, ["short"], "DateTimeFormat", "weekday"),
+      year: requireOptionValue(options.year, ["numeric", "2-digit"], "DateTimeFormat", "year"),
+    };
+    if (Object.values(components).every((value) => value === undefined)) {
+      components.year = "numeric";
+      components.month = "numeric";
+      components.day = "numeric";
+    }
+    const requestedHourCycle = requireOptionValue(
+      options.hourCycle,
+      ["h23"],
+      "DateTimeFormat",
+      "hourCycle"
+    );
+    const requestedHour12 = options.hour12;
+    if (requestedHour12 !== undefined && Boolean(requestedHour12)) {
+      throw new RangeError("Intl.DateTimeFormat hour12=true is unsupported");
+    }
+    if (
+      components.hour !== undefined &&
+      requestedHourCycle === undefined &&
+      requestedHour12 === undefined
+    ) {
+      throw new RangeError("Intl.DateTimeFormat hours require hour12=false or hourCycle=h23");
+    }
+    const completeDate =
+      components.year !== undefined &&
+      components.month !== undefined &&
+      components.day !== undefined;
+    if (completeDate && (locale === "en-CA" || locale === "ru-RU")) {
+      components.month = "2-digit";
+      components.day = "2-digit";
+    }
+    if (components.hour !== undefined) {
+      if (
+        locale !== "ru-RU" ||
+        components.minute !== undefined ||
+        components.second !== undefined
+      ) {
+        components.hour = "2-digit";
+      }
+      if (components.minute !== undefined) components.minute = "2-digit";
+      if (components.second !== undefined) components.second = "2-digit";
+    }
+    return {
+      calendar: calendar === undefined ? "gregory" : calendar,
+      components: Object.freeze(components),
+      hour12: components.hour === undefined ? undefined : false,
+      hourCycle: components.hour === undefined ? undefined : "h23",
+      locale,
+      numberingSystem: numberingSystem === undefined ? "latn" : numberingSystem,
+      timeZone: canonicalTimeZone(options.timeZone),
+    };
+  }
+
+  function numberPart(value, style) {
+    const text = String(value);
+    if (style === "2-digit" && text.length < 2) return `0${text}`;
+    return text;
+  }
+
+  function dateTimeParts(slots, input) {
+    const converted = input === undefined ? Date.now() : Number(input);
+    if (!Number.isFinite(converted) || Math.abs(converted) > DATE_LIMIT_MS) {
+      throw new RangeError("Invalid time value");
+    }
+    const timestampMs = Math.trunc(converted);
+    const fields = dateFields(timestampMs, slots.timeZone);
+    const components = slots.components;
+    const parts = [];
+    const dateParts = [];
+    const timeParts = [];
+    const hasCalendarDate =
+      components.year !== undefined ||
+      components.month !== undefined ||
+      components.day !== undefined;
+    if (components.weekday !== undefined) {
+      parts.push({
+        type: "weekday",
+        value: (slots.locale === "ru-RU" ? russianWeekdays : englishWeekdays)[fields.weekday],
+      });
+      if (hasCalendarDate) parts.push({ type: "literal", value: ", " });
+      else if (
+        components.hour !== undefined ||
+        components.minute !== undefined ||
+        components.second !== undefined
+      ) {
+        parts.push({ type: "literal", value: " " });
+      }
+    }
+    const dateOrder =
+      slots.locale === "en-CA"
+        ? ["year", "month", "day"]
+        : slots.locale === "ru-RU"
+          ? ["day", "month", "year"]
+          : ["month", "day", "year"];
+    const dateSeparator = slots.locale === "en-CA" ? "-" : slots.locale === "ru-RU" ? "." : "/";
+    for (const name of dateOrder) {
+      if (components[name] === undefined) continue;
+      if (dateParts.length !== 0) dateParts.push({ type: "literal", value: dateSeparator });
+      let value = fields[name];
+      if (name === "year") value = value <= 0 ? 1 - value : value;
+      let formatted = numberPart(value, components[name]);
+      if (name === "year" && components.year === "2-digit") {
+        formatted = String(value % 100).padStart(2, "0");
+      }
+      dateParts.push({ type: name, value: formatted });
+    }
+    for (const name of ["hour", "minute", "second"]) {
+      if (components[name] === undefined) continue;
+      if (timeParts.length !== 0) timeParts.push({ type: "literal", value: ":" });
+      timeParts.push({ type: name, value: numberPart(fields[name], components[name]) });
+    }
+    parts.push(...dateParts);
+    if (dateParts.length !== 0 && timeParts.length !== 0) {
+      parts.push({ type: "literal", value: ", " });
+    }
+    parts.push(...timeParts);
+    return parts;
+  }
+
+  function DateTimeFormat(locales, options) {
+    if (!(this instanceof DateTimeFormat)) return new DateTimeFormat(locales, options);
+    const locale = canonicalLocale(locales);
+    dateTimeSlots.set(this, normalizeDateTimeOptions(locale, options));
+  }
+
+  Object.defineProperty(DateTimeFormat.prototype, "format", {
+    configurable: true,
+    get() {
+      const slots = dateTimeSlots.get(this);
+      if (slots === undefined)
+        throw new TypeError("Intl.DateTimeFormat format receiver is invalid");
+      if (slots.boundFormat === undefined) {
+        Object.defineProperty(slots, "boundFormat", {
+          value: (input) =>
+            dateTimeParts(slots, input)
+              .map((part) => part.value)
+              .join(""),
+        });
+      }
+      return slots.boundFormat;
+    },
+  });
+  Object.defineProperty(DateTimeFormat.prototype, "formatToParts", {
+    configurable: true,
+    value(input) {
+      const slots = dateTimeSlots.get(this);
+      if (slots === undefined) {
+        throw new TypeError("Intl.DateTimeFormat formatToParts receiver is invalid");
+      }
+      return dateTimeParts(slots, input);
+    },
+    writable: true,
+  });
+  Object.defineProperty(DateTimeFormat.prototype, "resolvedOptions", {
+    configurable: true,
+    value() {
+      const slots = dateTimeSlots.get(this);
+      if (slots === undefined) {
+        throw new TypeError("Intl.DateTimeFormat resolvedOptions receiver is invalid");
+      }
+      const resolved = {
+        locale: slots.locale,
+        calendar: slots.calendar,
+        numberingSystem: slots.numberingSystem,
+        timeZone: slots.timeZone,
+      };
+      if (slots.hourCycle !== undefined) {
+        resolved.hourCycle = slots.hourCycle;
+        resolved.hour12 = slots.hour12;
+      }
+      for (const name of ["weekday", "year", "month", "day", "hour", "minute", "second"]) {
+        if (slots.components[name] !== undefined) resolved[name] = slots.components[name];
+      }
+      return resolved;
+    },
+    writable: true,
+  });
+
+  function normalizeNumberOptions(locale, rawOptions) {
+    const options = optionsObject(rawOptions);
+    rejectPresentOptions(
+      options,
+      [
+        "compactDisplay",
+        "currency",
+        "currencyDisplay",
+        "currencySign",
+        "maximumSignificantDigits",
+        "minimumSignificantDigits",
+        "roundingIncrement",
+        "roundingMode",
+        "roundingPriority",
+        "scale",
+        "signDisplay",
+        "trailingZeroDisplay",
+        "unit",
+        "unitDisplay",
+      ],
+      "NumberFormat"
+    );
+    requireOptionValue(options.style, ["decimal"], "NumberFormat", "style");
+    requireOptionValue(options.notation, ["standard"], "NumberFormat", "notation");
+    requireOptionValue(options.numberingSystem, ["latn"], "NumberFormat", "numberingSystem");
+    if (options.minimumIntegerDigits !== undefined && Number(options.minimumIntegerDigits) !== 1) {
+      throw new RangeError("Intl.NumberFormat minimumIntegerDigits must be 1");
+    }
+    if (
+      options.useGrouping !== undefined &&
+      options.useGrouping !== true &&
+      options.useGrouping !== "auto"
+    ) {
+      throw new RangeError("Intl.NumberFormat useGrouping must remain enabled");
+    }
+    if (options.maximumFractionDigits === undefined) {
+      throw new RangeError("Intl.NumberFormat maximumFractionDigits must be 0 or 2");
+    }
+    const maximumFractionDigits = Number(options.maximumFractionDigits);
+    const minimumFractionDigits =
+      options.minimumFractionDigits === undefined ? 0 : Number(options.minimumFractionDigits);
+    if (
+      ![0, 2].includes(minimumFractionDigits) ||
+      ![0, 2].includes(maximumFractionDigits) ||
+      minimumFractionDigits > maximumFractionDigits
+    ) {
+      throw new RangeError("Intl.NumberFormat fraction digits must be 0 or 2 in ascending order");
+    }
+    return { locale, maximumFractionDigits, minimumFractionDigits };
+  }
+
+  function incrementDecimalDigits(digits) {
+    const values = digits.split("");
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      if (values[index] !== "9") {
+        values[index] = String(Number(values[index]) + 1);
+        return values.join("");
+      }
+      values[index] = "0";
+    }
+    return `1${values.join("")}`;
+  }
+
+  function decimalMagnitude(value) {
+    const text = value.toString();
+    const exponentIndex = text.indexOf("e");
+    const coefficient = exponentIndex === -1 ? text : text.slice(0, exponentIndex);
+    const exponent = exponentIndex === -1 ? 0 : Number(text.slice(exponentIndex + 1));
+    const decimalIndex = coefficient.indexOf(".");
+    return {
+      decimalPosition: (decimalIndex === -1 ? coefficient.length : decimalIndex) + exponent,
+      digits: coefficient.replace(".", ""),
+    };
+  }
+
+  function roundedDecimal(value, maximumFractionDigits) {
+    const magnitude = decimalMagnitude(value);
+    const retainedDigits = magnitude.decimalPosition + maximumFractionDigits;
+    let scaled;
+    if (retainedDigits < 0) {
+      scaled = "0";
+    } else if (retainedDigits === 0) {
+      scaled = magnitude.digits[0] >= "5" ? "1" : "0";
+    } else {
+      scaled = magnitude.digits.slice(0, retainedDigits).padEnd(retainedDigits, "0");
+      if (magnitude.digits.length > retainedDigits && magnitude.digits[retainedDigits] >= "5") {
+        scaled = incrementDecimalDigits(scaled);
+      }
+    }
+    if (maximumFractionDigits === 0) return { fraction: "", integer: scaled };
+    const padded = scaled.padStart(maximumFractionDigits + 1, "0");
+    return {
+      fraction: padded.slice(-maximumFractionDigits),
+      integer: padded.slice(0, -maximumFractionDigits),
+    };
+  }
+
+  function groupInteger(integer, separator) {
+    let grouped = "";
+    for (let index = 0; index < integer.length; index += 1) {
+      if (index !== 0 && (integer.length - index) % 3 === 0) grouped += separator;
+      grouped += integer[index];
+    }
+    return grouped;
+  }
+
+  function formatNumber(slots, input) {
+    const numeric = typeof input === "bigint" ? input : Number(input);
+    const russian = slots.locale === "ru-RU";
+    if (typeof numeric === "number") {
+      if (Number.isNaN(numeric)) return russian ? "не число" : "NaN";
+      if (numeric === Infinity) return "∞";
+      if (numeric === -Infinity) return "-∞";
+    }
+    const negative = numeric < 0 || (numeric === 0 && 1 / numeric === -Infinity);
+    const absolute = negative ? -numeric : numeric;
+    let decimal;
+    if (typeof absolute === "bigint") {
+      decimal = { fraction: "0".repeat(slots.maximumFractionDigits), integer: absolute.toString() };
+    } else {
+      decimal = roundedDecimal(absolute, slots.maximumFractionDigits);
+    }
+    while (
+      decimal.fraction.length > slots.minimumFractionDigits &&
+      decimal.fraction.endsWith("0")
+    ) {
+      decimal.fraction = decimal.fraction.slice(0, -1);
+    }
+    const grouped = groupInteger(decimal.integer, russian ? " " : ",");
+    const fraction =
+      decimal.fraction.length === 0 ? "" : `${russian ? "," : "."}${decimal.fraction}`;
+    return `${negative ? "-" : ""}${grouped}${fraction}`;
+  }
+
+  function NumberFormat(locales, options) {
+    if (!(this instanceof NumberFormat)) return new NumberFormat(locales, options);
+    const locale = canonicalLocale(locales);
+    numberSlots.set(this, normalizeNumberOptions(locale, options));
+  }
+
+  Object.defineProperty(NumberFormat.prototype, "format", {
+    configurable: true,
+    get() {
+      const slots = numberSlots.get(this);
+      if (slots === undefined) throw new TypeError("Intl.NumberFormat format receiver is invalid");
+      if (slots.boundFormat === undefined) {
+        Object.defineProperty(slots, "boundFormat", {
+          value: (input) => formatNumber(slots, input),
+        });
+      }
+      return slots.boundFormat;
+    },
+  });
+  Object.defineProperty(NumberFormat.prototype, "resolvedOptions", {
+    configurable: true,
+    value() {
+      const slots = numberSlots.get(this);
+      if (slots === undefined) {
+        throw new TypeError("Intl.NumberFormat resolvedOptions receiver is invalid");
+      }
+      return {
+        locale: slots.locale,
+        numberingSystem: "latn",
+        style: "decimal",
+        minimumIntegerDigits: 1,
+        minimumFractionDigits: slots.minimumFractionDigits,
+        maximumFractionDigits: slots.maximumFractionDigits,
+        useGrouping: "auto",
+        notation: "standard",
+        signDisplay: "auto",
+        roundingIncrement: 1,
+        roundingMode: "halfExpand",
+        roundingPriority: "auto",
+        trailingZeroDisplay: "auto",
+      };
+    },
+    writable: true,
+  });
+
+  Object.defineProperty(DateTimeFormat.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: "Intl.DateTimeFormat",
+  });
+  Object.defineProperty(NumberFormat.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: "Intl.NumberFormat",
+  });
+  return { DateTimeFormat, NumberFormat };
+}

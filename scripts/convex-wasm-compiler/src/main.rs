@@ -146,7 +146,9 @@ use source_graph::{
     is_admitted_module_path, is_dependency_adapter_module_path, resolve_graph_import,
     source_fingerprint, source_graph_fingerprint, validate_scheduler_function_references,
 };
-pub(crate) use source_graph::{generated_server_udf_kind, is_resolved_generated_server_module};
+pub(crate) use source_graph::{
+    generated_server_udf_kind, is_normalized_functions_root, is_resolved_generated_server_module,
+};
 
 const COMPILER_SCHEMA: &str = "convex-wasm-compiler-output";
 const MODULE_SUMMARY_SCHEMA: &str = "convex-wasm-module-summary";
@@ -206,6 +208,7 @@ impl EffectExecutionMode {
 struct GraphInput {
     kind: String,
     repo_root: PathBuf,
+    functions_root: String,
     entry_path: String,
     export_name: String,
     toolchain: Toolchain,
@@ -1293,6 +1296,13 @@ fn main() -> Result<()> {
         graph.kind == "convex-wasm-esbuild-graph",
         "unsupported graph kind {}",
         graph.kind
+    );
+    ensure!(
+        is_normalized_functions_root(&graph.functions_root)
+            && graph
+                .entry_path
+                .starts_with(&format!("{}/", graph.functions_root)),
+        "source graph entry must be under its configured functions root"
     );
     let assumptions = graph
         .assumptions

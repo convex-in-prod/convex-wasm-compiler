@@ -23,8 +23,9 @@ use super::diagnostic_census::{
 };
 use super::{
     CompilerModeOutput, CompilerOutput, EffectExecutionMode, EsbuildMetafile, GeneratedSourceMode,
-    GraphInput, PhaseMeasurements, Toolchain, compile_export, preload_compiler_modules,
-    process_memory_kib, prune_and_log_module_summary_cache, serialized_json_size,
+    GraphInput, PhaseMeasurements, Toolchain, compile_export, is_normalized_functions_root,
+    preload_compiler_modules, process_memory_kib, prune_and_log_module_summary_cache,
+    serialized_json_size,
 };
 
 pub(super) const BATCH_REQUEST_KIND: &str = "convex-wasm-compiler-batch-request";
@@ -104,6 +105,7 @@ pub(super) enum BatchProtocol {
 pub(super) struct BatchCommonGraph {
     pub(super) kind: String,
     pub(super) repo_root: PathBuf,
+    pub(super) functions_root: String,
     pub(super) toolchain: Toolchain,
     pub(super) dependency_adapter: DependencyAdapterMaterial,
     pub(super) registration_adapter: RegistrationAdapterMaterial,
@@ -494,6 +496,10 @@ pub(super) fn run_batch(arguments: Vec<String>) -> Result<()> {
         "unsupported common graph kind {}",
         request.common_graph.kind
     );
+    ensure!(
+        is_normalized_functions_root(&request.common_graph.functions_root),
+        "batch functions root must be a normalized repository-relative directory"
+    );
     if let Some(assumptions) = &request.common_graph.assumptions {
         ensure!(
             assumptions.platform == "browser"
@@ -581,6 +587,7 @@ pub(super) fn run_batch(arguments: Vec<String>) -> Result<()> {
     let graph = GraphInput {
         kind: request.common_graph.kind,
         repo_root: request.common_graph.repo_root,
+        functions_root: request.common_graph.functions_root,
         entry_path: String::new(),
         export_name: String::new(),
         toolchain: request.common_graph.toolchain,
@@ -606,6 +613,7 @@ pub(super) fn run_batch(arguments: Vec<String>) -> Result<()> {
             &mut modules,
             &mut preload_phases,
             &graph.registration_adapter,
+            &graph.functions_root,
         )
         .with_context(|| {
             format!(

@@ -263,6 +263,7 @@ mod dependency_adapter_tests {
         GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: Path::new("/fixture").to_path_buf(),
+            functions_root: "convex".to_string(),
             entry_path: MODULE_KEY.to_string(),
             export_name: "selected".to_string(),
             toolchain: Toolchain {
@@ -509,6 +510,7 @@ export const selected = query({{
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: root.0.clone(),
+            functions_root: "convex".to_string(),
             entry_path: MODULE_KEY.to_string(),
             export_name: "selected".to_string(),
             toolchain: Toolchain {
@@ -2968,6 +2970,7 @@ mod batch_protocol_tests {
             common_graph: BatchCommonGraph {
                 kind: "convex-wasm-esbuild-graph".to_string(),
                 repo_root: PathBuf::from("/fixture"),
+                functions_root: "fixtures".to_string(),
                 toolchain: Toolchain {
                     esbuild: "fixture".to_string(),
                     convex: "fixture".to_string(),
@@ -3750,6 +3753,7 @@ export function requireWorkerSecret(providedKey: string | undefined): void {
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: Path::new("/fixture").to_path_buf(),
+            functions_root: "fixtures".to_string(),
             entry_path: ENTRY.to_string(),
             export_name: "selected".to_string(),
             toolchain: Toolchain {
@@ -6328,6 +6332,7 @@ export async function authenticate(context) {
             &mut modules,
             &mut PhaseMeasurements::default(),
             &object_material("query"),
+            "fixtures",
         )
         .unwrap();
         assert!(inventory.diagnostics.is_empty());
@@ -6348,6 +6353,7 @@ export async function authenticate(context) {
             &mut modules,
             &mut PhaseMeasurements::default(),
             &changed_material,
+            "fixtures",
         )
         .unwrap();
         let changed_graph_sha256 = serde_json::to_value(&changed_inventory).unwrap()["graphSha256"]
@@ -6454,6 +6460,7 @@ mod ordinary_syntax_tests {
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: Path::new("/fixture").to_path_buf(),
+            functions_root: "convex".to_string(),
             entry_path: MODULE_KEY.to_string(),
             export_name: export_name.to_string(),
             toolchain: Toolchain {
@@ -6598,6 +6605,7 @@ mod ordinary_syntax_tests {
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: Path::new("/fixture").to_path_buf(),
+            functions_root: "convex".to_string(),
             entry_path: MODULE_KEY.to_string(),
             export_name: export_name.to_string(),
             toolchain: Toolchain {
@@ -13017,6 +13025,7 @@ export const internal = anyApi;
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: Path::new("/fixture").to_path_buf(),
+            functions_root: "convex".to_string(),
             entry_path: ENTRY.to_string(),
             export_name: export_name.to_string(),
             toolchain: Toolchain {

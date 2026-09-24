@@ -1,0 +1,435 @@
+{
+  "kind": "convex-wasm-canonical-capability-request-envelope-vectors-v4",
+  "requests": [
+    {
+      "envelope": { "kind": "authGetUserIdentity", "version": 4 },
+      "name": "auth-get-user-identity"
+    },
+    {
+      "envelope": { "kind": "performanceNow", "version": 4 },
+      "name": "performance-now"
+    },
+    {
+      "envelope": {
+        "kind": "environmentVariableGet",
+        "name": "REQUEST_ENVELOPE_TEST",
+        "version": 4
+      },
+      "name": "environment-variable-get"
+    },
+    {
+      "envelope": {
+        "kind": "dbNormalizeId",
+        "table": "documents",
+        "value": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "version": 4
+      },
+      "name": "db-normalize-id"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "dbGet",
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-get"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "dbSystemGet",
+        "table": "_storage",
+        "version": 4
+      },
+      "name": "db-system-get"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "dbDelete",
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-delete"
+    },
+    {
+      "envelope": {
+        "kind": "storageGetUrl",
+        "storageId": "kg2a1b2c3d4e5f6g7h8j9k0m1n2p3q4r",
+        "version": 4
+      },
+      "name": "storage-get-url"
+    },
+    {
+      "envelope": {
+        "kind": "storageGetMetadata",
+        "storageId": "kg2a1b2c3d4e5f6g7h8j9k0m1n2p3q4r",
+        "version": 4
+      },
+      "name": "storage-get-metadata"
+    },
+    {
+      "envelope": { "kind": "storageGenerateUploadUrl", "version": 4 },
+      "name": "storage-generate-upload-url"
+    },
+    {
+      "envelope": {
+        "kind": "storageDelete",
+        "storageId": "kg2a1b2c3d4e5f6g7h8j9k0m1n2p3q4r",
+        "version": 4
+      },
+      "name": "storage-delete"
+    },
+    {
+      "envelope": {
+        "kind": "dbInsert",
+        "table": "documents",
+        "value": {
+          "commitTs": { "$commitTs": null },
+          "counter": { "$integer": "BAAAAAAAAAA=" },
+          "status": "ready"
+        },
+        "version": 4
+      },
+      "name": "db-insert"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "dbPatch",
+        "patch": {
+          "counter": { "$integer": "//////////8=" },
+          "nested": { "commitTs": { "$commitTs": null }, "kept": 3 },
+          "removed": { "$undefined": null },
+          "status": "ready"
+        },
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-patch-top-level-deletion"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "dbReplace",
+        "table": "documents",
+        "value": {
+          "commitTs": [{ "$commitTs": null }],
+          "counter": { "$integer": "BAAAAAAAAAA=" },
+          "status": "ready"
+        },
+        "version": 4
+      },
+      "name": "db-replace"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [
+          {
+            "expression": {
+              "$and": [
+                { "$eq": [{ "$field": "status" }, { "$literal": "ready" }] },
+                {
+                  "$eq": [{ "$field": "sequence" }, { "$literal": { "$integer": "BAAAAAAAAAA=" } }]
+                }
+              ]
+            },
+            "type": "filter"
+          },
+          { "limit": 7, "type": "limit" }
+        ],
+        "order": "asc",
+        "source": {
+          "constraints": [
+            { "field": "status", "operator": "eq", "value": "ready" },
+            { "field": "commitTs", "operator": "eq", "value": { "$commitTs": null } }
+          ],
+          "index": "by_status_commit_ts",
+          "type": "indexRange"
+        },
+        "table": "documents",
+        "terminal": "unique",
+        "version": 4
+      },
+      "name": "db-query-filter-expression"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [{ "limit": 4, "type": "limit" }],
+        "order": null,
+        "source": {
+          "filters": [
+            { "field": "body", "type": "search", "value": "needle phrase" },
+            { "field": "tenant", "type": "eq", "value": "tenant-a" },
+            { "field": "category", "type": "eq", "value": { "$undefined": null } }
+          ],
+          "index": "by_content",
+          "type": "search"
+        },
+        "table": "documents",
+        "terminal": "collect",
+        "version": 4
+      },
+      "name": "db-query-search"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [],
+        "order": null,
+        "pagination": {
+          "cursor": "current-cursor",
+          "endCursor": "end-cursor",
+          "maximumBytesRead": 4096,
+          "maximumRowsRead": 7,
+          "pageSize": 2
+        },
+        "source": { "type": "fullTableScan" },
+        "table": "documents",
+        "terminal": "paginate",
+        "version": 4
+      },
+      "name": "db-query-paginate"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [],
+        "order": "desc",
+        "source": {
+          "constraints": [{ "field": "tenant", "operator": "eq", "value": "tenant-a" }],
+          "index": "by_tenant",
+          "type": "indexRange"
+        },
+        "table": "documents",
+        "terminal": "stream",
+        "version": 4
+      },
+      "name": "db-query-stream"
+    },
+    {
+      "envelope": {
+        "args": { "payload": "queued", "updatedAt": { "$commitTs": null } },
+        "functionAddress": { "reference": "tasks:enqueueWithTimestamp" },
+        "kind": "runUdf",
+        "transactionLimits": null,
+        "udfType": "mutation",
+        "version": 4
+      },
+      "name": "run-mutation"
+    },
+    {
+      "envelope": {
+        "args": { "tenant": "tenant-a" },
+        "functionAddress": { "name": "tasks:read" },
+        "kind": "runUdf",
+        "transactionLimits": { "documentsRead": 8 },
+        "udfType": "query",
+        "version": 4
+      },
+      "name": "run-query"
+    },
+    {
+      "envelope": {
+        "args": {},
+        "functionAddress": { "functionHandle": "function://read-stale" },
+        "kind": "runUdf",
+        "transactionLimits": null,
+        "udfType": "snapshotQuery",
+        "version": 4
+      },
+      "name": "run-snapshot-query"
+    },
+    {
+      "envelope": {
+        "args": { "sequence": { "$integer": "BAAAAAAAAAA=" } },
+        "delayMilliseconds": 125,
+        "functionAddress": { "name": "tasks:run" },
+        "kind": "schedulerRunAfter",
+        "version": 4
+      },
+      "name": "scheduler-run-after"
+    },
+    {
+      "envelope": {
+        "args": { "sequence": { "$integer": "BAAAAAAAAAA=" } },
+        "functionAddress": { "reference": "tasks:run" },
+        "kind": "schedulerRunAt",
+        "timestampMilliseconds": 1710000000000,
+        "version": 4
+      },
+      "name": "scheduler-run-at"
+    },
+    {
+      "envelope": {
+        "id": "j97b7xnjnh7ty0hnr4zfmf0bf17kry8y",
+        "kind": "schedulerCancel",
+        "version": 4
+      },
+      "name": "scheduler-cancel"
+    }
+  ],
+  "pendingValueNegativeControls": [
+    {
+      "envelope": {
+        "id": { "$commitTs": null },
+        "kind": "dbGet",
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-get-pending-id"
+    },
+    {
+      "envelope": {
+        "id": { "$commitTs": null },
+        "kind": "dbSystemGet",
+        "table": "_storage",
+        "version": 4
+      },
+      "name": "db-system-get-pending-id"
+    },
+    {
+      "envelope": {
+        "id": { "$commitTs": null },
+        "kind": "dbPatch",
+        "patch": { "status": "ready" },
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-patch-pending-id"
+    },
+    {
+      "envelope": {
+        "id": { "$commitTs": null },
+        "kind": "dbReplace",
+        "table": "documents",
+        "value": { "status": "ready" },
+        "version": 4
+      },
+      "name": "db-replace-pending-id"
+    },
+    {
+      "envelope": {
+        "id": { "$commitTs": null },
+        "kind": "dbDelete",
+        "table": "documents",
+        "version": 4
+      },
+      "name": "db-delete-pending-id"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [
+          {
+            "expression": {
+              "$eq": [{ "$field": "commitTs" }, { "$literal": { "$commitTs": null } }]
+            },
+            "type": "filter"
+          }
+        ],
+        "order": null,
+        "source": { "type": "fullTableScan" },
+        "table": "documents",
+        "terminal": "collect",
+        "version": 4
+      },
+      "name": "db-query-pending-filter-literal"
+    },
+    {
+      "envelope": {
+        "kind": "dbQuery",
+        "operators": [],
+        "order": null,
+        "source": {
+          "filters": [
+            { "field": "body", "type": "search", "value": "needle" },
+            { "field": "commitTs", "type": "eq", "value": { "$commitTs": null } }
+          ],
+          "index": "by_content",
+          "type": "search"
+        },
+        "table": "documents",
+        "terminal": "collect",
+        "version": 4
+      },
+      "name": "db-query-search-pending-equality"
+    },
+    {
+      "envelope": {
+        "args": { "nested": [{ "commitTs": { "$commitTs": null } }] },
+        "delayMilliseconds": 125,
+        "functionAddress": { "name": "tasks:run" },
+        "kind": "schedulerRunAfter",
+        "version": 4
+      },
+      "name": "scheduler-run-after-pending-args"
+    },
+    {
+      "envelope": {
+        "args": { "nested": [{ "commitTs": { "$commitTs": null } }] },
+        "functionAddress": { "reference": "tasks:run" },
+        "kind": "schedulerRunAt",
+        "timestampMilliseconds": 1710000000000,
+        "version": 4
+      },
+      "name": "scheduler-run-at-pending-args"
+    },
+    {
+      "envelope": { "id": { "$commitTs": null }, "kind": "schedulerCancel", "version": 4 },
+      "name": "scheduler-cancel-pending-id"
+    }
+  ],
+  "requestNegativeControls": [
+    {
+      "envelope": { "kind": "storageGetUrl", "storageId": 7, "version": 4 },
+      "expectedMessage": "Error: Storage ID must be a string",
+      "name": "storage-get-url-non-string-storage-id"
+    },
+    {
+      "envelope": {
+        "kind": "storageGetMetadata",
+        "storageId": { "$commitTs": null },
+        "version": 4
+      },
+      "expectedMessage": "Error: Storage ID must be a string",
+      "name": "storage-get-metadata-pending-storage-id"
+    },
+    {
+      "envelope": { "kind": "storageDelete", "storageId": { "$undefined": null }, "version": 4 },
+      "expectedMessage": "Error: Storage ID must be a string",
+      "name": "storage-delete-reserved-syntax-storage-id"
+    },
+    {
+      "envelope": {
+        "extra": true,
+        "kind": "storageGetUrl",
+        "storageId": "kg2a1b2c3d4e5f6g7h8j9k0m1n2p3q4r",
+        "version": 4
+      },
+      "expectedMessage": "Error: Capability request has invalid fields",
+      "name": "storage-get-url-extra-field"
+    },
+    {
+      "envelope": {
+        "kind": "storageGenerateUploadUrl",
+        "storageId": "kg2a1b2c3d4e5f6g7h8j9k0m1n2p3q4r",
+        "version": 4
+      },
+      "expectedMessage": "Error: Capability request has invalid fields",
+      "name": "storage-generate-upload-url-extra-field"
+    }
+  ],
+  "reservedSyntaxNegativeControls": [
+    { "context": "ordinary-argument", "value": { "$undefined": null } },
+    { "context": "ordinary-document", "value": { "$literal": "value" } },
+    { "context": "ordinary-document", "value": { "$eq": [1, 2] } },
+    { "context": "patch-nested-value", "value": { "$undefined": null } },
+    { "context": "unrelated-request-field", "value": { "$field": "status" } },
+    { "context": "ordinary-document", "value": { "$commitTs": null } }
+  ],
+  "schemaVersion": 1
+}

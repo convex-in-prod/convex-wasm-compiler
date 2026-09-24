@@ -1,21 +1,44 @@
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { realpath } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
   convexWasmBlockingEffectExecutionMode,
   convexWasmGuestPromiseEffectExecutionMode,
 } from "./convex-wasm-compiler-contract.mjs";
+import { resolveConvexWasmApplicationBundlerPackageSet } from "./convex-wasm-application-package-set.mjs";
 import {
   hydrateConvexWasmDependencyAdapterMaterial,
   loadConvexWasmDependencyAdapterMaterial,
   selectConvexWasmDependencyAdapters,
 } from "./convex-wasm-dependency-adapters.mjs";
 import { loadConvexWasmRegistrationAdapterMaterial } from "./convex-wasm-registration-adapters.mjs";
+import { convexApiFunctionsRoot } from "./convex-api-flattener-reuse.mjs";
 
 const GRAPH_KIND = "convex-wasm-esbuild-graph";
+// Operational build code is not itself hashed into graph identities. Bump this revision when
+// graph construction changes in a way that the literal assumptions below do not represent.
+export const convexWasmDeploymentGraphConstructionSemanticRevision =
+  "convex-wasm-deployment-graph-construction";
+export const convexWasmDeploymentGraphAssumptions = Object.freeze({
+  conditions: Object.freeze(["convex", "module"]),
+  format: "esm",
+  graphConstructionSemanticRevision: convexWasmDeploymentGraphConstructionSemanticRevision,
+  platform: "browser",
+  plugins: Object.freeze([
+    "convex-source-material-snapshot",
+    "convex-async-hooks-shim",
+    "convex-server-only",
+    "convex-node-externals(empty-browser-map)",
+    "convex-wasm",
+  ]),
+  productionArtifact: false,
+  resolutionAuthority: "esbuild-metafile",
+  splitting: true,
+  target: "esnext",
+});
 export const convexWasmDefaultEffectExecutionMode = convexWasmBlockingEffectExecutionMode;
 const EFFECT_EXECUTION_MODES = new Set([
   convexWasmDefaultEffectExecutionMode,
@@ -35,22 +58,14 @@ function toPosix(path) {
   return path.replaceAll("\\", "/");
 }
 
-function packageVersion(packageJsonPath) {
-  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
-  if (typeof packageJson.version !== "string") {
-    throw new Error(`${packageJsonPath} has no string version.`);
-  }
-  return packageJson.version;
-}
-
 function loadToolchain(repoRoot) {
+  const packageSet = resolveConvexWasmApplicationBundlerPackageSet(repoRoot);
   const requireFromRepo = createRequire(resolve(repoRoot, "package.json"));
   const convexPackageJson = requireFromRepo.resolve("convex/package.json");
   const requireFromConvex = createRequire(convexPackageJson);
-  const esbuildPackageJson = requireFromConvex.resolve("esbuild/package.json");
   const toolchain = {
-    convex: packageVersion(convexPackageJson),
-    esbuild: packageVersion(esbuildPackageJson),
+    convex: packageSet.convex.version,
+    esbuild: packageSet.esbuild.version,
   };
   return { esbuild: requireFromConvex("esbuild"), toolchain };
 }
@@ -63,6 +78,10 @@ export async function buildConvexWasmSourceGraph({
 }) {
   const normalizedEffectExecutionMode = normalizeConvexWasmEffectExecutionMode(effectExecutionMode);
   const normalizedRoot = await realpath(resolve(repoRoot));
+  const projectConfigPath = join(normalizedRoot, "convex.json");
+  const functionsRoot = convexApiFunctionsRoot(
+    existsSync(projectConfigPath) ? JSON.parse(await readFile(projectConfigPath, "utf8")) : {}
+  );
   const normalizedEntry = await realpath(resolve(normalizedRoot, entryPath));
   const normalizedEntryRelative = toPosix(relative(normalizedRoot, normalizedEntry));
   if (
@@ -122,6 +141,7 @@ export async function buildConvexWasmSourceGraph({
       ? {}
       : { effectExecutionMode: normalizedEffectExecutionMode }),
     repoRoot: normalizedRoot,
+    functionsRoot,
     entryPath: normalizedEntryRelative,
     exportName,
     toolchain,

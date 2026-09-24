@@ -305,8 +305,18 @@ pub(super) fn is_resolved_convex_server_module(resolved: &str) -> bool {
         })
 }
 
-pub(crate) fn is_resolved_generated_server_module(resolved: &str) -> bool {
-    resolved.starts_with("convex/") && resolved.ends_with("/_generated/server.js")
+pub(crate) fn is_normalized_functions_root(root: &str) -> bool {
+    !root.is_empty()
+        && !root.starts_with('/')
+        && !root.contains('\\')
+        && !root.contains('\0')
+        && root
+            .split('/')
+            .all(|part| !part.is_empty() && !matches!(part, "." | ".."))
+}
+
+pub(crate) fn is_resolved_generated_server_module(resolved: &str, functions_root: &str) -> bool {
+    resolved.strip_suffix("/_generated/server.js") == Some(functions_root)
 }
 
 pub(crate) fn generated_server_udf_kind(imported: &str) -> Option<&'static str> {
