@@ -632,6 +632,7 @@ mod implementation {
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root: PathBuf::from("/invariant-validation"),
+            functions_root: "convex".to_string(),
             entry_path: MODULE_KEY.to_string(),
             export_name: unit_name.to_string(),
             toolchain: Toolchain {
@@ -1134,6 +1135,7 @@ function consume(first, second) {
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
             repo_root,
+            functions_root: "convex".to_string(),
             entry_path: entry_path.to_string(),
             export_name: export_name.to_string(),
             toolchain: Toolchain {
