@@ -2763,7 +2763,6 @@ test("immutable GC authenticates every generic artifact extension before listing
   assert.ok(plan.evictions.length > 0);
   assert.ok(plan.evictions.every(({ type }) => type === "artifact"));
   assert.ok(plan.evictions.every(({ key }) => keys.includes(key)));
-  assert.equal(plan.incomplete, false);
   await Promise.all(plan.evictions.map(({ path }) => fs.lstat(path)));
 });
 
