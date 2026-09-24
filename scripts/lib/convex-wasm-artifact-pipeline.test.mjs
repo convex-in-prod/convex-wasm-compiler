@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { authenticateConvexContextReuseCohortAnalysisIdentity } from "./convex-context-reuse-cohort-identity.mjs";
 import { buildConvexWasmOfficialOutputChunkApplicationUnit, projectConvexWasmOfficialOutputChunkLocalProfiles, projectConvexWasmOfficialOutputChunkNativeApplicationDescriptor } from "./convex-wasm-official-output-chunk-application-unit.mjs";
-import { buildConvexWasmOfficialOutputChunkUnits, createConvexWasmOfficialOutputChunkTransformSession } from "./convex-wasm-official-output-chunk-unit.mjs";
+import { buildConvexWasmOfficialOutputChunkUnits, createConvexWasmOfficialOutputChunkTransformSession, convexWasmOfficialOutputChunkUnitTestHooks } from "./convex-wasm-official-output-chunk-unit.mjs";
 import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
 import { convexWasmCapabilityRequestAbiVersion, renderNativeDbGetCapabilityTargetUnits } from "./convex-wasm-lowering.mjs";
 import { createConvexWasmNativePhaseScheduler } from "./convex-wasm-native-launch-scheduling.mjs";
@@ -45,6 +45,20 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".
 const require = createRequire(import.meta.url);
 const producerIdentityPromise = buildConvexWasmProducerIdentity(repositoryRoot);
 const FIRST_GRAPH_FINGERPRINT = "1".repeat(64);
+
+test("unselected computed imports retain later dependency slot numbers", () => {
+  const source = 'import(Buffer.from("cGF0aA==", "base64").toString()); import("./next.js");';
+  assert.deepEqual(
+    convexWasmOfficialOutputChunkUnitTestHooks.parseModuleDependencies(source, true).map(
+      ({ kind, occurrence, path }) => ({ kind, occurrence, path })
+    ),
+    [{ kind: "dynamic-import", occurrence: 1, path: "_deps/next.js" }]
+  );
+  assert.throws(
+    () => convexWasmOfficialOutputChunkUnitTestHooks.parseModuleDependencies(source),
+    /computed dynamic-import dependency/u
+  );
+});
 
 function fixtureGuestSourceProvenance(source, sourceIdentity) {
   const sourceBytes = Buffer.from(source);

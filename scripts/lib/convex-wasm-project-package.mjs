@@ -13,12 +13,13 @@ import { bindConvexWasmContextReuseAnalysisGraphSession } from "./convex-wasm-de
 import { buildConvexWasmOfficialOutputModuleGraphInputs } from "./convex-wasm-official-output-artifact-adapter.mjs";
 import { buildConvexWasmOfficialOutputChunkApplicationUnit } from "./convex-wasm-official-output-chunk-application-unit.mjs";
 import { buildConvexWasmOfficialOutputChunkUnits } from "./convex-wasm-official-output-chunk-unit.mjs";
+import { createConvexWasmModuleGraphCohortContract } from "./convex-wasm-module-graph-cohort-contract.mjs";
 import {
   authenticateConvexWasmOfficialOutputCohortSchedule,
   createConvexWasmOfficialOutputCohortSchedule,
   scheduleConvexWasmOfficialOutputCohortBuildsFromAuthenticatedSchedule,
 } from "./convex-wasm-official-output-cohort-schedule.mjs";
-import { selectConvexWasmOfficialOutputPrototype } from "./convex-wasm-official-output-prototype.mjs";
+import { createConvexWasmOfficialOutputSelectionSession } from "./convex-wasm-official-output-prototype.mjs";
 import {
   createConvexWasmSourceEnvelope,
   publishConvexWasmSourceEnvelopePublication,
@@ -51,6 +52,11 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
     sourceEnvelopeFileSha256: sourceEnvelopePublication.file.sha256,
     sourceEnvelopeFileSize: sourceEnvelopePublication.file.size,
   });
+  const selectionSession = createConvexWasmOfficialOutputSelectionSession({
+    graphSession,
+    inventory: inputs.inventory,
+    sourceEnvelope,
+  });
   const packageSet = resolveConvexWasmApplicationBundlerPackageSet(config.projectRoot);
   const requireFromApplication = createRequire(join(config.projectRoot, "package.json"));
   const requireFromConvex = createRequire(requireFromApplication.resolve("convex/package.json"));
@@ -80,12 +86,9 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
         build: async ({ cohort }) => {
           const selections = cohort.entries.flatMap((entry) =>
             entry.routes.map((route) =>
-              selectConvexWasmOfficialOutputPrototype({
+              selectionSession.select({
                 entryPath: entry.entryPath,
                 exportName: route.exportName,
-                graphSession,
-                inventory: inputs.inventory,
-                sourceEnvelope,
               })
             )
           );
@@ -111,6 +114,17 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
           return prepared.compilerOutput;
         },
       });
+      if (compilerOutputs.length !== schedule.cohorts.length) {
+        throw new Error("cohort compiler outputs do not match the authenticated schedule");
+      }
+      const cohortContracts = compilerOutputs.map((compilerOutput, index) =>
+        createConvexWasmModuleGraphCohortContract({
+          cohortId: schedule.cohorts[index].cohortId,
+          compilerContract: compilerOutput.cohortContract,
+          scheduleSha256: schedule.identity.sha256,
+          sourceEnvelopeSha256: sourceEnvelope.sourceEnvelopeSha256,
+        })
+      );
       const artifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts({
         artifactConfig: {
           cacheLayout: inputs.cacheLayout,
@@ -130,7 +144,14 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
       });
       await artifact.verifyMaterials();
       await lease.complete();
-      return { artifact, graphSession, schedule, sourceEnvelope, sourceEnvelopePublication };
+      return {
+        artifact,
+        cohortContracts,
+        graphSession,
+        schedule,
+        sourceEnvelope,
+        sourceEnvelopePublication,
+      };
     } catch (error) {
       await lease.fail();
       throw error;

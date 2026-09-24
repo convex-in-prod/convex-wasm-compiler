@@ -13,7 +13,7 @@ import {
 
 function usage() {
   return [
-    "usage: maintain-convex-wasm-cache.mjs [--dry-run | --apply]",
+    "usage: convex-wasm-cache [--dry-run | --apply]",
     "       [--cache-root PATH] [--work-only]",
     "       [--quiescent-hours N] [--abandoned-recovery-hours N]",
     "       [--completed-retention-hours N] [--failed-recovery-hours N]",

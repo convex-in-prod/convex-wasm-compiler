@@ -86,6 +86,34 @@ jobs:
             --output release-assets/native-package-selection.json \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$GITHUB_REF_NAME"
+      - name: Package installable JavaScript toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$package_version"
+          cp release-assets/native-package-selection.json scripts/native-package-selection.json
+          npm pack --pack-destination release-assets --quiet
+          package_filename="convex-wasm-compiler-$package_version.tgz"
+          package_archive="$PWD/release-assets/$package_filename"
+          test -f "$package_archive"
+          sdk_package=$(node -p "require('./package.json').devDependencies.convex")
+          npm install --prefix "$RUNNER_TEMP/convex-wasm-package" \
+            --omit=dev --no-save "$package_archive" "$sdk_package"
+          package_root="$RUNNER_TEMP/convex-wasm-package/node_modules/convex-wasm-compiler"
+          cmp release-assets/native-package-selection.json "$package_root/scripts/native-package-selection.json"
+          for command in convex-wasm-build convex-wasm-authority convex-wasm-bind convex-wasm-acquire-native convex-wasm-cache; do
+            test -x "$RUNNER_TEMP/convex-wasm-package/node_modules/.bin/$command"
+          done
+          PACKAGE_ROOT="$package_root" node --input-type=module -e '
+            const root = process.env.PACKAGE_ROOT;
+            await Promise.all([
+              import(`${root}/scripts/build-convex-wasm.mjs`),
+              import(`${root}/scripts/authority-project.mjs`),
+              import(`${root}/scripts/bind-convex-wasm.mjs`),
+            ]);
+          '
+          (cd release-assets && sha256sum "$package_filename" >"$package_filename.sha256")
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -11,6 +11,7 @@ import {
   prepareConvexWasmProjectBuildInputs,
 } from "./lib/convex-wasm-project-build-inputs.mjs";
 import { buildConvexWasmProjectPackage } from "./lib/convex-wasm-project-package.mjs";
+import { createConvexWasmProjectStartPush } from "./lib/convex-wasm-project-start-push.mjs";
 import { normalizeConvexWasmNativeLaunchPolicy } from "./lib/convex-wasm-native-launch-scheduling.mjs";
 
 export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) {
@@ -32,15 +33,36 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
   };
   try {
     const built = await buildConvexWasmProjectPackage({ config, inputs, resourceGuard });
+    const startPush = await createConvexWasmProjectStartPush({
+      buildDirectory: inputs.buildDirectory,
+      projectRoot: config.projectRoot,
+      signal,
+    });
     const artifacts = built.artifact.artifacts ?? [built.artifact];
+    const runtimeModules = [
+      ...new Set(built.sourceEnvelope.selectedRoutes.map(({ runtimeModulePath }) => runtimeModulePath)),
+    ]
+      .sort()
+      .map((path) => {
+        const module = built.graphSession.bundleModulesByPath.get(path);
+        if (module === undefined) {
+          throw new Error(`selected runtime module ${path} is missing from the authenticated graph`);
+        }
+        return { ...module };
+      });
     const report = {
+      cohortContracts: built.cohortContracts,
+      cohortSchedule: built.schedule,
+      contextReusePolicy: built.graphSession.contextReusePolicy,
       graphs: artifacts.map(({ graphManifest, package: packageRecord }) => ({
         graphManifestSha256: graphManifest.graphManifestSha256,
         packagePath: packageRecord.path,
       })),
       kind: "convex-wasm-project-artifact-report-v1",
+      runtimeModules,
       scheduleSha256: built.schedule.identity.sha256,
       sourceEnvelope: built.sourceEnvelopePublication.file,
+      startPush,
     };
     const reportPath = resolve(inputs.buildDirectory, "artifact-report.json");
     await fs.writeFile(reportPath, `${canonicalJson(report)}\n`, { flag: "wx", mode: 0o600 });
@@ -52,7 +74,7 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
 
 export async function main(argumentsList) {
   if (argumentsList.length !== 2 || argumentsList[0] !== "--config") {
-    throw new Error("usage: build-convex-wasm.mjs --config PROJECT_CONFIG.json");
+    throw new Error("usage: convex-wasm-build --config PROJECT.json");
   }
   const configPath = resolve(argumentsList[1]);
   const config = parseProjectConfig(JSON.parse(await fs.readFile(configPath, "utf8")), configPath);

@@ -2514,6 +2514,11 @@ fn import_has_unsupported_member_access(
     inspect_derived_values: bool,
     reject_helper_escapes: bool,
 ) -> bool {
+    // The traversal retains reviewed decisions per import. Keep syntax only for the current
+    // module so a full graph cannot retain a second AST and binding tree for every importer.
+    if !surface_models.contains_key(module_key) {
+        surface_models.clear();
+    }
     let Ok(ImportSurfaceModel { ast, bindings }) = surface_models
         .entry(module_key.to_string())
         .or_insert_with(|| ImportSurfaceModel::parse(module_key, source))
@@ -5625,6 +5630,7 @@ pub(crate) fn run_context_reuse(arguments: Vec<String>, started: Instant) -> Res
     let graph_bytes = read_bounded_control_file(&graph_path, "context-reuse graph")?;
     let input: ContextInput = serde_json::from_slice(&graph_bytes)
         .with_context(|| format!("invalid graph JSON {}", graph_path.display()))?;
+    drop(graph_bytes);
     ensure!(
         input.kind == INPUT_KIND,
         "unsupported context-reuse graph kind {}",
@@ -6218,12 +6224,9 @@ fn analyze_context_reuse_with_encoding_and_policy(
             .all(|entry| entry.starts_with(&format!("{}/", input.functions_root))),
         "context-reuse entries must be under the configured functions root"
     );
-    let modules = preload_context_modules(
-        input,
-        cache_dir,
-        phases,
-        crate::module_preload_worker_limit()?,
-    )?;
+    // A cache miss holds both the parser state and ESTree during summarization.
+    // Whole-graph analysis must not multiply that peak across preload workers.
+    let modules = preload_context_modules(input, cache_dir, phases, 1)?;
     for entry in &input.entry_candidates {
         ensure!(
             modules.contains_key(entry),
@@ -6238,15 +6241,9 @@ fn analyze_context_reuse_with_encoding_and_policy(
     // a fully tree-shaken package could be rejected by unrelated malformed lock material.
     let mut package_lock_entries = None::<Option<BTreeMap<String, Value>>>;
     let reachability_started = Instant::now();
-    let sources = modules
-        .iter()
-        .map(|(module_key, module)| (module_key.clone(), module.source.as_ref().clone()))
-        .collect::<BTreeMap<_, _>>();
     let mut graph = BTreeMap::<String, Vec<ResolvedGraphReference>>::new();
     for (module_key, module) in &modules {
-        let source = sources
-            .get(module_key)
-            .context("summarized module has no source")?;
+        let source = module.source.as_str();
         let mut references = Vec::new();
         for reference in &module.summary.context_reuse.references {
             if reference.type_only || is_convex_runtime_package(&reference.specifier) {
@@ -6519,9 +6516,7 @@ fn analyze_context_reuse_with_encoding_and_policy(
             let module = modules
                 .get(&module_key)
                 .with_context(|| format!("reachable module {module_key} was not summarized"))?;
-            let source = sources
-                .get(&module_key)
-                .context("reachable module has no source")?;
+            let source = module.source.as_str();
             let entry_emitted_inputs = emitted_inputs.get(entry).and_then(Option::as_ref);
             for reference in graph
                 .get(&module_key)
@@ -6741,8 +6736,7 @@ fn analyze_context_reuse_with_encoding_and_policy(
     phases.reachability_us = elapsed_us(reachability_started);
 
     deduplicate_pending(&mut pending);
-    let (pending, suppressed_findings) =
-        apply_suppressions(&modules, &paths_by_entry, &sources, pending)?;
+    let (pending, suppressed_findings) = apply_suppressions(&modules, &paths_by_entry, pending)?;
     let mut diagnostic_counts = BTreeMap::new();
     let mut category_counts = BTreeMap::new();
     for diagnostic in &pending {
@@ -7412,7 +7406,6 @@ fn dependency_edge_from_source(
 fn apply_suppressions(
     modules: &BTreeMap<String, LoadedModule>,
     paths_by_entry: &BTreeMap<String, EntryDependencyPaths>,
-    sources: &BTreeMap<String, String>,
     pending: Vec<PendingDiagnostic>,
 ) -> Result<(Vec<PendingDiagnostic>, usize)> {
     let mut declarations =
@@ -7423,9 +7416,7 @@ fn apply_suppressions(
             let module = modules
                 .get(module_key)
                 .context("suppression module disappeared")?;
-            let source = sources
-                .get(module_key)
-                .context("suppression module source disappeared")?;
+            let source = module.source.as_str();
             for declaration in &module.summary.context_reuse.suppressions {
                 if let Some(error) = &declaration.error {
                     let start = line_start(source, declaration.line);
@@ -7507,10 +7498,12 @@ fn apply_suppressions(
                 .get(&entry)
                 .context("suppression has no entry dependency paths")?,
         )?;
-        let source = sources
+        let source = modules
             .get(&file)
-            .context("suppression source disappeared")?;
-        let start = line_start(&source, declaration.line);
+            .context("suppression source disappeared")?
+            .source
+            .as_str();
+        let start = line_start(source, declaration.line);
         invalid.push(PendingDiagnostic {
             severity: "hard".to_string(),
             rule: "invalid-suppression".to_string(),
@@ -7759,7 +7752,6 @@ mod tests {
                 file.to_string(),
                 crate::LoadedModule::new(summary, source.to_string()),
             )]);
-            let sources = BTreeMap::from([(file.to_string(), source.to_string())]);
             let paths =
                 BTreeMap::from([(file.to_string(), BTreeMap::from([(file.to_string(), None)]))]);
             let pending = ["second", "first"]
@@ -7779,7 +7771,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let expected = serde_json::to_value(&pending).unwrap();
             let (active, suppressed) =
-                super::apply_suppressions(&modules, &paths, &sources, pending).unwrap();
+                super::apply_suppressions(&modules, &paths, pending).unwrap();
             assert_eq!(suppressed, 0);
             assert_eq!(active.len(), 2 + invalid_count);
             assert_eq!(serde_json::to_value(&active[..2]).unwrap(), expected);
@@ -9645,7 +9637,7 @@ function inspect() {
                 false,
                 false,
             ));
-            assert_eq!(models.len(), 2);
+            assert_eq!(models.len(), 1);
             assert_eq!(
                 super::IMPORT_SURFACE_CONSTRUCTIONS.with(std::cell::Cell::get),
                 before + 2
@@ -9980,7 +9972,8 @@ export function classify(ApiError, error) { return error instanceof ApiError; }
                     surface.id,
                 );
             }
-            // Both policy modes share syntax, including when earlier modules remain retained.
+            // Both policy modes share syntax for the current module.
+            assert!(surface_models.len() <= 1);
             assert_eq!(
                 super::IMPORT_SURFACE_CONSTRUCTIONS.with(std::cell::Cell::get) - before,
                 usize::from(surface_models.contains_key(&module_key)),

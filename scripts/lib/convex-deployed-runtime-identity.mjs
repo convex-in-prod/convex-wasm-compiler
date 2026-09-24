@@ -291,8 +291,8 @@ function normalizeFrozenGraphInputAuthority(value) {
         ? requirePositiveInteger(request[field], "frozen graph request size")
         : requireNonnegativeInteger(request[field], `frozen graph request ${field}`);
   }
-  if (!Array.isArray(request.selectedModules) || request.selectedModules.length < 2) {
-    fail("frozen graph input authority must select at least two runtime modules");
+  if (!Array.isArray(request.selectedModules) || request.selectedModules.length === 0) {
+    fail("frozen graph input authority must select at least one runtime module");
   }
   const selectedModules = request.selectedModules.map(normalizeFrozenSelectedModule);
   const selectedModulePaths = selectedModules.map(({ path }) => path);

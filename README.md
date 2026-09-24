@@ -102,10 +102,10 @@ field; use a matching compiler build until a new package is released.
 
 The corresponding self-hosted Convex runtime patch is maintained separately.
 Downstream applications remain responsible for selecting eligible modules,
-supplying dependency and registration adapter descriptors, and publishing
-artifacts accepted by their patched backend. The project command below builds
-an authenticated artifact package, but does not yet publish a deployment
-manifest or install Static Hermes and Emscripten.
+supplying dependency and registration adapter descriptors, and transferring
+artifacts to their patched backend. The project commands below build an
+authenticated package and deployment manifest. They do not transfer or activate
+that manifest, or install Static Hermes and Emscripten.
 
 The matrix runners use the installed Convex SDK package to construct canonical
 vectors and identify the SDK source files they exercised. The project command
@@ -120,8 +120,18 @@ limits remain with the caller.
 
 ## Project artifact build
 
-Run `npm run build:project -- --config convex-wasm.project.json` from this
-package. The project config selects complete query and mutation entry namespaces,
+Install the JavaScript package from the matching tagged release into a project
+that already depends on a compatible Convex SDK. For example, after the
+`v0.2.0` release is published:
+
+```sh
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.0/convex-wasm-compiler-0.2.0.tgz
+```
+
+The project owns its Convex SDK dependency; the compiler resolves that installed
+SDK for source analysis and matrix generation. Run
+`npx convex-wasm-build --config convex-wasm.project.json` from the project.
+The project config selects complete query and mutation entry namespaces,
 staged Git paths, a verified native release or local native packages, the pinned
 Static Hermes gate, and private work/cache directories. For example:
 
@@ -132,8 +142,11 @@ Static Hermes gate, and private work/cache directories. For example:
   "workRoot": ".cache/convex-wasm-work",
   "gateRoot": ".local/convex-wasm-gate",
   "gatePolicy": "convex-wasm-gate-policy.json",
-  "nativeReleaseSelection": "convex-wasm-native-release.json",
-  "nativePackageCacheRoot": ".cache/convex-wasm-native",
+  "sourceAuthority": {
+    "backendImageId": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "helper": ".local/source-package-authority",
+    "producerCertificate": ".local/source-package-producer.json"
+  },
   "sourcePathspecs": ["convex.json", "convex", "shared", "package-lock.json"],
   "sourceRoots": ["shared/"],
   "selectedExports": ["items/read:get", "items/write:put"],
@@ -150,10 +163,69 @@ Static Hermes gate, and private work/cache directories. For example:
 Paths resolve relative to the config file. The selected source must be staged in
 Git, including changes to the listed pathspecs. `matrixTools` with `runner` and
 `cxx` paths can replace `matrixReports`; the command then creates both reports.
+The tagged JavaScript package includes its matching native selection, so the
+build downloads and verifies the compiler and precompiler into the default
+per-user cache. Set `nativeReleaseSelection` to use another pinned selection,
+or set both `compilerPackage` and `precompilerPackage` to use local verified
+packages. `nativePackageCacheRoot` overrides the default cache location.
 The gate policy has the exact shape accepted by `create-gate-config.mjs`.
 `memoryMaxMiB` controls native scheduling, not an operating-system memory cap.
-The command writes an artifact report naming verified module-graph packages;
-publication to a patched backend remains a separate, unfinished step.
+The command writes an artifact report naming verified module-graph packages,
+the authenticated cohort schedule, its route contracts, and the context-reuse
+policy. It also records the installed Convex CLI's complete source request in
+the private build directory. The CLI writes this request locally without
+uploading it. A source-package authority helper built from the matching patched
+backend can construct the exact source package and frozen authority from this
+request without activating a deployment. Configure its executable and producer
+certificate under `sourceAuthority`, then run:
+
+```sh
+npx convex-wasm-authority --config convex-wasm.project.json \
+  --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json
+```
+
+The command writes `source-package.zip` and `source-authority.json` beside the
+report. For a request with external Node dependencies, `sourceAuthority` also
+requires `externalDepsPackage` and `targetExternalDepsPackage` paths naming the
+matched archive and its admitted descriptor. Supply a genuine report from the
+matching patched backend's isolated source-package producer to establish the
+producer certificate in the same command:
+
+```sh
+npx convex-wasm-authority --config convex-wasm.project.json \
+  --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json \
+  --backend-report .local/backend-source-package-report.json
+```
+
+The report must name the backend-produced authority, source package, and any
+external dependency archive. The command compares those files with output from
+the configured helper before caching the certificate. Without `--backend-report`,
+`producerCertificate` must already name a complete
+`convex-runtime-content-producer-certificate-v1` file for that backend image and
+helper. This package does not supply a patched-backend helper or backend report.
+
+The reusable certificate and authority-cache operations live in
+`scripts/lib/source-producer-conformance.mjs` and
+`scripts/lib/source-authority-cache.mjs`. Backend
+operators can compare helper-derived material with their local backend
+producer, then cache a certificate tied to the helper, backend image,
+dependencies, and source-package bytes. Bind the packages to the matching
+source with:
+
+```sh
+npx convex-wasm-bind --config convex-wasm.project.json \
+  --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json \
+  --output .cache/deployment-v8.json
+```
+
+Binding reads the generated `source-authority.json` when `sourceAuthority` is
+configured. An operator may instead name an existing private
+`deployedRuntimeAuthority` file for the exact source package being bound.
+Binding checks the selected runtime modules against that authority, constructs
+the deployment from the authenticated source envelope, checks the complete
+source request against the frozen-graph binding, verifies each package,
+and writes an authenticated deployment-v8 manifest. Backend
+registry transfer and activation remain separate steps.
 
 ## Development
 
@@ -214,19 +286,19 @@ SHA-256 package ID, target triple, and optional HTTPS asset URLs. It validates
 the manifest and executable before publishing them into the shared cache.
 Applications choose the package release and cache root; acquisition does not
 select a deployment or install the remaining Static Hermes and Emscripten tools.
-New native releases include `native-package-selection.json`, which names the
-compiler and precompiler assets for the three supported hosts. After obtaining
-that file from a chosen release, install both packages with:
+New releases include `native-package-selection.json`, which names the compiler
+and precompiler assets for the three supported hosts. The JavaScript package
+bundles this file; install both native packages ahead of a build with:
 
 ```sh
-npm run acquire:native -- --selection ./native-package-selection.json \
-  --cache-root "$HOME/.cache/convex-wasm-native"
+npx convex-wasm-acquire-native
 ```
 
-The command returns the verified executable and manifest paths. Reusing the
-same selection and cache root verifies the local packages without downloading
-them again. Pin the selection file with the application configuration when
-upgrading a release.
+The build command also acquires them automatically. The acquisition command
+returns verified executable and manifest paths; repeated use checks the local
+packages without downloading them again. `--selection PATH` and
+`--cache-root PATH` override the bundled selection and cache location. Upgrade by changing
+the JavaScript release package; its selection pins the matching native assets.
 
 The source-to-AOT verification compiles the repository's generic Static Hermes probe,
 its runtime entry, Core Wasm, and compatible AOT. It checks both a cold build
@@ -280,8 +352,8 @@ lease's `complete` or `fail` transition. The library builders do not acquire
 the lock for the caller. `verify:source-to-aot` acquires it around its own build.
 
 ```sh
-npm run cache:maintain -- --cache-root "$HOME/.cache/convex-wasm-compiler"
-npm run cache:maintain -- --cache-root "$HOME/.cache/convex-wasm-compiler" --apply --immutable-sweep --immutable-high-watermark-bytes "$CACHE_HIGH_WATERMARK_BYTES"
+npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler"
+npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler" --apply --immutable-sweep --immutable-high-watermark-bytes "$CACHE_HIGH_WATERMARK_BYTES"
 ```
 
 `--automatic --apply` runs immutable sweeping only above an explicitly configured
@@ -315,12 +387,13 @@ Release binaries are native executables. Build and test macOS binaries on the
 matching Apple Silicon or Intel macOS host; build and test Linux binaries on the
 matching Linux host.
 
-Tagged releases publish the authenticated compiler and precompiler packages for
-all three supported hosts. The release workflow keeps the control manifests,
-package IDs, native binaries, and host selection together as release assets. A
-downstream tool can therefore select a release by tag and verify the manifest
-and binary hashes before placing the package in its content-addressed cache.
-The repository does not require a downstream checkout to consume a release.
+Tagged releases publish the installable JavaScript package and authenticated
+compiler and precompiler packages for all three supported hosts. The release
+workflow installs and imports the packed JavaScript commands before publication.
+It keeps the native control manifests, package IDs, binaries, and host selection
+together as release assets. A downstream tool can select a release by tag and
+verify the native manifest and binary hashes before placing the package in its
+content-addressed cache. A release can be consumed without this source checkout.
 
 The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 640 MiB, matching the self-hosted runtime artifact contract.

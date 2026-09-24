@@ -8,6 +8,7 @@ import {
   verifyFrozenGraphBindingSourceEnvelope,
 } from "./convex-deployed-runtime-identity.mjs";
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
+import { createFullFrozenGraphBindingAuthority } from "./convex-wasm-frozen-graph-authority.mjs";
 import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
 import {
   convexWasmSourceEnvelopeKind,
@@ -364,6 +365,44 @@ test("normalizes a complete frozen-graph binding without changing base authority
     kind: "convex-isolated-full-frozen-graph-binding-v1",
     sha256: value.frozenGraphBinding.bindingSha256,
   });
+});
+
+test("binds one selected runtime module with multiple routes", () => {
+  const startPushBytes = Buffer.from('{"request":true}\n');
+  const sourceEnvelopeBytes = Buffer.from('{"source":true}\n');
+  const value = frozenAuthority();
+  value.modules = value.modules.slice(0, 1);
+  value.modules[0].sourcePackageRuntimeContentSha256 = sha256("runtime content");
+  const baseAuthority = {
+    kind: value.kind,
+    modules: value.modules,
+    sourcePackageFileSha256: value.sourcePackageFileSha256,
+  };
+  baseAuthority.authoritySha256 = fingerprintJson(baseAuthority);
+  const inputAuthority = value.frozenGraphBinding.inputAuthority;
+  inputAuthority.request.requestSha256 = sha256(startPushBytes);
+  inputAuthority.request.requestSize = startPushBytes.length;
+  inputAuthority.request.selectedModules = inputAuthority.request.selectedModules.slice(0, 1);
+  inputAuthority.request.selectedModuleCount = 1;
+  inputAuthority.request.selectedModulesSha256 = fingerprintJson(
+    inputAuthority.request.selectedModules
+  );
+  inputAuthority.request.selectedRouteCount = 3;
+  inputAuthority.sourceEnvelope.fileSha256 = sha256(sourceEnvelopeBytes);
+  inputAuthority.sourceEnvelope.fileSize = sourceEnvelopeBytes.length;
+  const { inputAuthoritySha256: ignoredInputSha256, ...inputPayload } = inputAuthority;
+  inputAuthority.inputAuthoritySha256 = fingerprintJson(inputPayload);
+
+  const bound = createFullFrozenGraphBindingAuthority({
+    bindingAuthority: baseAuthority,
+    frozenGraphInputAuthority: inputAuthority,
+    sourceEnvelopeBytes,
+    sourcePackage: { path: "/private/source-package.zip", sha256: value.sourcePackageFileSha256[0], size: 789 },
+    startPushBytes,
+  });
+  const normalized = normalizeDeployedRuntimeAuthority(bound.authority);
+  assert.equal(normalized.frozenGraphBinding.inputAuthority.request.selectedRouteCount, 3);
+  assert.deepEqual(normalized.frozenGraphBinding.runtimeModulePaths, ["first.js"]);
 });
 
 test("rejects independently tampered frozen-graph binding material", () => {

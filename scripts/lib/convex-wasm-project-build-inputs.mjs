@@ -2,7 +2,11 @@ import { promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { acquireNativeReleaseFromSelectionFile } from "../acquire-convex-wasm-native-release.mjs";
+import {
+  acquireNativeReleaseFromSelectionFile,
+  bundledNativeReleaseSelectionPath,
+  defaultNativePackageCacheRoot,
+} from "../acquire-convex-wasm-native-release.mjs";
 import {
   createStaticHermesGateConfigArtifacts,
   normalizeGatePolicy,
@@ -75,6 +79,7 @@ export function parseProjectConfig(value, configPath) {
       "gateRoot",
       "gatePolicy",
       "artifactCacheRoot",
+      "deployedRuntimeAuthority",
       "nativeReleaseSelection",
       "nativePackageCacheRoot",
       "compilerPackage",
@@ -83,6 +88,7 @@ export function parseProjectConfig(value, configPath) {
       "sourceRoots",
       "sourcePathspecs",
       "inventoryConfig",
+      "sourceAuthority",
       "matrixReports",
       "matrixTools",
       "jobs",
@@ -119,15 +125,9 @@ export function parseProjectConfig(value, configPath) {
   }
   if (
     (config.compilerPackage === undefined) !== (config.precompilerPackage === undefined) ||
-    (config.nativeReleaseSelection === undefined) === (config.compilerPackage === undefined)
+    (config.nativeReleaseSelection !== undefined && config.compilerPackage !== undefined)
   ) {
     throw new Error("configure a native release selection or both native package directories");
-  }
-  if (
-    config.nativeReleaseSelection !== undefined &&
-    config.nativePackageCacheRoot === undefined
-  ) {
-    throw new Error("nativeReleaseSelection requires nativePackageCacheRoot");
   }
   if (
     config.sourceRoots !== undefined &&
@@ -158,6 +158,15 @@ export function parseProjectConfig(value, configPath) {
     config.matrixTools === undefined
       ? undefined
       : requireKeys(config.matrixTools, ["runner", "cxx"], ["runner", "cxx"], "matrixTools");
+  const sourceAuthority =
+    config.sourceAuthority === undefined
+      ? undefined
+      : requireKeys(
+          config.sourceAuthority,
+          ["backendImageId", "helper", "producerCertificate", "externalDepsPackage", "targetExternalDepsPackage"],
+          ["backendImageId", "helper", "producerCertificate"],
+          "sourceAuthority"
+        );
   const jobs = requirePositiveInteger(config.jobs, "jobs");
   const aotWorkers = requirePositiveInteger(config.aotWorkers, "aotWorkers");
   if (aotWorkers > jobs) {
@@ -176,13 +185,44 @@ export function parseProjectConfig(value, configPath) {
       config.artifactCacheRoot === undefined
         ? undefined
         : path(config.artifactCacheRoot, "artifactCacheRoot"),
-    nativeReleaseSelectionPath:
-      config.nativeReleaseSelection === undefined
+    deployedRuntimeAuthorityPath:
+      config.deployedRuntimeAuthority === undefined
         ? undefined
-        : path(config.nativeReleaseSelection, "nativeReleaseSelection"),
+        : path(config.deployedRuntimeAuthority, "deployedRuntimeAuthority"),
+    sourceAuthority:
+      sourceAuthority === undefined
+        ? undefined
+        : {
+            backendImageId: requireString(
+              sourceAuthority.backendImageId,
+              "sourceAuthority.backendImageId"
+            ),
+            helperPath: path(sourceAuthority.helper, "sourceAuthority.helper"),
+            producerCertificatePath: path(
+              sourceAuthority.producerCertificate,
+              "sourceAuthority.producerCertificate"
+            ),
+            externalDepsPackagePath:
+              sourceAuthority.externalDepsPackage === undefined
+                ? undefined
+                : path(sourceAuthority.externalDepsPackage, "sourceAuthority.externalDepsPackage"),
+            targetExternalDepsPackagePath:
+              sourceAuthority.targetExternalDepsPackage === undefined
+                ? undefined
+                : path(
+                    sourceAuthority.targetExternalDepsPackage,
+                    "sourceAuthority.targetExternalDepsPackage"
+                  ),
+          },
+    nativeReleaseSelectionPath:
+      config.compilerPackage !== undefined
+        ? undefined
+        : config.nativeReleaseSelection === undefined
+          ? bundledNativeReleaseSelectionPath
+          : path(config.nativeReleaseSelection, "nativeReleaseSelection"),
     nativePackageCacheRoot:
       config.nativePackageCacheRoot === undefined
-        ? undefined
+        ? defaultNativePackageCacheRoot()
         : path(config.nativePackageCacheRoot, "nativePackageCacheRoot"),
     compilerPackage:
       config.compilerPackage === undefined
@@ -314,6 +354,7 @@ export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {
     }),
     analyzeContextReuse({
       compilerPackage,
+      diagnosticEncoding: "admission",
       effectExecutionMode: "guest-promise-event-loop",
       gitSourceSnapshot: { repoRoot: config.projectRoot, snapshot: gitSourceSnapshot },
       inventoryOptions:

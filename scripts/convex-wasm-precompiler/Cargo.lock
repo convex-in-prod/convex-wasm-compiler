@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "convex-wasm-precompiler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "serde",

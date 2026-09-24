@@ -804,7 +804,7 @@ function parseChunkJavascript(javascript, modulePath, phase, sourceType) {
   }
 }
 
-function sourceDependencyLiteral(node, modulePath) {
+function sourceDependencyLiteral(node, modulePath, allowComputed) {
   let kind;
   let literal;
   if (
@@ -820,6 +820,7 @@ function sourceDependencyLiteral(node, modulePath) {
   } else if (node.type === "CallExpression" && node.callee?.type === "Import") {
     kind = "dynamic-import";
     if (node.arguments.length !== 1) {
+      if (allowComputed) return null;
       fail(`chunk ${modulePath} has a computed dynamic import before the pinned transform`);
     }
     [literal] = node.arguments;
@@ -829,42 +830,54 @@ function sourceDependencyLiteral(node, modulePath) {
     node.callee.name === "require"
   ) {
     if (node.arguments.length !== 1) {
+      if (allowComputed) return null;
       fail(`chunk ${modulePath} has a computed require before the pinned transform`);
     }
     [literal] = node.arguments;
   } else {
     return undefined;
   }
+  if (literal?.type !== "StringLiteral") {
+    if (allowComputed) return null;
+    fail(
+      `chunk ${modulePath} has a computed ${kind} dependency (${literal?.type ?? "missing"} at ${node.start}:${node.end}) before the pinned transform`
+    );
+  }
   if (
-    literal?.type !== "StringLiteral" ||
     !Number.isSafeInteger(literal.start) ||
     !Number.isSafeInteger(literal.end) ||
     literal.start < 0 ||
     literal.end <= literal.start
   ) {
-    fail(`chunk ${modulePath} has a computed dependency before the pinned transform`);
+    fail(
+      `chunk ${modulePath} has a computed ${kind} dependency (${literal?.type ?? "missing"} at ${node.start}:${node.end}) before the pinned transform`
+    );
   }
   return { kind, specifier: literal.value, start: literal.start, end: literal.end };
 }
 
-function parseModuleDependencyLiterals(module) {
+function parseModuleDependencyLiterals(module, allowComputed) {
   const ast = parseChunkJavascript(
     module.source,
     module.identity.path,
     "official-output module source",
     "module"
   );
-  const literals = [];
+  const dependencies = [];
   visitAst(ast.program, (node) => {
-    const dependency = sourceDependencyLiteral(node, module.identity.path);
-    if (dependency !== undefined) literals.push(dependency);
+    const dependency = sourceDependencyLiteral(node, module.identity.path, allowComputed);
+    if (dependency !== undefined) dependencies.push({ dependency, start: node.start });
   });
-  literals.sort((left, right) => left.start - right.start);
-  return literals.map((literal, occurrence) => ({
-    ...literal,
-    occurrence,
-    path: resolveLiteralSpecifier(module.identity.path, literal.specifier),
-  }));
+  dependencies.sort((left, right) => left.start - right.start);
+  return dependencies.flatMap(({ dependency }, occurrence) =>
+    dependency === null
+      ? []
+      : [{
+          ...dependency,
+          occurrence,
+          path: resolveLiteralSpecifier(module.identity.path, dependency.specifier),
+        }]
+  );
 }
 
 function moduleDependencyLiteralsForSession(record, module) {
@@ -874,7 +887,7 @@ function moduleDependencyLiteralsForSession(record, module) {
     return cached;
   }
   const parsed = Object.freeze(
-    parseModuleDependencyLiterals(module).map((dependency) => Object.freeze(dependency))
+    parseModuleDependencyLiterals(module, false).map((dependency) => Object.freeze(dependency))
   );
   if (record !== undefined) {
     record.dependencyAnalysisCacheMisses += 1;
@@ -1008,7 +1021,9 @@ function admittedSourceChunkBindingPaths(sourceAuthentication, transformSessionR
         module.identity.path,
         bindModuleDependencyLiterals({
           directImports: directImportsByPath.get(module.identity.path) ?? [],
-          literals: moduleDependencyLiteralsForSession(transformSessionRecord, module),
+          // Global binding paths can cross entries outside this build. Their unsupported
+          // expressions are checked when those entries are selected for compilation.
+          literals: parseModuleDependencyLiterals(module, true),
           module,
           modulesByPath,
         })
@@ -2945,6 +2960,12 @@ export function initializeConvexWasmOfficialOutputChunkUnits({
 }
 
 export const convexWasmOfficialOutputChunkUnitTestHooks = Object.freeze({
+  parseModuleDependencies(source, allowComputed = false) {
+    return parseModuleDependencyLiterals(
+      { identity: { path: "_deps/fixture.js" }, source },
+      allowComputed
+    );
+  },
   compactAuthorityReport(session) {
     const record = chunkTransformSessionRecords.get(session);
     if (

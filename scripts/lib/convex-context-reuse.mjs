@@ -323,7 +323,12 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
     phaseTimingsUs: session.graphTemplate.phaseTimingsUs,
     ...(options.gitSourceSnapshot === undefined
       ? {}
-      : { sourceTexts: await captureConvexWasmContextReuseSourceTexts(session) }),
+      : {
+          sourceTexts: await captureConvexWasmContextReuseSourceTexts(session, {
+            functionsRoot,
+            sourceRoots: roots.map((root) => `${root}/`),
+          }),
+        }),
   };
   // The private basis is immutable, but native execution also consumes these top-level graph
   // fields. Freeze their containers so callers cannot change the protocol input after its basis
