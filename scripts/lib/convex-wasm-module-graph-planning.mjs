@@ -367,4 +367,3 @@ export async function publishConvexWasmOfficialOutputModuleGraphPhysicalShardRep
     await fs.rm(temporaryPath, { force: true });
   }
 }
-

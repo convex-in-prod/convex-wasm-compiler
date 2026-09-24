@@ -1,0 +1,14 @@
+{
+  "name": "convex-wasm-items-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "convex": "https://convex-in-prod.github.io/packages/convex/b84ea0f70be09575fbf4f6136b285d5681387ccf/convex.tgz"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.0",
+    "typescript": "6.0.3",
+    "typescript-native": "npm:typescript@7.0.2",
+    "zod": "4.4.3"
+  }
+}

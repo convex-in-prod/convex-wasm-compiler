@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "projectRoot": ".",
+  "workRoot": ".cache/convex-wasm-work",
+  "gateRoot": ".local/convex-wasm-gate",
+  "gatePolicy": "convex-wasm-gate-policy.json",
+  "sourceAuthority": {
+    "backendImageId": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "helper": ".local/source-package-authority",
+    "producerCertificate": ".local/source-package-producer.json"
+  },
+  "sourcePathspecs": [
+    "convex.json",
+    "convex",
+    "scripts/convex-wasm-dependency-adapters.json",
+    "scripts/convex-wasm-registration-adapters.json",
+    "package.json",
+    "package-lock.json"
+  ],
+  "selectedExports": ["items/read:get", "items/write:put"],
+  "matrixTools": { "cxx": "/usr/bin/c++" },
+  "jobs": 1,
+  "aotWorkers": 1,
+  "memoryMaxMiB": 5120
+}

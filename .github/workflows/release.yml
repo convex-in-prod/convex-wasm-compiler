@@ -102,8 +102,12 @@ jobs:
             --omit=dev --no-save "$package_archive" "$sdk_package"
           package_root="$RUNNER_TEMP/convex-wasm-package/node_modules/convex-wasm-compiler"
           cmp release-assets/native-package-selection.json "$package_root/scripts/native-package-selection.json"
-          for command in convex-wasm-build convex-wasm-authority convex-wasm-bind convex-wasm-acquire-native convex-wasm-cache; do
+          for command in convex-wasm-build convex-wasm-authority convex-wasm-bind convex-wasm-acquire-native convex-wasm-setup-gate convex-wasm-cache convex-wasm-publish-registry convex-wasm-transfer-registry; do
             test -x "$RUNNER_TEMP/convex-wasm-package/node_modules/.bin/$command"
+            if "$RUNNER_TEMP/convex-wasm-package/node_modules/.bin/$command" --invalid-option >"$RUNNER_TEMP/$command.stdout" 2>"$RUNNER_TEMP/$command.stderr"; then
+              echo "Installed command did not reject an invalid option: $command" >&2
+              exit 1
+            fi
           done
           PACKAGE_ROOT="$package_root" node --input-type=module -e '
             const root = process.env.PACKAGE_ROOT;
@@ -111,6 +115,8 @@ jobs:
               import(`${root}/scripts/build-convex-wasm.mjs`),
               import(`${root}/scripts/authority-project.mjs`),
               import(`${root}/scripts/bind-convex-wasm.mjs`),
+              import(`${root}/scripts/plan-registry-transfer.mjs`),
+              import(`${root}/scripts/publish-registry.mjs`),
             ]);
           '
           (cd release-assets && sha256sum "$package_filename" >"$package_filename.sha256")

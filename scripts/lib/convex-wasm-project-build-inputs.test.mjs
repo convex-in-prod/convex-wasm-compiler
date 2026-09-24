@@ -76,3 +76,14 @@ test("released project build uses its bundled native selection by default", () =
   assert.equal(parsed.nativeReleaseSelectionPath, bundledNativeReleaseSelectionPath);
   assert.equal(parsed.nativePackageCacheRoot, defaultNativePackageCacheRoot());
 });
+
+test("project matrix tools use the gate-owned Wasmtime runner", () => {
+  const config = projectConfig();
+  delete config.matrixReports;
+  config.matrixTools = { cxx: "../toolchain/c++" };
+  const parsed = parseProjectConfig(config, configPath);
+  assert.deepEqual(parsed.matrixTools, {
+    cxx: "/project/toolchain/c++",
+    runner: "/project/gate/bin/convex-wasm-wasmtime-runner",
+  });
+});

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
 import {
@@ -156,7 +155,7 @@ export async function main(argumentsList) {
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   try {
     await main(process.argv.slice(2));
   } catch (error) {

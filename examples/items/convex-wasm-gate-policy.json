@@ -1,0 +1,29 @@
+{
+  "command": {
+    "environment": { "HOME": "/tmp", "PATH": "/usr/bin:/bin" },
+    "maxOutputBytes": 67108864,
+    "phaseTimeoutMs": 2700000,
+    "timeExecutable": "/usr/bin/time"
+  },
+  "executionLimits": {
+    "executionFuel": 10000000000000,
+    "maxGuestMemoryBytes": 268435456,
+    "maxHostOwnedBytes": 16777216,
+    "maxOperationCount": 10000,
+    "maxResultBytes": 8388608,
+    "maxValueHandles": 1024,
+    "timeoutMilliseconds": 1000
+  },
+  "guestInitializationDiagnostics": "verbose-local",
+  "platformLimits": {
+    "argumentBytes": 16777216,
+    "documentsRead": 32000,
+    "documentsWritten": 16000,
+    "executionTimeMs": 1000,
+    "readBytes": 16777216,
+    "resultBytes": 16777216,
+    "scheduledArgumentBytes": 16777216,
+    "scheduledFunctions": 1000,
+    "writeBytes": 16777216
+  }
+}

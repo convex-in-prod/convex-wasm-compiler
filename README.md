@@ -105,7 +105,7 @@ Downstream applications remain responsible for selecting eligible modules,
 supplying dependency and registration adapter descriptors, and transferring
 artifacts to their patched backend. The project commands below build an
 authenticated package and deployment manifest. They do not transfer or activate
-that manifest, or install Static Hermes and Emscripten.
+that manifest.
 
 The matrix runners use the installed Convex SDK package to construct canonical
 vectors and identify the SDK source files they exercised. The project command
@@ -131,9 +131,32 @@ npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/re
 The project owns its Convex SDK dependency; the compiler resolves that installed
 SDK for source analysis and matrix generation. Run
 `npx convex-wasm-build --config convex-wasm.project.json` from the project.
+Before the first build, install the pinned Static Hermes and Emscripten gate:
+
+```sh
+npx convex-wasm-setup-gate --gate-root .local/convex-wasm-gate --jobs 2
+```
+
+This command checks out pinned Hermes and Emscripten SDK sources, installs
+Emscripten 6.0.5, and builds the host Static Hermes compiler,
+the Wasm runtime archives, and the Wasmtime runner used by the codec and request
+matrices.
+The runner's Cargo dependency and the verified precompiler package both pin
+the same Wasmtime revision; setup does not need a second Wasmtime source checkout.
+It requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
+Rust toolchain named by the packaged runner source. It targets the supported
+Linux and macOS hosts; the first run builds substantial native code. A later
+run checks the pinned revisions and reuses the completed files. `--check-only`
+verifies an existing gate without
+downloading or building. Use the same `gateRoot` in the project config. The
+project's gate policy and matching precompiler package are verified during the
+build.
 The project config selects complete query and mutation entry namespaces,
 staged Git paths, a verified native release or local native packages, the pinned
-Static Hermes gate, and private work/cache directories. For example:
+Static Hermes gate, and private work/cache directories. The
+[items project](examples/items/README.md) supplies matching query and
+mutation source, a project configuration, and a Linux gate policy. Copy it
+outside this checkout for an independent adoption run. For example:
 
 ```json
 {
@@ -147,13 +170,17 @@ Static Hermes gate, and private work/cache directories. For example:
     "helper": ".local/source-package-authority",
     "producerCertificate": ".local/source-package-producer.json"
   },
-  "sourcePathspecs": ["convex.json", "convex", "shared", "package-lock.json"],
+  "sourcePathspecs": [
+    "convex.json",
+    "convex",
+    "shared",
+    "scripts/convex-wasm-dependency-adapters.json",
+    "scripts/convex-wasm-registration-adapters.json",
+    "package-lock.json"
+  ],
   "sourceRoots": ["shared/"],
   "selectedExports": ["items/read:get", "items/write:put"],
-  "matrixReports": {
-    "codec": ".cache/codec-matrix.json",
-    "request": ".cache/request-matrix.json"
-  },
+  "matrixTools": { "cxx": "/absolute/path/to/c++" },
   "jobs": 1,
   "aotWorkers": 1,
   "memoryMaxMiB": 5120
@@ -161,8 +188,11 @@ Static Hermes gate, and private work/cache directories. For example:
 ```
 
 Paths resolve relative to the config file. The selected source must be staged in
-Git, including changes to the listed pathspecs. `matrixTools` with `runner` and
-`cxx` paths can replace `matrixReports`; the command then creates both reports.
+Git, including changes to the listed pathspecs. With `matrixTools`, the command
+creates both matrix reports. The runner defaults to the executable installed by
+`convex-wasm-setup-gate` under `gateRoot/bin`; set `matrixTools.cxx` to the host
+C++ compiler's absolute path. A caller can instead supply `matrixReports` with
+previously generated and authenticated codec and request reports.
 The tagged JavaScript package includes its matching native selection, so the
 build downloads and verifies the compiler and precompiler into the default
 per-user cache. Set `nativeReleaseSelection` to use another pinned selection,
@@ -176,8 +206,38 @@ policy. It also records the installed Convex CLI's complete source request in
 the private build directory. The CLI writes this request locally without
 uploading it. A source-package authority helper built from the matching patched
 backend can construct the exact source package and frozen authority from this
-request without activating a deployment. Configure its executable and producer
-certificate under `sourceAuthority`, then run:
+request without activating a deployment. Build the patched backend image with
+`LOCAL_BACKEND_FEATURES=static-hermes-wasmtime-gate` and
+`BUILD_SOURCE_PACKAGE_PREACTIVATION_AUTHORITY=true`. Its final image then contains
+`/convex/source_package_preactivation_authority`. From the patched backend
+repository root, the relevant build flags are:
+
+```sh
+docker build \
+  --build-arg LOCAL_BACKEND_FEATURES=static-hermes-wasmtime-gate \
+  --build-arg BUILD_SOURCE_PACKAGE_PREACTIVATION_AUTHORITY=true \
+  -t patched-convex-backend \
+  -f self-hosted/docker-build/Dockerfile.backend .
+```
+
+On a Linux host, obtain the immutable image ID and extract the helper from that
+same local image:
+
+```sh
+mkdir -p .local
+backend_image_id=$(docker image inspect --format '{{.Id}}' patched-convex-backend)
+docker create --name convex-wasm-helper-export "$backend_image_id"
+docker cp convex-wasm-helper-export:/convex/source_package_preactivation_authority .local/source-package-authority
+docker rm convex-wasm-helper-export
+chmod 0700 .local/source-package-authority
+```
+
+Set `sourceAuthority.backendImageId` to that image ID, and choose a new container
+name when one is already in use. The binary is not included unless
+the image was built with that option. For a macOS project, run the build and
+authority commands together in a compatible Linux environment, or build a
+matching host helper from the patched backend source. Configure the executable
+and producer certificate under `sourceAuthority`, then run:
 
 ```sh
 npx convex-wasm-authority --config convex-wasm.project.json \
@@ -224,8 +284,63 @@ configured. An operator may instead name an existing private
 Binding checks the selected runtime modules against that authority, constructs
 the deployment from the authenticated source envelope, checks the complete
 source request against the frozen-graph binding, verifies each package,
-and writes an authenticated deployment-v8 manifest. Backend
-registry transfer and activation remain separate steps.
+and writes an authenticated deployment-v8 manifest. Publish that manifest and
+its reachable Core Wasm and AOT packages into a **new** local registry directory:
+
+```sh
+install -d -m 700 .private
+npx convex-wasm-publish-registry \
+  --config convex-wasm.project.json \
+  --artifact-report .cache/convex-wasm-work/build-.../artifact-report.json \
+  --deployment .cache/deployment-v8.json \
+  --registry-root .private/runtime-registry \
+  --publication shadow-only \
+  --preflight-output .private/registry-preflight.json
+```
+
+`--publication primary` is also supported. The command verifies the bound
+deployment, source-package authority, and selected physical packages before
+writing a canonical generation, source catalog, and current pointer. The
+registry root must not exist, and its parent must be a canonical directory;
+the preflight output parent must also be owned by the current user and mode
+`0700`. The output describes the selected
+generation for transfer planning. This command currently creates fresh local
+registries only; it does not append a generation to an existing local registry.
+Run the patched backend's registry preflight against the published directory
+before treating it as backend-accepted. Transfer, backend readiness, and
+activation remain separate steps.
+
+`deriveRuntimeRegistryTransferPlan` in
+`scripts/lib/runtime-registry-transfer-closure.mjs` accepts the patched
+backend's authenticated registry preflight and, optionally, its retained
+destination source catalog. It returns the selected generation's relative
+payload paths, deduplicated hard-link relationships, and the merged source
+catalog bytes. The paths include compatible locally produced AOT and exclude
+unreferenced generations. The caller transfers payloads before publishing the
+source catalog and current pointer, then separately verifies backend readiness
+and activates the selected pair. The planner does not choose a transport or
+deployment target.
+
+The installed `convex-wasm-transfer-registry` command uses that plan to transfer
+one backend-preflighted generation over SSH and rsync. Pass the absolute local
+registry root, the patched backend's authenticated preflight for `current` or
+one explicit pair, and the destination's existing root-owned registry directory:
+
+```sh
+npx convex-wasm-transfer-registry \
+  --local-root /path/to/runtime-registry \
+  --preflight /path/to/registry-preflight.json \
+  --ssh-target root@host \
+  --remote-root /path/to/runtime-registry
+```
+
+For a non-current pair, also pass its deployment, generation manifest,
+generation, and source-package runtime-content SHA-256 values. The command
+checks the preflight against the local catalog, current pointer, and selected
+generation before transferring only reachable payloads. It retains the
+destination's existing catalog entries, installs payloads before control files,
+and verifies the destination control-file hashes. Registry construction,
+backend readiness, and activation are separate operations.
 
 ## Development
 

@@ -234,6 +234,16 @@ async function buildPrecompiler(targetTriple, buildInputs, source, cargoBuildJob
     "convex-wasm-precompiler",
     "--message-format=json-render-diagnostics",
   ];
+  const runnerCargoArguments = [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    targetTriple,
+    "--bin",
+    "convex-wasm-wasmtime-runner",
+    "--message-format=json-render-diagnostics",
+  ];
   const environment = cleanNativeBuildEnvironment(process.env);
   const cargoTargetDirectory = resolvePrecompilerCargoTargetDirectory(environment);
   const cargoBuildDirectory = resolveNativePackageBuildDirectory({
@@ -279,6 +289,7 @@ async function buildPrecompiler(targetTriple, buildInputs, source, cargoBuildJob
   for (const [operation, argumentsList] of [
     ["Convex Wasm precompiler Cargo test", cargoTestArguments],
     ["Convex Wasm precompiler Cargo build", cargoArguments],
+    ["Convex Wasm matrix runner Cargo build", runnerCargoArguments],
   ]) {
     const result = await runBoundedNativeCommand({
       arguments: argumentsList,

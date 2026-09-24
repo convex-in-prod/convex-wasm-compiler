@@ -12,14 +12,10 @@ import {
   convexWasmSerializedModuleMaxBytes,
 } from "./lib/convex-wasm-artifact-pipeline.mjs";
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
+import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-const gateRevisions = Object.freeze({
-  emsdk: "dfb9d1a46c3bb8f52e1e6324be23123b9d73c190",
-  hermes: "5354e994a64a52e883f0c4cda8743b20f10a1f08",
-});
 
 const guestInitializationDiagnosticsModes = new Set([
   "production-class-only",
@@ -478,10 +474,9 @@ export function createStaticHermesGateArtifactConfig({
 
 async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
   const normalizedPolicy = normalizeGatePolicy(policy);
-  const [hermesRevision, wasmtimeRevision, emsdkRevision, precompilerPackage] =
+  const [hermesRevision, emsdkRevision, precompilerPackage] =
     await Promise.all([
       gitRevision(resolve(gateRoot, "hermes"), "Static Hermes checkout"),
-      gitRevision(resolve(gateRoot, "wasmtime"), "Wasmtime checkout"),
       gitRevision(resolve(gateRoot, "emsdk"), "emsdk checkout"),
       loadAndVerifyPrecompilerPackage(precompilerPackageDirectory),
     ]);
@@ -498,7 +493,7 @@ async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
   const packagedWasmtimeRevision =
     precompilerPackage.manifest.identities.wasmtime.revision;
   if (
-    wasmtimeRevision !== packagedWasmtimeRevision ||
+    packagedWasmtimeRevision !== gateRevisions.wasmtime ||
     precompilerPackage.manifest.platform.targetTriple !== targetTriple() ||
     !/^[0-9a-f]{40}$/u.test(packagedWasmtimeRevision)
   ) {

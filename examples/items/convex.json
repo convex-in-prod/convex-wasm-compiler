@@ -1,0 +1,9 @@
+{
+  "functions": "convex/",
+  "bundler": {
+    "includeSourcesContent": false,
+    "experimentalContextReuse": {
+      "default": true
+    }
+  }
+}

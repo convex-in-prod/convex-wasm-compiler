@@ -157,7 +157,7 @@ export function parseProjectConfig(value, configPath) {
   const matrixTools =
     config.matrixTools === undefined
       ? undefined
-      : requireKeys(config.matrixTools, ["runner", "cxx"], ["runner", "cxx"], "matrixTools");
+      : requireKeys(config.matrixTools, ["runner", "cxx"], ["cxx"], "matrixTools");
   const sourceAuthority =
     config.sourceAuthority === undefined
       ? undefined
@@ -176,10 +176,11 @@ export function parseProjectConfig(value, configPath) {
   if (!Number.isSafeInteger(memoryMaxMiB * 1024 * 1024)) {
     throw new Error("memoryMaxMiB exceeds the supported byte limit");
   }
+  const gateRoot = path(config.gateRoot, "gateRoot");
   return {
     projectRoot: path(config.projectRoot, "projectRoot"),
     workRoot: path(config.workRoot, "workRoot"),
-    gateRoot: path(config.gateRoot, "gateRoot"),
+    gateRoot,
     gatePolicyPath: path(config.gatePolicy, "gatePolicy"),
     artifactCacheRoot:
       config.artifactCacheRoot === undefined
@@ -250,7 +251,10 @@ export function parseProjectConfig(value, configPath) {
       matrixTools === undefined
         ? undefined
         : {
-            runner: path(matrixTools.runner, "matrixTools.runner"),
+            runner:
+              matrixTools.runner === undefined
+                ? join(gateRoot, "bin", "convex-wasm-wasmtime-runner")
+                : path(matrixTools.runner, "matrixTools.runner"),
             cxx: path(matrixTools.cxx, "matrixTools.cxx"),
           },
     jobs,

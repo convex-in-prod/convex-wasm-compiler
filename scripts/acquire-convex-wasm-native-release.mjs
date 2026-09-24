@@ -2,7 +2,7 @@
 
 import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { canonicalCompilerPackageJson } from "./lib/convex-wasm-compiler-package.mjs";
 import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
@@ -81,7 +81,7 @@ export async function main(argumentsList) {
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   main(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

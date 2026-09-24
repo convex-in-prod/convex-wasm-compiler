@@ -2,7 +2,6 @@
 
 import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { canonicalJson } from "./lib/convex-wasm-artifact-contract.mjs";
 import {
@@ -197,7 +196,7 @@ export async function bindConvexWasmProjectBuild({
   return { deploymentManifest: outputPath, deploymentSha256: bound.deploymentSha256 };
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   const values = parseArguments(process.argv.slice(2));
   const result = await bindConvexWasmProjectBuild({
     configPath: values["--config"],

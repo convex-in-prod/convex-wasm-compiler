@@ -2,7 +2,6 @@
 
 import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { canonicalJson } from "./lib/convex-wasm-artifact-contract.mjs";
 import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
@@ -231,7 +230,7 @@ export async function createConvexWasmProjectAuthority({ configPath, artifactRep
   };
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   const argumentsList = process.argv.slice(2);
   if (
     ![4, 6].includes(argumentsList.length) ||

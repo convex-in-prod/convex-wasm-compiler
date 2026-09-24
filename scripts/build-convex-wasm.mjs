@@ -2,7 +2,6 @@
 
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { canonicalJson, convexWasmBuildResourceGuardKind } from "./lib/convex-wasm-artifact-pipeline.mjs";
 import { describeNativeCommandTermination, runBoundedNativeCommand } from "./lib/bounded-native-command.mjs";
@@ -91,6 +90,6 @@ export async function main(argumentsList) {
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   await main(process.argv.slice(2));
 }
