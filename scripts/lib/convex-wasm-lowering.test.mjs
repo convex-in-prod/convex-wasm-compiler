@@ -165,7 +165,7 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     compileProfileJavascript: "var __convexWasmCompileProfile = {};",
   });
   const requestStart = rendered.indexOf(
-    "function __convexCapabilityOwnDataKeys(value: any, description: string): any {"
+    "function __convexCapabilityOwnDataKeys(value: any, description: string, sortKeys: boolean = true): any {"
   );
   const requestEnd = rendered.indexOf(
     "\nconst __convexHostCapabilityCurrent = $SHBuiltin.extern_c(",
@@ -5926,6 +5926,19 @@ test("canonical SDK facade rejects malformed, wrong-kind, and unleased storage c
 test("SDK value responses keep host tagged JSON until the official SDK consumes it", async () => {
   const harness = nativeCapabilityHarness();
   harness.activateSdk("query");
+  assert.equal(harness.sdkFacade.queryCollect, true);
+  const collected = harness.sdkFacade.asyncSyscall(
+    "1.0/queryCollect",
+    JSON.stringify({
+      query: { operators: [], source: { order: null, tableName: "documents", type: "FullTableScan" } },
+      version: convexSdkVersion,
+    })
+  );
+  assert.equal(harness.requests.shift().terminal, "collect");
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate([{ _id: "document-id" }]));
+  assert.equal(await collected, '[{"_id":"document-id"}]');
+  assert.deepEqual(harness.taggedTransfers, ['[{"_id":"document-id"}]']);
+
   const response = harness.sdkFacade.asyncSyscall(
     "1.0/get",
     JSON.stringify({ id: "document-id", isSystem: false, table: "documents", version: convexSdkVersion })
@@ -5940,7 +5953,7 @@ test("SDK value responses keep host tagged JSON until the official SDK consumes 
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(document));
   const tagged = JSON.stringify(convexToJson(document));
   assert.equal(await response, tagged);
-  assert.deepEqual(harness.taggedTransfers, [tagged]);
+  assert.deepEqual(harness.taggedTransfers, ['[{"_id":"document-id"}]', tagged]);
   assert.equal(harness.restoredTransfers.length, 0);
   assert.equal(harness.outstandingHandles(), 0);
   assert.equal(harness.cleanup(), 0);

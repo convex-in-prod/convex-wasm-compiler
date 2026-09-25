@@ -451,8 +451,8 @@ if (tool === "shermes") {
               "/* function one */" +
               (hasLargeCBundleMember
                 ? "x".repeat(${String(
-                  convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction
-                    .minimumTranslationUnitBytes
+                  convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember
+                    .minimumMemberBytes
                 )})
                 : hasOversizeBundleMember
                 ? "x".repeat(2097152)

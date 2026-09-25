@@ -23,7 +23,7 @@ export const C_BUNDLE_KIND = "static-hermes-c-bundle-v1";
 export const C_BUNDLE_MANIFEST_PATH = "unit.c.json";
 const C_BUNDLE_ARGUMENT = "-Xemit-c-bundle";
 export const staticHermesCBundleShardTargetBytes = 2_097_152;
-export const staticHermesLargeCBundleTranslationUnitBytesThreshold = 64 * 1024 * 1024;
+export const staticHermesLargeCBundleMemberBytesThreshold = 2 * staticHermesCBundleShardTargetBytes;
 const C_BUNDLE_SHARD_SIZE_ARGUMENT = `-Xemit-c-shard-size=${String(staticHermesCBundleShardTargetBytes)}`;
 const C_BUNDLE_C_OPTIMIZATION_LEVEL_ZERO = 0;
 const C_BUNDLE_OVERSIZE_REASONS = new Set(["no-outlineable-run", "single-instruction"]);
@@ -46,15 +46,15 @@ export const convexWasmStaticHermesCBundleMemberCompilationPolicy = Object.freez
     role: "function",
     stage: C_OPTIMIZATION_LEVEL_ZERO_C_BUNDLE_MEMBER_OBJECT_STAGE,
   }),
-  largeBundleFunction: Object.freeze({
+  largeFunctionMember: Object.freeze({
     appliesToFunctionFragments: false,
-    minimumTranslationUnitBytes: staticHermesLargeCBundleTranslationUnitBytesThreshold,
+    minimumMemberBytes: staticHermesLargeCBundleMemberBytesThreshold,
     optimizationFlag: "-Oz",
     role: "function",
   }),
-  kind: "convex-wasm-static-hermes-c-bundle-member-compilation-v3",
-  // Keep large generated initializers size-oriented, but compile ordinary application
-  // members for speed. The large-unit exception prevents the known peak-memory blow-up.
+  kind: "convex-wasm-static-hermes-c-bundle-member-compilation-v4",
+  // An exceptional function can exceed the shard target. Keep only that member
+  // size-oriented; unrelated members in the same bundle compile for speed.
   normalOptimizationFlag: "-O2",
 });
 
@@ -121,9 +121,9 @@ export function staticHermesCBundleMemberCompilation(
   ) {
     fail("Static Hermes C bundle members must start with exactly one -O2 flag");
   }
-  const largeBundleFunction = memberCompilationPolicy.largeBundleFunction;
-  if (largeBundleFunction.appliesToFunctionFragments !== false) {
-    fail("Static Hermes large-bundle optimization policy must exclude function fragments");
+  const largeFunctionMember = memberCompilationPolicy.largeFunctionMember;
+  if (largeFunctionMember.appliesToFunctionFragments !== false) {
+    fail("Static Hermes large-member optimization policy must exclude function fragments");
   }
   if (
     member.role === "function" &&
@@ -144,10 +144,10 @@ export function staticHermesCBundleMemberCompilation(
     };
   }
   const optimizationFlag =
-    member.role === largeBundleFunction.role &&
+    member.role === largeFunctionMember.role &&
     member.functionFragmentCount === undefined &&
-    translationUnitBytes >= largeBundleFunction.minimumTranslationUnitBytes
-      ? largeBundleFunction.optimizationFlag
+    member.size >= largeFunctionMember.minimumMemberBytes
+      ? largeFunctionMember.optimizationFlag
       : memberCompilationPolicy.normalOptimizationFlag;
   return {
     command: {

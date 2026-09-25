@@ -4497,6 +4497,19 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       terminal: "stream",
     }).then(__convexSdkEncodeResult);
   }
+  if (operation === "1.0/queryCollect") {
+    const args = __convexSdkParseArguments(jsonArguments);
+    __convexCapabilityRequireExactKeys(
+      args,
+      ["query", "version"],
+      "Convex SDK collect query arguments",
+    );
+    __convexSdkRequireInstalledVersion(args.version, "Convex SDK collect query");
+    return __convexSdkStartAsync(
+      __convexSdkQueryRequest(args.query, "collect", null),
+      "taggedJson",
+    );
+  }
   if (operation === "1.0/queryPage") {
     const args = __convexSdkParseArguments(jsonArguments);
     const pagination = __convexSdkQueryPagePagination(args);
@@ -4817,6 +4830,7 @@ Object.freeze(__convexSdkSyscall);
 Object.freeze(__convexSdkJsSyscall);
 const __convexSdkFacade: any = Object.freeze({
   asyncSyscall: __convexSdkAsyncSyscall,
+  queryCollect: true,
   jsSyscall: __convexSdkJsSyscall,
   syscall: __convexSdkSyscall,
 });
@@ -5446,7 +5460,7 @@ Object.defineProperty(__convexTargetGlobal, "performance", {
 
 function renderNativeCapabilityRequestEnvelopeRuntime() {
   return String.raw`
-function __convexCapabilityOwnDataKeys(value: any, description: string): any {
+function __convexCapabilityOwnDataKeys(value: any, description: string, sortKeys: boolean = true): any {
   if (
     value === null ||
     typeof value !== "object" ||
@@ -5461,7 +5475,7 @@ function __convexCapabilityOwnDataKeys(value: any, description: string): any {
   ) {
     throw new Error(description + " must not contain symbol properties");
   }
-  const keys = Object.keys(value).sort();
+  const keys = Object.keys(value);
   for (let index = 0; index < keys.length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(value, keys[index]);
     if (
@@ -5472,6 +5486,7 @@ function __convexCapabilityOwnDataKeys(value: any, description: string): any {
       throw new Error(description + " must not contain accessor properties");
     }
   }
+  if (sortKeys) keys.sort();
   return keys;
 }
 
@@ -5479,8 +5494,11 @@ function __convexCapabilityRequireExactKeys(
   value: any,
   keys: string[],
   description: string,
+  checkedKeys?: string[],
 ): void {
-  const actual = __convexCapabilityOwnDataKeys(value, description);
+  const actual = checkedKeys === undefined
+    ? __convexCapabilityOwnDataKeys(value, description)
+    : checkedKeys;
   if (actual.length !== keys.length) {
     throw new Error(description + " has invalid fields");
   }
@@ -5930,7 +5948,7 @@ function __convexCapabilityEncodeTransactionLimits(limits: any): any {
 }
 
 function __convexCapabilityEncodeRequest(request: any): any {
-  __convexCapabilityOwnDataKeys(request, "Capability request");
+  const requestKeys = __convexCapabilityOwnDataKeys(request, "Capability request", false);
   if (request.version !== ${CAPABILITY_REQUEST_ABI_VERSION} || typeof request.kind !== "string") {
     throw new Error("Capability request has an invalid version or kind");
   }
@@ -5943,33 +5961,33 @@ function __convexCapabilityEncodeRequest(request: any): any {
     kind === "getTransactionMetrics" ||
     kind === "performanceNow"
   ) {
-    __convexCapabilityRequireExactKeys(request, ["kind", "version"], "Capability request");
-    return __convexCapabilitySortedObject({kind, version: ${CAPABILITY_REQUEST_ABI_VERSION}});
+    __convexCapabilityRequireExactKeys(request, ["kind", "version"], "Capability request", requestKeys);
+    return {kind, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
   }
   if (kind === "auditLog") {
-    __convexCapabilityRequireExactKeys(request, ["body", "kind", "version"], "Capability request");
-    return __convexCapabilitySortedObject({
+    __convexCapabilityRequireExactKeys(request, ["body", "kind", "version"], "Capability request", requestKeys);
+    return {
       body: __convexCapabilityEncodeAuditBody(request.body),
       kind,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "environmentVariableGet") {
-    __convexCapabilityRequireExactKeys(request, ["kind", "name", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["kind", "name", "version"], "Capability request", requestKeys);
     if (typeof request.name !== "string") throw new Error("Environment variable name must be a string");
-    return __convexCapabilitySortedObject({kind, name: request.name, version: ${CAPABILITY_REQUEST_ABI_VERSION}});
+    return {kind, name: request.name, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
   }
   if (kind === "dbNormalizeId") {
-    __convexCapabilityRequireExactKeys(request, ["kind", "table", "value", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["kind", "table", "value", "version"], "Capability request", requestKeys);
     if (typeof request.table !== "string" || typeof request.value !== "string") {
       throw new Error("Normalize ID request fields must be strings");
     }
-    return __convexCapabilitySortedObject({
+    return {
       kind,
       table: request.table,
       value: request.value,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "dbGet" || kind === "dbSystemGet") {
     const hasTable = request.table !== undefined;
@@ -5977,31 +5995,32 @@ function __convexCapabilityEncodeRequest(request: any): any {
       request,
       hasTable ? ["id", "kind", "table", "version"] : ["id", "kind", "version"],
       "Capability request",
+      requestKeys,
     );
     if (hasTable) {
       if (typeof request.table !== "string") throw new Error("Database table must be a string");
-      return __convexCapabilitySortedObject({
+      return {
         id: __convexCapabilityEncodeCommittedValue(request.id),
         kind,
         table: request.table,
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
-      });
+      };
     }
-    return __convexCapabilitySortedObject({
+    return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "dbDelete") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "version"], "Capability request", requestKeys);
     if (typeof request.table !== "string") throw new Error("Database table must be a string");
-    return __convexCapabilitySortedObject({
+    return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       table: request.table,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (
     kind === "storageGetUrl" ||
@@ -6012,49 +6031,50 @@ function __convexCapabilityEncodeRequest(request: any): any {
       request,
       ["kind", "storageId", "version"],
       "Capability request",
+      requestKeys,
     );
     if (typeof request.storageId !== "string") throw new Error("Storage ID must be a string");
-    return __convexCapabilitySortedObject({
+    return {
       kind,
       storageId: __convexCapabilityEncodeCommittedValue(request.storageId),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "storageGenerateUploadUrl") {
-    __convexCapabilityRequireExactKeys(request, ["kind", "version"], "Capability request");
-    return __convexCapabilitySortedObject({kind, version: ${CAPABILITY_REQUEST_ABI_VERSION}});
+    __convexCapabilityRequireExactKeys(request, ["kind", "version"], "Capability request", requestKeys);
+    return {kind, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
   }
   if (kind === "dbInsert") {
-    __convexCapabilityRequireExactKeys(request, ["kind", "table", "value", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["kind", "table", "value", "version"], "Capability request", requestKeys);
     if (typeof request.table !== "string") throw new Error("Database table must be a string");
-    return __convexCapabilitySortedObject({
+    return {
       kind,
       table: request.table,
       value: __convexCapabilityEncodeTaggedOrGuest(request.value),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "dbPatch") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "patch", "table", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["id", "kind", "patch", "table", "version"], "Capability request", requestKeys);
     if (typeof request.table !== "string") throw new Error("Database table must be a string");
-    return __convexCapabilitySortedObject({
+    return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       patch: __convexCapabilityEncodePatch(request.patch),
       table: request.table,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "dbReplace") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "value", "version"], "Capability request");
+    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "value", "version"], "Capability request", requestKeys);
     if (typeof request.table !== "string") throw new Error("Database table must be a string");
-    return __convexCapabilitySortedObject({
+    return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       table: request.table,
       value: __convexCapabilityEncodeTaggedOrGuest(request.value),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "dbQuery") {
     const paginate = request.terminal === "paginate";
@@ -6064,6 +6084,7 @@ function __convexCapabilityEncodeRequest(request: any): any {
         ? ["kind", "operators", "order", "pagination", "source", "table", "terminal", "version"]
         : ["kind", "operators", "order", "source", "table", "terminal", "version"],
       "Capability request",
+      requestKeys,
     );
     if (typeof request.table !== "string") throw new Error("Query table must be a string");
     if (request.order !== null && request.order !== "asc" && request.order !== "desc") {
@@ -6084,7 +6105,7 @@ function __convexCapabilityEncodeRequest(request: any): any {
     }
     const operators = __convexCapabilityEncodeQueryOperators(request.operators);
     return paginate
-      ? __convexCapabilitySortedObject({
+      ? ({
           kind,
           operators,
           order: request.order,
@@ -6094,7 +6115,7 @@ function __convexCapabilityEncodeRequest(request: any): any {
           terminal: request.terminal,
           version: ${CAPABILITY_REQUEST_ABI_VERSION},
         })
-      : __convexCapabilitySortedObject({
+      : ({
           kind,
           operators,
           order: request.order,
@@ -6109,18 +6130,20 @@ function __convexCapabilityEncodeRequest(request: any): any {
       request,
       ["functionAddress", "kind", "version"],
       "Capability request",
+      requestKeys,
     );
-    return __convexCapabilitySortedObject({
+    return {
       functionAddress: __convexCapabilityEncodeFunctionAddress(request.functionAddress),
       kind,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "runUdf") {
     __convexCapabilityRequireExactKeys(
       request,
       ["args", "functionAddress", "kind", "transactionLimits", "udfType", "version"],
       "Capability request",
+      requestKeys,
     );
     if (
       request.udfType !== "mutation" &&
@@ -6129,14 +6152,14 @@ function __convexCapabilityEncodeRequest(request: any): any {
     ) {
       throw new Error("Nested UDF type is unsupported");
     }
-    return __convexCapabilitySortedObject({
+    return {
       args: __convexCapabilityEncodeTaggedOrGuest(request.args),
       functionAddress: __convexCapabilityEncodeFunctionAddress(request.functionAddress),
       kind,
       transactionLimits: __convexCapabilityEncodeTransactionLimits(request.transactionLimits),
       udfType: request.udfType,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   if (kind === "schedulerRunAfter" || kind === "schedulerRunAt") {
     const timeField = kind === "schedulerRunAfter" ? "delayMilliseconds" : "timestampMilliseconds";
@@ -6144,6 +6167,7 @@ function __convexCapabilityEncodeRequest(request: any): any {
       request,
       ["args", "functionAddress", "kind", timeField, "version"],
       "Capability request",
+      requestKeys,
     );
     const fields: any = {
       args: __convexCapabilityEncodeCommittedValue(request.args),
@@ -6159,12 +6183,12 @@ function __convexCapabilityEncodeRequest(request: any): any {
     return __convexCapabilitySortedObject(fields);
   }
   if (kind === "schedulerCancel") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "version"], "Capability request");
-    return __convexCapabilitySortedObject({
+    __convexCapabilityRequireExactKeys(request, ["id", "kind", "version"], "Capability request", requestKeys);
+    return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    });
+    };
   }
   throw new Error("Capability request kind is unsupported");
 }

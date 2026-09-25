@@ -76,7 +76,7 @@ function normalizeMemberObjectIdentity(value, description) {
   const memberCompilationPolicy = value.compilation.memberCompilationPolicy;
   requireExactPlainObject(
     memberCompilationPolicy,
-    ["cOptimizationLevelZero", "kind", "largeBundleFunction", "normalOptimizationFlag"],
+    ["cOptimizationLevelZero", "kind", "largeFunctionMember", "normalOptimizationFlag"],
     `${description}.compilation.memberCompilationPolicy`
   );
   requireExactPlainObject(
@@ -98,37 +98,37 @@ function normalizeMemberObjectIdentity(value, description) {
     );
   }
   requireExactPlainObject(
-    memberCompilationPolicy.largeBundleFunction,
-    ["appliesToFunctionFragments", "minimumTranslationUnitBytes", "optimizationFlag", "role"],
-    `${description}.compilation.memberCompilationPolicy.largeBundleFunction`
+    memberCompilationPolicy.largeFunctionMember,
+    ["appliesToFunctionFragments", "minimumMemberBytes", "optimizationFlag", "role"],
+    `${description}.compilation.memberCompilationPolicy.largeFunctionMember`
   );
   if (
     requireBoolean(
-      memberCompilationPolicy.largeBundleFunction.appliesToFunctionFragments,
-      `${description}.compilation.memberCompilationPolicy.largeBundleFunction.appliesToFunctionFragments`
+      memberCompilationPolicy.largeFunctionMember.appliesToFunctionFragments,
+      `${description}.compilation.memberCompilationPolicy.largeFunctionMember.appliesToFunctionFragments`
     )
   ) {
     fail(
-      `${description}.compilation.memberCompilationPolicy.largeBundleFunction must exclude function fragments`
+      `${description}.compilation.memberCompilationPolicy.largeFunctionMember must exclude function fragments`
     );
   }
   requirePositiveInteger(
-    memberCompilationPolicy.largeBundleFunction.minimumTranslationUnitBytes,
-    `${description}.compilation.memberCompilationPolicy.largeBundleFunction.minimumTranslationUnitBytes`
+    memberCompilationPolicy.largeFunctionMember.minimumMemberBytes,
+    `${description}.compilation.memberCompilationPolicy.largeFunctionMember.minimumMemberBytes`
   );
   requireString(
-    memberCompilationPolicy.largeBundleFunction.optimizationFlag,
-    `${description}.compilation.memberCompilationPolicy.largeBundleFunction.optimizationFlag`
+    memberCompilationPolicy.largeFunctionMember.optimizationFlag,
+    `${description}.compilation.memberCompilationPolicy.largeFunctionMember.optimizationFlag`
   );
   requireString(
-    memberCompilationPolicy.largeBundleFunction.role,
-    `${description}.compilation.memberCompilationPolicy.largeBundleFunction.role`
+    memberCompilationPolicy.largeFunctionMember.role,
+    `${description}.compilation.memberCompilationPolicy.largeFunctionMember.role`
   );
   requireString(
     memberCompilationPolicy.kind,
     `${description}.compilation.memberCompilationPolicy.kind`
   );
-  if (memberCompilationPolicy.kind !== "convex-wasm-static-hermes-c-bundle-member-compilation-v3") {
+  if (memberCompilationPolicy.kind !== "convex-wasm-static-hermes-c-bundle-member-compilation-v4") {
     fail(`${description}.compilation.memberCompilationPolicy.kind is unsupported`);
   }
   requireString(
@@ -162,20 +162,16 @@ function normalizeMemberObjectIdentity(value, description) {
   if (header.role !== "header" || member.role === "header" || header.path === member.path) {
     fail(`${description}.generatedC does not identify a header and distinct translation unit`);
   }
-  // A per-member report does not carry the bundle-wide byte total. An unfragmented function can
-  // therefore use either the normal flag or the large-bundle fallback; every other member shape
-  // determines its exact optimization locally.
-  const allowedOptimizations =
+  // Member-local size and the producer's explicit -O0 marker determine the effective flag.
+  const expectedOptimization =
     member.cOptimizationLevel === memberCompilationPolicy.cOptimizationLevelZero.cOptimizationLevel
-      ? new Set([memberCompilationPolicy.cOptimizationLevelZero.optimizationFlag])
-      : member.role === memberCompilationPolicy.largeBundleFunction.role &&
-          member.functionFragmentCount === undefined
-        ? new Set([
-            memberCompilationPolicy.largeBundleFunction.optimizationFlag,
-            memberCompilationPolicy.normalOptimizationFlag,
-          ])
-        : new Set([memberCompilationPolicy.normalOptimizationFlag]);
-  if (!allowedOptimizations.has(optimization)) {
+      ? memberCompilationPolicy.cOptimizationLevelZero.optimizationFlag
+      : member.role === memberCompilationPolicy.largeFunctionMember.role &&
+          member.functionFragmentCount === undefined &&
+          member.size >= memberCompilationPolicy.largeFunctionMember.minimumMemberBytes
+        ? memberCompilationPolicy.largeFunctionMember.optimizationFlag
+        : memberCompilationPolicy.normalOptimizationFlag;
+  if (optimization !== expectedOptimization) {
     fail(`${description}.compilation.optimization is unsupported for its generated-C member`);
   }
   const effectiveOptimizationFlags = value.compilation.arguments.filter((argument) =>

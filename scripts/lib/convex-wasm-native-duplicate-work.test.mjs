@@ -31,10 +31,10 @@ function work(authenticatedInputValue, cache, timing, batch) {
 function memberIdentity(path = "functions-00000.c", memberSha256Digit = "6") {
   return {
     compilation: {
-      arguments: ["-Oz", "-c", path, "-o", "artifact.o"],
+      arguments: ["-O2", "-c", path, "-o", "artifact.o"],
       executable: "/toolchain/emcc",
       memberCompilationPolicy: convexWasmStaticHermesCBundleMemberCompilationPolicy,
-      optimization: "-Oz",
+      optimization: "-O2",
     },
     emscripten: {
       llvmRevision: sha256("1"),
@@ -220,11 +220,18 @@ test("accepts only exact current member policies and effective optimization argu
   };
   assert.doesNotThrow(() => inputForIdentity(baselineIdentity));
 
-  const largeBundleFunctionIdentity = memberIdentity();
-  largeBundleFunctionIdentity.compilation.arguments[0] = "-O0";
-  largeBundleFunctionIdentity.compilation.optimization = "-O0";
+  const largeFunctionMemberIdentity = memberIdentity();
+  largeFunctionMemberIdentity.generatedC.member.size =
+    convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember.minimumMemberBytes;
+  largeFunctionMemberIdentity.generatedC.member.oversize = true;
+  largeFunctionMemberIdentity.generatedC.member.oversizeReason = "single-instruction";
+  largeFunctionMemberIdentity.compilation.arguments[0] = "-Oz";
+  largeFunctionMemberIdentity.compilation.optimization = "-Oz";
+  assert.doesNotThrow(() => inputForIdentity(largeFunctionMemberIdentity));
+  largeFunctionMemberIdentity.compilation.arguments[0] = "-O0";
+  largeFunctionMemberIdentity.compilation.optimization = "-O0";
   assert.throws(
-    () => inputForIdentity(largeBundleFunctionIdentity),
+    () => inputForIdentity(largeFunctionMemberIdentity),
     /optimization is unsupported for its generated-C member/u
   );
 
@@ -262,11 +269,11 @@ test("accepts only exact current member policies and effective optimization argu
   const changedPolicyIdentity = memberIdentity();
   changedPolicyIdentity.compilation.memberCompilationPolicy = {
     ...convexWasmStaticHermesCBundleMemberCompilationPolicy,
-    largeBundleFunction: {
-      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction,
-      minimumTranslationUnitBytes:
-        convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction
-          .minimumTranslationUnitBytes + 1,
+    largeFunctionMember: {
+      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember,
+      minimumMemberBytes:
+        convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember
+          .minimumMemberBytes + 1,
     },
   };
   assert.throws(
@@ -313,10 +320,10 @@ test("accepts only exact current member policies and effective optimization argu
     /optimization is unsupported for its generated-C member/u
   );
 
-  const explicitO0AtOzIdentity = memberIdentity();
-  explicitO0AtOzIdentity.generatedC.member.cOptimizationLevel = 0;
+  const explicitO0AtO2Identity = memberIdentity();
+  explicitO0AtO2Identity.generatedC.member.cOptimizationLevel = 0;
   assert.throws(
-    () => inputForIdentity(explicitO0AtOzIdentity),
+    () => inputForIdentity(explicitO0AtO2Identity),
     /optimization is unsupported for its generated-C member/u
   );
 });

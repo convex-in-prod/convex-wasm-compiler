@@ -217,7 +217,11 @@ test("renders canonical request-envelope vectors without folding them into commi
   assert.match(rendered.source, /Capability request has invalid fields/u);
   assert.match(
     rendered.source,
-    /if \(hasTable\) \{[\s\S]*table: request\.table,[\s\S]*return __convexCapabilitySortedObject\(\{[\s\S]*id: __convexCapabilityEncodeCommittedValue\(request\.id\),[\s\S]*kind,[\s\S]*version: 4,[\s\S]*\}\);/u
+    /const requestKeys = __convexCapabilityOwnDataKeys\(request, "Capability request", false\);/u
+  );
+  assert.match(
+    rendered.source,
+    /if \(hasTable\) \{[\s\S]*table: request\.table,[\s\S]*return \{[\s\S]*id: __convexCapabilityEncodeCommittedValue\(request\.id\),[\s\S]*kind,[\s\S]*version: 4,[\s\S]*\};/u
   );
   assert.doesNotMatch(rendered.source, /envelope\.table = request\.table/u);
   assert.doesNotMatch(rendered.source, /\.every\(/u);

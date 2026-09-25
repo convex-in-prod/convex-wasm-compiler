@@ -20,7 +20,7 @@ import {
   staticHermesCBundleMemberCompilationIdentity,
   staticHermesCBundlePackageCompilationSha256,
   staticHermesCBundleTranslationUnitBytes,
-  staticHermesLargeCBundleTranslationUnitBytesThreshold,
+  staticHermesLargeCBundleMemberBytesThreshold,
   staticHermesPrecompileProcessIdentity,
 } from "./convex-wasm-static-hermes-c-bundle.mjs";
 
@@ -234,7 +234,7 @@ test("keeps function helper fragments at ordinary optimization in a large bundle
             ...member,
             size:
               member.size +
-              staticHermesLargeCBundleTranslationUnitBytesThreshold -
+              staticHermesLargeCBundleMemberBytesThreshold -
               translationUnitBytes,
           }
         : member
@@ -572,7 +572,7 @@ test("derives member commands and their stable compilation identity", () => {
     convexWasmStaticHermesCBundleMemberCompilationPolicy
   );
   assert.equal(
-    identity.memberCompilationPolicy.largeBundleFunction.appliesToFunctionFragments,
+    identity.memberCompilationPolicy.largeFunctionMember.appliesToFunctionFragments,
     false
   );
   assert.equal(staticHermesCBundleMemberCompilationBaselinePolicy.normalOptimizationFlag, "-O2");
@@ -601,7 +601,7 @@ test("derives member commands and their stable compilation identity", () => {
   );
 });
 
-test("keeps large-bundle function members at size-aware optimization", () => {
+test("uses member size for the exceptional optimization flag", () => {
   const fixture = bundleFixture();
   const atBoundary = {
     ...fixture.bundle,
@@ -609,13 +609,13 @@ test("keeps large-bundle function members at size-aware optimization", () => {
       { ...fixture.bundle.translationUnits[0], size: 1 },
       {
         ...fixture.bundle.translationUnits[1],
-        size: staticHermesLargeCBundleTranslationUnitBytesThreshold - 1,
+        size: staticHermesLargeCBundleMemberBytesThreshold,
       },
     ],
   };
   assert.equal(
     staticHermesCBundleTranslationUnitBytes(atBoundary),
-    staticHermesLargeCBundleTranslationUnitBytesThreshold
+    staticHermesLargeCBundleMemberBytesThreshold + 1
   );
   const command = { executable: "emcc", args: ["-O2", "-c", "member.c"] };
   const metadata = staticHermesCBundleMemberCompilation(
@@ -657,6 +657,25 @@ test("keeps large-bundle function members at size-aware optimization", () => {
   );
   assert.equal(belowBoundaryFunction.optimization, "-O2");
 
+  const manyOrdinaryMembers = {
+    ...fixture.bundle,
+    translationUnits: [
+      fixture.bundle.translationUnits[0],
+      { ...fixture.bundle.translationUnits[1], size: 3 * 1024 * 1024 },
+      { ...fixture.bundle.translationUnits[1], size: 3 * 1024 * 1024 },
+    ],
+  };
+  assert.equal(
+    staticHermesCBundleMemberCompilation(
+      manyOrdinaryMembers.translationUnits[1],
+      command,
+      "ordinary-object",
+      convexWasmStaticHermesCBundleMemberCompilationPolicy,
+      staticHermesCBundleTranslationUnitBytes(manyOrdinaryMembers)
+    ).optimization,
+    "-O2"
+  );
+
   const explicitLevelZero = staticHermesCBundleMemberCompilation(
     { ...belowBoundary.translationUnits[1], cOptimizationLevel: 0 },
     command,
@@ -673,7 +692,7 @@ test("keeps large-bundle function members at size-aware optimization", () => {
   );
 });
 
-test("binds the large-bundle threshold and flag into member compilation identity", () => {
+test("binds the large-member threshold and flag into member compilation identity", () => {
   const fixture = bundleFixture();
   const bundle = {
     ...fixture.bundle,
@@ -681,7 +700,7 @@ test("binds the large-bundle threshold and flag into member compilation identity
       { ...fixture.bundle.translationUnits[0], size: 1 },
       {
         ...fixture.bundle.translationUnits[1],
-        size: staticHermesLargeCBundleTranslationUnitBytesThreshold - 1,
+        size: staticHermesLargeCBundleMemberBytesThreshold,
       },
     ],
   };
@@ -694,15 +713,15 @@ test("binds the large-bundle threshold and flag into member compilation identity
   );
   const changedThresholdPolicy = {
     ...convexWasmStaticHermesCBundleMemberCompilationPolicy,
-    largeBundleFunction: {
-      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction,
-      minimumTranslationUnitBytes: staticHermesLargeCBundleTranslationUnitBytesThreshold + 1,
+    largeFunctionMember: {
+      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember,
+      minimumMemberBytes: staticHermesLargeCBundleMemberBytesThreshold + 1,
     },
   };
   const changedFlagPolicy = {
     ...convexWasmStaticHermesCBundleMemberCompilationPolicy,
-    largeBundleFunction: {
-      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction,
+    largeFunctionMember: {
+      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember,
       optimizationFlag: "-Og",
     },
   };
@@ -721,9 +740,9 @@ test("binds the large-bundle threshold and flag into member compilation identity
   assert.equal(identity.memberCompilations[1].optimization, "-Oz");
   assert.equal(changedThresholdIdentity.memberCompilations[1].optimization, "-O2");
   assert.equal(changedFlagIdentity.memberCompilations[1].optimization, "-Og");
-  assert.deepEqual(identity.memberCompilationPolicy.largeBundleFunction, {
+  assert.deepEqual(identity.memberCompilationPolicy.largeFunctionMember, {
     appliesToFunctionFragments: false,
-    minimumTranslationUnitBytes: 64 * 1024 * 1024,
+    minimumMemberBytes: 4 * 1024 * 1024,
     optimizationFlag: "-Oz",
     role: "function",
   });
@@ -774,9 +793,9 @@ test("authenticates C-bundle precompile and package identity inputs", () => {
   assert.match(packageSha256, /^[0-9a-f]{64}$/u);
   const changedPolicy = {
     ...convexWasmStaticHermesCBundleMemberCompilationPolicy,
-    largeBundleFunction: {
-      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeBundleFunction,
-      minimumTranslationUnitBytes: staticHermesLargeCBundleTranslationUnitBytesThreshold + 1,
+    largeFunctionMember: {
+      ...convexWasmStaticHermesCBundleMemberCompilationPolicy.largeFunctionMember,
+      minimumMemberBytes: staticHermesLargeCBundleMemberBytesThreshold + 1,
     },
   };
   const changedPackageSha256 = staticHermesCBundlePackageCompilationSha256({
