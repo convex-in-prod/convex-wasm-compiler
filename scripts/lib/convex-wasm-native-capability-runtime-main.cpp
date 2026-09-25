@@ -244,7 +244,7 @@ struct InvocationFailure {
 SHRuntime *initialize_runtime() {
   char program[] = "convex-wasm-native-capability";
   char init_heap[] = "--gc-init-heap=4MiB";
-  char max_heap[] = "--gc-max-heap=32MiB";
+  char max_heap[] = "--gc-max-heap=64MiB";
   char alloc_young[] = "--gc-alloc-young=true";
   char revert_young[] = "--gc-revert-to-yg-at-tti=false";
   char register_stack[] = "--max-register-stack=16384";

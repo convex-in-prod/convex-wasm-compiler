@@ -22,6 +22,13 @@ const sources = Object.freeze({
 const gitTimeoutMs = 30 * 60 * 1000;
 const buildTimeoutMs = 2 * 60 * 60 * 1000;
 const runnerName = "convex-wasm-wasmtime-runner";
+// Promise, microtask, and generator helpers are on the hot path for the
+// official SDK runtime. Compile Hermes' internal unit into the Wasm runtime so
+// those helpers do not fall back to the bytecode interpreter.
+const staticHermesRuntimeCmakeFlags = [
+  "-DHERMESVM_INTERNAL_JAVASCRIPT_NATIVE=ON",
+];
+const staticHermesWasmExceptionFlags = "-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const runnerCrate = join(scriptDirectory, "convex-wasm-precompiler");
 
@@ -153,6 +160,16 @@ async function requireFile(path, label, executable = false) {
   }
 }
 
+async function cmakeCacheHas(path, key, expected) {
+  const cache = await fs.readFile(path, "utf8");
+  return new RegExp(`^${key}:[^=]+=.*${expected}$`, "mu").test(cache);
+}
+
+async function cmakeCacheValue(path, key) {
+  const cache = await fs.readFile(path, "utf8");
+  return cache.match(new RegExp(`^${key}:[^=]+=(.*)$`, "mu"))?.[1] ?? null;
+}
+
 async function fileIdentity(path) {
   const hash = createHash("sha256");
   let size = 0;
@@ -279,6 +296,36 @@ async function checkGate(root) {
     requireFile(join(root, "build-wasm", "jsi", "libjsi.a"), "Wasm JSI archive"),
     requireFile(join(root, "build-wasm", "lib", "config", "libhermesvm-config.h"), "Wasm Hermes configuration"),
   ]);
+  if (
+    !(await cmakeCacheHas(
+      join(root, "build-wasm", "CMakeCache.txt"),
+      "HERMESVM_INTERNAL_JAVASCRIPT_NATIVE",
+      "ON",
+    ))
+  ) {
+    throw new Error("Wasm Hermes archive was built without native InternalJavaScript support");
+  }
+  const hostCompilerImport = join(root, "build-host", "ImportHostCompilers.cmake");
+  if (
+    (await cmakeCacheValue(join(root, "build-wasm", "CMakeCache.txt"), "IMPORT_HOST_COMPILERS")) !==
+    hostCompilerImport
+  ) {
+    throw new Error("Wasm Hermes archive was built without imported host compilers");
+  }
+  for (const key of ["CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS"]) {
+    if ((await cmakeCacheValue(join(root, "build-wasm", "CMakeCache.txt"), key)) !== staticHermesWasmExceptionFlags) {
+      throw new Error("Wasm Hermes archive was built with legacy exception lowering");
+    }
+  }
+  if (
+    !(await cmakeCacheHas(
+      join(root, "build-wasm", "CMakeCache.txt"),
+      "HERMES_UNICODE_LITE",
+      "ON",
+    ))
+  ) {
+    throw new Error("Wasm Hermes archive was built with host Unicode imports");
+  }
   const version = await run(join(root, "emsdk", "upstream", "emscripten", "emcc"), ["--version"], {
     cwd: root,
     env: {
@@ -340,8 +387,14 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   const host = join(gateRoot, "build-host");
   const wasm = join(gateRoot, "build-wasm");
   const hostCompiler = join(host, "bin", "shermes");
+  const hostBytecodeCompiler = join(host, "bin", "hermesc");
+  const hostCompilerImport = join(host, "ImportHostCompilers.cmake");
   try {
-    await requireFile(hostCompiler, "Static Hermes compiler", true);
+    await Promise.all([
+      requireFile(hostCompiler, "Static Hermes compiler", true),
+      requireFile(hostBytecodeCompiler, "Hermes bytecode compiler", true),
+      requireFile(hostCompilerImport, "Hermes host compiler import", false),
+    ]);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
     await run("cmake", ["-S", hermes, "-B", host, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=OFF", "-DHERMES_ENABLE_TEST_SUITE=OFF", "-DHERMES_ENABLE_NAPI=OFF"], {
@@ -367,7 +420,36 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       })
     )
   );
-  if (wasmBuildOutputStates.some((state) => state === null)) {
+  const wasmNeedsConfiguration = wasmBuildOutputStates.some((state) => state === null) ||
+    !(await cmakeCacheHas(
+      join(wasm, "CMakeCache.txt"),
+      "HERMESVM_INTERNAL_JAVASCRIPT_NATIVE",
+      "ON",
+    ).catch((error) => {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    })) ||
+    !(await cmakeCacheHas(
+      join(wasm, "CMakeCache.txt"),
+      "HERMES_UNICODE_LITE",
+      "ON",
+    ).catch((error) => {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    })) ||
+    (await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "IMPORT_HOST_COMPILERS").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    })) !== hostCompilerImport ||
+    (await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "CMAKE_C_FLAGS").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    })) !== staticHermesWasmExceptionFlags ||
+    (await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "CMAKE_CXX_FLAGS").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    })) !== staticHermesWasmExceptionFlags;
+  if (wasmNeedsConfiguration) {
     const env = {
       ...process.env,
       EM_CONFIG: join(emsdk, ".emscripten"),
@@ -378,8 +460,12 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       "cmake", "-S", hermes, "-B", wasm, "-G", "Ninja",
       "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=OFF",
       "-DHERMES_ENABLE_NAPI=OFF", "-DHERMES_ENABLE_TOOLS=OFF",
-      "-DHERMES_ENABLE_TEST_SUITE=OFF", "-DCMAKE_C_FLAGS=-fwasm-exceptions",
-      "-DCMAKE_CXX_FLAGS=-fwasm-exceptions",
+      "-DHERMES_UNICODE_LITE=ON",
+      "-DHERMES_ENABLE_TEST_SUITE=OFF",
+      `-DCMAKE_C_FLAGS=${staticHermesWasmExceptionFlags}`,
+      `-DCMAKE_CXX_FLAGS=${staticHermesWasmExceptionFlags}`,
+      `-DIMPORT_HOST_COMPILERS=${hostCompilerImport}`,
+      ...staticHermesRuntimeCmakeFlags,
     ], { cwd: gateRoot, env, timeoutMs: 10 * 60 * 1000 });
     await run("cmake", ["--build", wasm, "--target", "hermesvm_a", "jsi", "--parallel", String(jobs)], {
       cwd: gateRoot,

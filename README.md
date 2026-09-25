@@ -121,11 +121,10 @@ limits remain with the caller.
 ## Project artifact build
 
 Install the JavaScript package from the matching tagged release into a project
-that already depends on a compatible Convex SDK. For example, after the
-`v0.2.0` release is published:
+that already depends on a compatible Convex SDK. For the published `v0.2.2` release:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.0/convex-wasm-compiler-0.2.0.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.2/convex-wasm-compiler-0.2.2.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed

@@ -201,7 +201,7 @@ test("authenticates packed function helpers and applies O0 only to their wrapper
     identity.memberCompilations.map(({ effectiveArguments }) =>
       effectiveArguments.filter((argument) => argument.startsWith("-O"))
     ),
-    [["-Oz"], ["-O0"], ["-Oz"], ["-Oz"]]
+    [["-O2"], ["-O0"], ["-O2"], ["-O2"]]
   );
   assert.deepEqual(
     identity.memberCompilations.map(({ stage }) => stage),
@@ -249,7 +249,7 @@ test("keeps function helper fragments at ordinary optimization in a large bundle
 
   assert.deepEqual(
     identity.memberCompilations.map(({ optimization }) => optimization),
-    ["-Oz", "-O0", "-Oz", "-Oz"]
+    ["-O2", "-O0", "-O2", "-O2"]
   );
 });
 
@@ -529,9 +529,9 @@ test("derives member commands and their stable compilation identity", () => {
     convexWasmStaticHermesCBundleMemberCompilationPolicy,
     translationUnitBytes
   );
-  assert.equal(ordinary.optimization, "-Oz");
+  assert.equal(ordinary.optimization, "-O2");
   assert.equal(ordinary.stage, "ordinary-object");
-  assert.deepEqual(ordinary.command.args, ["-Oz", "-c", "function-0.c"]);
+  assert.deepEqual(ordinary.command.args, ["-O2", "-c", "function-0.c"]);
 
   const exceptionalMember = {
     ...fixture.bundle.translationUnits[1],
@@ -560,7 +560,7 @@ test("derives member commands and their stable compilation identity", () => {
     convexWasmStaticHermesCBundleMemberCompilationPolicy
   );
   assert.equal(identity.memberCompilations.length, 2);
-  assert.equal(identity.memberCompilations[1].optimization, "-Oz");
+  assert.equal(identity.memberCompilations[1].optimization, "-O2");
   assert.deepEqual(identity.memberArchive, {
     format: "gnu-ar",
     kind: "convex-wasm-static-hermes-c-bundle-member-archive-v1",
@@ -634,7 +634,7 @@ test("keeps large-bundle function members at size-aware optimization", () => {
   );
   assert.deepEqual(
     { optimization: metadata.optimization, stage: metadata.stage },
-    { optimization: "-Oz", stage: "ordinary-object" }
+    { optimization: "-O2", stage: "ordinary-object" }
   );
   assert.deepEqual(
     { optimization: functionMember.optimization, stage: functionMember.stage },
@@ -655,7 +655,7 @@ test("keeps large-bundle function members at size-aware optimization", () => {
     convexWasmStaticHermesCBundleMemberCompilationPolicy,
     staticHermesCBundleTranslationUnitBytes(belowBoundary)
   );
-  assert.equal(belowBoundaryFunction.optimization, "-Oz");
+  assert.equal(belowBoundaryFunction.optimization, "-O2");
 
   const explicitLevelZero = staticHermesCBundleMemberCompilation(
     { ...belowBoundary.translationUnits[1], cOptimizationLevel: 0 },
@@ -719,7 +719,7 @@ test("binds the large-bundle threshold and flag into member compilation identity
     changedFlagPolicy
   );
   assert.equal(identity.memberCompilations[1].optimization, "-Oz");
-  assert.equal(changedThresholdIdentity.memberCompilations[1].optimization, "-Oz");
+  assert.equal(changedThresholdIdentity.memberCompilations[1].optimization, "-O2");
   assert.equal(changedFlagIdentity.memberCompilations[1].optimization, "-Og");
   assert.deepEqual(identity.memberCompilationPolicy.largeBundleFunction, {
     appliesToFunctionFragments: false,

@@ -12,7 +12,7 @@ import { fingerprintJson } from "./lib/convex-wasm-artifact-contract.mjs";
 const KIND = "convex-wasm-static-hermes-global-probe-report-v2";
 const runtimeArguments = Object.freeze([
   "--gc-init-heap=4MiB",
-  "--gc-max-heap=32MiB",
+  "--gc-max-heap=64MiB",
   "--gc-alloc-young=true",
   "--gc-revert-to-yg-at-tti=false",
   "--max-register-stack=16384",

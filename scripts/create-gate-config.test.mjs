@@ -147,7 +147,7 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
   );
   assert.match(
     await fs.readFile(config.runtime.mainSourcePath, "utf8"),
-    /--gc-max-heap=32MiB/u,
+    /--gc-max-heap=64MiB/u,
   );
   assert.deepEqual(config.runtime.includeDirectories, [
     "/toolchain/build-wasm/lib/config",

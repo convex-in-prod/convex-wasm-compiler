@@ -242,7 +242,7 @@ function validateGlobalProbeReport(report, inventory) {
     canonicalConvexWasmStaticHermesGlobalInventoryJson(report.runtime.arguments) !==
       canonicalConvexWasmStaticHermesGlobalInventoryJson([
         "--gc-init-heap=4MiB",
-        "--gc-max-heap=32MiB",
+        "--gc-max-heap=64MiB",
         "--gc-alloc-young=true",
         "--gc-revert-to-yg-at-tti=false",
         "--max-register-stack=16384",

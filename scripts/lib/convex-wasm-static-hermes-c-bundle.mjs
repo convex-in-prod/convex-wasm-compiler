@@ -53,7 +53,9 @@ export const convexWasmStaticHermesCBundleMemberCompilationPolicy = Object.freez
     role: "function",
   }),
   kind: "convex-wasm-static-hermes-c-bundle-member-compilation-v3",
-  normalOptimizationFlag: "-Oz",
+  // Keep large generated initializers size-oriented, but compile ordinary application
+  // members for speed. The large-unit exception prevents the known peak-memory blow-up.
+  normalOptimizationFlag: "-O2",
 });
 
 export const staticHermesCBundleMemberCompilationBaselinePolicy = Object.freeze({
