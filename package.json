@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "bin": {
@@ -91,6 +91,6 @@
     "test:precompiler": "cargo test --locked --manifest-path scripts/convex-wasm-precompiler/Cargo.toml"
   },
   "devDependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/b84ea0f70be09575fbf4f6136b285d5681387ccf/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/621387ab67c42d9bd5b9dd0d617acef5957323bb/convex.tgz"
   }
 }

@@ -5496,7 +5496,8 @@ function __convexCapabilityRequireExactKeys(
   description: string,
   checkedKeys?: string[],
 ): void {
-  const actual = checkedKeys === undefined
+  // Static Hermes retains void in the inferred union and miscompiles a typed local here.
+  const actual: any = checkedKeys === undefined
     ? __convexCapabilityOwnDataKeys(value, description)
     : checkedKeys;
   if (actual.length !== keys.length) {
