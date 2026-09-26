@@ -535,7 +535,7 @@ verify the native manifest and binary hashes before placing the package in its
 content-addressed cache. A release can be consumed without this source checkout.
 
 The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
-artifacts up to 640 MiB, matching the self-hosted runtime artifact contract.
+artifacts up to 1 GiB, matching the self-hosted runtime artifact contract.
 Its AOT and engine-identity output paths must not already exist.
 
 This is not an official Convex project.

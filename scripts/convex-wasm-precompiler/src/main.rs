@@ -22,7 +22,7 @@ const USAGE: &str = "usage: convex-wasm-precompiler INPUT.wasm OUTPUT.cwasm \
     --target-cpu baseline \
     --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS";
 const MAX_CORE_WASM_BYTES: usize = 320 * 1024 * 1024;
-const MAX_AOT_BYTES: usize = 640 * 1024 * 1024;
+const MAX_AOT_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,7 +205,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("Wasmtime did not produce a precompiled core module".into());
     }
     if precompiled.len() > MAX_AOT_BYTES {
-        return Err("precompiled AOT output exceeds 640 MiB".into());
+        return Err("precompiled AOT output exceeds 1 GiB".into());
     }
     let input_bytes = wasm.len();
     let precompiled_bytes = precompiled.len();

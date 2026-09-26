@@ -251,7 +251,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
       coreWasm: { kind: "public-verification-core-wasm", emscriptenSha256: emscripten.sha256, runtimeSha256: runtime.sha256 },
       wasmtimeAot: { kind: "public-verification-aot", precompilerPackageId: precompiler.manifest.packageId },
     },
-    limits: { coreWasmBytes: 320 * 1024 * 1024, aotBytes: 640 * 1024 * 1024 },
+    limits: { coreWasmBytes: 320 * 1024 * 1024, aotBytes: 1024 * 1024 * 1024 },
     linkInputs: [
       generatedFirst.linkInput,
       {

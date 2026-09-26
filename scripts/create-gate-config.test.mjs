@@ -124,7 +124,7 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     16 * 1024 * 1024,
   );
   assert.equal(config.limits.artifacts.generatedCBytes, 256 * 1024 * 1024);
-  assert.equal(config.limits.artifacts.aotBytes, 640 * 1024 * 1024);
+  assert.equal(config.limits.artifacts.aotBytes, 1024 * 1024 * 1024);
   assert.equal(config.limits.artifacts.wasmBytes, 320 * 1024 * 1024);
   assert.equal(config.limits.execution.executionFuel, 10_000_000_000_000);
   assert.equal(config.limits.execution.maxGuestMemoryBytes, 128 * 1024 * 1024);

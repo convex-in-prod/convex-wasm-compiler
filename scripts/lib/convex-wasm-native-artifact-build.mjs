@@ -23,7 +23,7 @@ import {
 } from "./convex-wasm-native-staged-inputs.mjs";
 
 const MAX_CORE_WASM_BYTES = 320 * 1024 * 1024;
-const MAX_AOT_BYTES = 640 * 1024 * 1024;
+const MAX_AOT_BYTES = 1024 * 1024 * 1024;
 const MAX_ENGINE_IDENTITY_BYTES = 64 * 1024;
 async function readEngineIdentity(path, engineConfig, target) {
   const source = decodeUtf8(

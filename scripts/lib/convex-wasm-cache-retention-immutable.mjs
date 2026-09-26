@@ -1506,7 +1506,7 @@ async function authenticateGenericArtifact({ cacheLayout, key, path, stage }) {
     stage,
     key,
     expectedExtension,
-    640 * 1024 * 1024
+    1024 * 1024 * 1024
   );
   if (entry === undefined) fail(`artifact entry disappeared during authentication: ${path}`);
   const [capsuleResolution, closureArtifactReferences, topologyCompilerOutputReference] =
@@ -2018,7 +2018,7 @@ async function authenticateLegacyV2Package({
           coreWasm.stage,
           coreWasm.cacheKey,
           "wasm",
-          640 * 1024 * 1024
+          320 * 1024 * 1024
         );
         if (
           entry === undefined ||
@@ -2037,7 +2037,7 @@ async function authenticateLegacyV2Package({
           aot.stage,
           aot.cacheKey,
           "cwasm",
-          640 * 1024 * 1024
+          1024 * 1024 * 1024
         );
         if (
           entry === undefined ||
