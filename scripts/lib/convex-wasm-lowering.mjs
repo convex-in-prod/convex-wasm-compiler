@@ -3768,7 +3768,47 @@ function __convexSdkRequireActive(): string {
   return udfKind;
 }
 
+const __convexSdkObjectArgumentsBrand = {};
+
 function __convexSdkParseArguments(jsonArguments: any): any {
+  const brand: any = jsonArguments !== null && typeof jsonArguments === "object"
+    ? Object.getOwnPropertyDescriptor(jsonArguments, "brand")
+    : undefined;
+  if (
+    brand !== undefined &&
+    "value" in brand &&
+    brand.value === __convexSdkObjectArgumentsBrand
+  ) {
+    const owned = jsonArguments.value;
+    const keys = __convexCapabilityOwnDataKeys(owned, "Convex SDK syscall arguments", false);
+    let normalized: any = owned;
+    // The identified SDK constructs nested arguments as tagged JSON values or query syntax.
+    // Only its outer optional fields need JSON.stringify's omission behavior.
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      const value = owned[key];
+      if (
+        value === undefined ||
+        typeof value === "function" ||
+        typeof value === "symbol" ||
+        (typeof value === "number" && !isFinite(value))
+      ) {
+        if (normalized === owned) {
+          normalized = {};
+          for (let previous = 0; previous < index; previous += 1) {
+            const previousKey = keys[previous];
+            __convexGuestDefineObjectField(normalized, previousKey, owned[previousKey]);
+          }
+        }
+        if (typeof value === "number") {
+          __convexGuestDefineObjectField(normalized, key, null);
+        }
+      } else if (normalized !== owned) {
+        __convexGuestDefineObjectField(normalized, key, value);
+      }
+    }
+    return normalized;
+  }
   if (typeof jsonArguments !== "string") {
     throw new Error("Convex SDK syscall arguments must be a JSON string");
   }
@@ -3780,6 +3820,20 @@ function __convexSdkParseArguments(jsonArguments: any): any {
   }
   __convexCapabilityOwnDataKeys(parsed, "Convex SDK syscall arguments");
   return parsed;
+}
+
+function __convexSdkAsyncSyscallObjectArgs(operation: any, argumentsObject: any): any {
+  return __convexSdkAsyncSyscall(operation, {
+    brand: __convexSdkObjectArgumentsBrand,
+    value: argumentsObject,
+  });
+}
+
+function __convexSdkSyscallObjectArgs(operation: any, argumentsObject: any): any {
+  return __convexSdkSyscall(operation, {
+    brand: __convexSdkObjectArgumentsBrand,
+    value: argumentsObject,
+  });
 }
 
 function __convexSdkRequireInstalledVersion(version: any, description: string): void {
@@ -4826,13 +4880,17 @@ function __convexSdkJsSyscall(operation: any, _arguments: any): any {
 }
 
 Object.freeze(__convexSdkAsyncSyscall);
+Object.freeze(__convexSdkAsyncSyscallObjectArgs);
 Object.freeze(__convexSdkSyscall);
+Object.freeze(__convexSdkSyscallObjectArgs);
 Object.freeze(__convexSdkJsSyscall);
 const __convexSdkFacade: any = Object.freeze({
   asyncSyscall: __convexSdkAsyncSyscall,
+  asyncSyscallObjectArgs: __convexSdkAsyncSyscallObjectArgs,
   queryCollect: true,
   jsSyscall: __convexSdkJsSyscall,
   syscall: __convexSdkSyscall,
+  syscallObjectArgs: __convexSdkSyscallObjectArgs,
 });
 Object.defineProperty(__convexTargetGlobal, "Convex", {
   configurable: false,

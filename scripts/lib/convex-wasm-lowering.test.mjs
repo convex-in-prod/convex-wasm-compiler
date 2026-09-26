@@ -381,6 +381,24 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     return settle(operationHandle, completionStatus, payloadHandle);
   };
   const selectedCommitTsPlaceholder = jsonToConvex({ $commitTs: null });
+  const guestArguments = (argumentsObject) => {
+    // Installed SDK modules run in Node; the facade under test runs in this VM realm.
+    // Real guest SDK arguments are already created in the facade's realm.
+    if (Object.getPrototypeOf(argumentsObject) !== Object.prototype) return argumentsObject;
+    sandbox.__convexHostSdkArguments = argumentsObject;
+    try {
+      return runInNewContext("JSON.parse(JSON.stringify(__convexHostSdkArguments))", sandbox);
+    } finally {
+      delete sandbox.__convexHostSdkArguments;
+    }
+  };
+  const hostSdkFacade = {
+    ...sandbox.Convex,
+    asyncSyscallObjectArgs: (operation, argumentsObject) =>
+      sandbox.Convex.asyncSyscallObjectArgs(operation, guestArguments(argumentsObject)),
+    syscallObjectArgs: (operation, argumentsObject) =>
+      sandbox.Convex.syscallObjectArgs(operation, guestArguments(argumentsObject)),
+  };
   return {
     allocate,
     activateSdk,
@@ -422,7 +440,8 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     results,
     settle: settleOperation,
     status,
-    sdkFacade: sandbox.Convex,
+    rawSdkFacade: sandbox.Convex,
+    sdkFacade: hostSdkFacade,
     taggedTransfers,
     taggedResultSources,
     setCapabilityIdentity: (identity) => {
@@ -5674,7 +5693,7 @@ test("component and nested-function facade calls fail closed and clean invocatio
 
 test("canonical SDK facade maps the closed storage read and rejects authority before effects", async () => {
   const harness = nativeCapabilityHarness();
-  const facade = harness.sdkFacade;
+  const facade = harness.rawSdkFacade;
   assert.equal(Object.isFrozen(facade), true);
   for (const method of ["asyncSyscall", "jsSyscall", "syscall"]) {
     assert.equal(Object.isFrozen(facade[method]), true);
@@ -5956,6 +5975,43 @@ test("SDK value responses keep host tagged JSON until the official SDK consumes 
   assert.deepEqual(harness.taggedTransfers, ['[{"_id":"document-id"}]', tagged]);
   assert.equal(harness.restoredTransfers.length, 0);
   assert.equal(harness.outstandingHandles(), 0);
+  assert.equal(harness.cleanup(), 0);
+});
+
+test("SDK object arguments omit outer optional fields and retain the legacy string boundary", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("mutation");
+  const ordinary = harness.guestValue('({ table: "documents", value: { nested: { enabled: true } } })');
+  const direct = harness.rawSdkFacade.asyncSyscallObjectArgs("1.0/insert", ordinary);
+  assert.deepEqual(harness.requests.shift().value, { nested: { enabled: true } });
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("inserted-id"));
+  assert.equal(await direct, '{"_id":"inserted-id"}');
+
+  const tableless = harness.guestValue(
+    '({ id: "document-id", isSystem: false, table: undefined, version })',
+    { version: convexSdkVersion }
+  );
+  const get = harness.rawSdkFacade.asyncSyscallObjectArgs("1.0/get", tableless);
+  assert.deepEqual(harness.requests.shift(), {
+    version: convexWasmCapabilityRequestAbiVersion,
+    kind: "dbGet",
+    id: "document-id",
+  });
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(null));
+  assert.equal(await get, "null");
+
+  let brandReads = 0;
+  const invalidStringArguments = {
+    get brand() {
+      brandReads += 1;
+      throw new Error("brand getter ran");
+    },
+  };
+  assert.throws(
+    () => harness.rawSdkFacade.asyncSyscall("1.0/insert", invalidStringArguments),
+    /arguments must be a JSON string/u
+  );
+  assert.equal(brandReads, 0);
   assert.equal(harness.cleanup(), 0);
 });
 
@@ -6633,8 +6689,8 @@ test("canonical SDK facade maps installed query and count envelopes onto generic
       )
       .filter((filter) => filter.eq(filter.field("status"), "ready"))
       .collect();
-    const streamRequest = harness.requests.shift();
-    assert.deepEqual(streamRequest, {
+    const collectRequest = harness.requests.shift();
+    assert.deepEqual(collectRequest, {
       kind: "dbQuery",
       operators: [
         {
@@ -6652,26 +6708,15 @@ test("canonical SDK facade maps installed query and count envelopes onto generic
         type: "search",
       },
       table: "documents",
-      terminal: "stream",
+      terminal: "collect",
       version: convexWasmCapabilityRequestAbiVersion,
     });
-    assert.equal(harness.requestPayloads.shift(), JSON.stringify(streamRequest));
-    const firstRead = harness.lastStartedOperationHandle();
+    assert.equal(harness.requestPayloads.shift(), JSON.stringify(collectRequest));
     harness.settle(
-      firstRead,
+      harness.lastStartedOperationHandle(),
       0,
-      harness.allocate({ done: false, value: { _id: "document-stream", sequence: 4n } })
+      harness.allocate([{ _id: "document-stream", sequence: 4n }])
     );
-    for (
-      let checkpoint = 0;
-      checkpoint < 8 && harness.lastStartedOperationHandle() === firstRead;
-      checkpoint += 1
-    ) {
-      await drainCapabilityMicrotasks();
-    }
-    const finalRead = harness.lastStartedOperationHandle();
-    assert.notEqual(finalRead, firstRead);
-    harness.settle(finalRead, 0, harness.allocate({ done: true, value: null }));
     assert.deepEqual(await collectPromise, [{ _id: "document-stream", sequence: 4n }]);
     assert.ok(
       harness.taggedTransfers.some(
@@ -6689,7 +6734,7 @@ test("canonical SDK facade maps installed query and count envelopes onto generic
     assert.equal(returnedRequest.terminal, "stream");
     assert.equal(harness.requestPayloads.shift(), JSON.stringify(returnedRequest));
     assert.deepEqual(await returnedIterator.return(), { done: true, value: undefined });
-    assert.deepEqual(harness.closedQueryStreams, [3]);
+    assert.deepEqual(harness.closedQueryStreams, [2]);
 
     reader.query("documents")[Symbol.asyncIterator]();
     const abandonedRequest = harness.requests.shift();
@@ -6697,7 +6742,7 @@ test("canonical SDK facade maps installed query and count envelopes onto generic
     assert.equal(harness.requestPayloads.shift(), JSON.stringify(abandonedRequest));
     assert.equal(harness.openQueryStreams.size, 1);
     assert.equal(harness.cleanup(), 0);
-    assert.deepEqual(harness.closedQueryStreams, [3]);
+    assert.deepEqual(harness.closedQueryStreams, [2]);
     assert.equal(harness.openQueryStreams.size, 1);
     // The native invocation's following cancel_all owns these host cursors.
     harness.openQueryStreams.clear();
