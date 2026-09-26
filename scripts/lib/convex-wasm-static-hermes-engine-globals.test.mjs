@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { gateRevisions } from "./convex-wasm-gate-pins.mjs";
 import {
   assertConvexWasmQueryMutationVisibleDeterministicGlobals,
   assertConvexWasmStaticHermesTargetRuntimeGlobals,
@@ -242,6 +243,7 @@ test("fails closed on runtime, typed-declaration, and classification drift", () 
 
 test("binds authenticated build sources to the observed checkout", () => {
   const identity = convexWasmStaticHermesGlobalInventory.sourceIdentity;
+  assert.equal(identity.buildRevision, gateRevisions.hermes);
   assert.equal(identity.sourceRevision, identity.buildRevision);
   assert.equal(identity.observedCheckoutRevision, identity.buildRevision);
   for (const field of [

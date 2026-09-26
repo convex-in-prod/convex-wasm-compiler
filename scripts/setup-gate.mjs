@@ -401,7 +401,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       cwd: gateRoot,
       timeoutMs: 10 * 60 * 1000,
     });
-    await run("cmake", ["--build", host, "--target", "shermes", "--parallel", String(jobs)], {
+    await run("cmake", ["--build", host, "--target", "shermes", "hermesc", "--parallel", String(jobs)], {
       cwd: gateRoot,
       timeoutMs: buildTimeoutMs,
     });

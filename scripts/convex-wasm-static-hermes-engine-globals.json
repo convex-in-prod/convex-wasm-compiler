@@ -1,16 +1,16 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
-    "sourceRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
-    "observedCheckoutRevision": "5354e994a64a52e883f0c4cda8743b20f10a1f08",
+    "buildRevision": "295577e8cce65e98fe959aebddae5256dd40a3c7",
+    "sourceRevision": "295577e8cce65e98fe959aebddae5256dd40a3c7",
+    "observedCheckoutRevision": "295577e8cce65e98fe959aebddae5256dd40a3c7",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
-    "hostCmakeCacheSha256": "5dd90f62453e607d0d90a924a0cf4267836836fa515208dd3c89dd2cac8516e8",
-    "hostShermesSha256": "f8b19e75d9a23980d79224dee888cb0fee20b76945cec8a01dda2392949bc032",
-    "wasmCmakeCacheSha256": "1b8be6525109c314ba9e0fdad9b44d1597a8e328f767ef612708c941a1627017",
-    "wasmLibhermesvmArchiveSha256": "b83b9da2eeb0d2163cfbcdb8ceee67cd03e86e8986c47832b83dde09d9d83367"
+    "hostCmakeCacheSha256": "9f71c5275f9bce503616daeadc96863e5f1b2670b56409d4d0e843d80daa1437",
+    "hostShermesSha256": "03ddbaa23813598ace09e2e452e0cd3bca095ec4c0832fe822a6288564e330b8",
+    "wasmCmakeCacheSha256": "d5fa7169c772a174e4afb83a5177230aa3bb372ffafd8cdbe88d809084bb21cb",
+    "wasmLibhermesvmArchiveSha256": "4256b8f1337a92d8b9306e5105b1fea7cb98e71adb31fe3dea62dcd96900cd09"
   },
   "buildConfiguration": {
     "coreExtensions": true,
@@ -21,60 +21,41 @@
   "registrationConditions": {
     "coreExtensions": {
       "enabled": true,
-      "globals": [
-        "TextEncoder"
-      ]
+      "globals": ["TextEncoder"]
     },
     "contribExtensions": {
       "enabled": true,
-      "globals": [
-        "TextDecoder"
-      ]
+      "globals": ["TextDecoder"]
     },
     "debuggerBuild": {
       "enabled": false,
-      "omittedGlobals": [
-        "DebuggerInternal"
-      ]
+      "omittedGlobals": ["DebuggerInternal"]
     },
     "es6Proxy": {
       "enabled": true,
-      "globals": [
-        "Proxy",
-        "Reflect"
-      ]
+      "globals": ["Proxy", "Reflect"]
     },
     "hermesInternal": {
       "enabled": true,
-      "globals": [
-        "gc"
-      ]
+      "globals": ["gc"]
     },
     "intlBuildAndRuntime": {
       "enabled": false,
-      "omittedGlobals": [
-        "Intl"
-      ]
+      "omittedGlobals": ["Intl"]
     },
     "runtimeMicrotaskQueue": {
       "enabled": true,
-      "globals": [
-        "FinalizationRegistry",
-        "WeakRef",
-        "queueMicrotask"
-      ]
+      "globals": ["FinalizationRegistry", "WeakRef", "queueMicrotask"]
     },
     "workerIntegrator": {
       "enabled": false,
-      "omittedGlobals": [
-        "Worker"
-      ]
+      "omittedGlobals": ["Worker"]
     }
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "0aa866c867388656f0548260d55bc47e8bd3198d07bb635fc63a8937c714fedb",
-    "reportSha256": "a2981b1a86d537eaa22f686d04c5f3d3b5f3acaa8d88c227d9f0aa272b63727f",
+    "reportFileSha256": "9ca9aeca82f784966cd540b72c0fccd9588abc4ae18eb83ba1759585ac30f9b5",
+    "reportSha256": "c73ad57f15131f835b69e3c6fea32f618ce1bda073bb67a251bd6f5de4f47897",
     "globals": [
       "$SHBuiltin",
       "AggregateError",
@@ -217,12 +198,7 @@
       "unescape"
     ]
   },
-  "reviewedAbsentGlobals": [
-    "DOMException",
-    "Intl",
-    "URL",
-    "URLSearchParams"
-  ],
+  "reviewedAbsentGlobals": ["DOMException", "Intl", "URL", "URLSearchParams"],
   "accessPolicy": {
     "applicationGlobalFacade": "inventory-derived-extensible-null-prototype-immutable-builtins",
     "applicationGlobalFacadeComputedAccess": "admitted",
