@@ -2,13 +2,19 @@
 #include "hermes/hermes.h"
 #include "hermes/VM/static_h.h"
 #include "jsi/jsi.h"
+#include "flatbuffers/flexbuffers.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 extern "C" SHUnit *CONVEX_WASM_BRIDGE_EXPORTED_UNIT(void);
 extern "C" SHUnit *CONVEX_WASM_FORMATTER_EXPORTED_UNIT(void);
@@ -45,6 +51,8 @@ extern "C" void convex_wasm_clear_selected_entry(void);
 
 namespace {
 
+using facebook::jsi::Array;
+using facebook::jsi::BigInt;
 using facebook::jsi::Function;
 using facebook::jsi::JSError;
 using facebook::jsi::Object;
@@ -64,6 +72,12 @@ struct GuestBridge {
   std::shared_ptr<Function> activate_sdk;
   std::shared_ptr<Function> invoke_registered_wrapper;
   std::shared_ptr<Function> read_tagged_request;
+  std::shared_ptr<Function> start_typed_get;
+  std::shared_ptr<Function> start_typed_string;
+  std::shared_ptr<Function> start_typed_write;
+  std::shared_ptr<Function> start_typed_run_udf;
+  std::shared_ptr<Function> start_typed_schedule;
+  std::shared_ptr<Function> start_typed_query;
 };
 
 struct GuestInitializationErrorConstructors {
@@ -163,6 +177,10 @@ constexpr const char *kIntrinsicDescriptorStateValidatorBinding =
 constexpr const char *kCommitTsPlaceholderExportName =
     "__convexWasmSdkCommitTsPlaceholder";
 constexpr size_t kGuestInitializationDiagnosticMaximumBytes = 640;
+constexpr size_t kValueAbiMaximumFrameBytes = 16 * 1024 * 1024;
+constexpr size_t kValueAbiMaximumNesting = 64;
+constexpr uint32_t kValueAbiMaximumArrayLength = 8192;
+constexpr uint32_t kValueAbiMaximumObjectFields = 1024;
 #if defined(CONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS)
 constexpr size_t kGuestInitializationExceptionMessageMaximumBytes = 512;
 constexpr size_t kGuestInitializationExceptionMessageMaximumCodeUnits = 128;
@@ -240,6 +258,844 @@ struct SelectedEntryLease {
 struct InvocationFailure {
   int32_t status;
 };
+
+struct ValueAbiPayloadLease {
+  int64_t handle;
+  ~ValueAbiPayloadLease() { convex_guest_value_payload_release(handle); }
+};
+
+struct ValueAbiEncodeError {
+  const char *message;
+};
+
+struct ValueAbiIntrinsics {
+  Object object_prototype;
+};
+
+enum class ValueAbiMode { Value, Patch, Committed };
+
+template <typename Append>
+void append_hermes_utf8(Runtime &js, const String &input, Append append) {
+  char16_t high_surrogate = 0;
+  auto codepoint = [&](uint32_t value) {
+    uint8_t encoded[4];
+    size_t count;
+    if (value <= 0x7f) {
+      encoded[0] = static_cast<uint8_t>(value);
+      count = 1;
+    } else if (value <= 0x7ff) {
+      encoded[0] = static_cast<uint8_t>(0xc0 | (value >> 6));
+      encoded[1] = static_cast<uint8_t>(0x80 | (value & 0x3f));
+      count = 2;
+    } else if (value <= 0xffff) {
+      encoded[0] = static_cast<uint8_t>(0xe0 | (value >> 12));
+      encoded[1] = static_cast<uint8_t>(0x80 | ((value >> 6) & 0x3f));
+      encoded[2] = static_cast<uint8_t>(0x80 | (value & 0x3f));
+      count = 3;
+    } else {
+      encoded[0] = static_cast<uint8_t>(0xf0 | (value >> 18));
+      encoded[1] = static_cast<uint8_t>(0x80 | ((value >> 12) & 0x3f));
+      encoded[2] = static_cast<uint8_t>(0x80 | ((value >> 6) & 0x3f));
+      encoded[3] = static_cast<uint8_t>(0x80 | (value & 0x3f));
+      count = 4;
+    }
+    append(encoded, count);
+  };
+  auto write = [&](bool ascii, const void *data, size_t count) {
+    if (ascii) {
+      if (high_surrogate != 0) {
+        throw ValueAbiEncodeError{"Typed value string has an unpaired surrogate"};
+      }
+      append(static_cast<const uint8_t *>(data), count);
+      return;
+    }
+    const auto *units = static_cast<const char16_t *>(data);
+    for (size_t index = 0; index < count; ++index) {
+      const uint16_t unit = units[index];
+      if (high_surrogate != 0) {
+        if (unit < 0xdc00 || unit > 0xdfff) {
+          throw ValueAbiEncodeError{"Typed value string has an unpaired surrogate"};
+        }
+        codepoint(0x10000 + ((high_surrogate - 0xd800) << 10) +
+                  (unit - 0xdc00));
+        high_surrogate = 0;
+      } else if (unit >= 0xd800 && unit <= 0xdbff) {
+        high_surrogate = unit;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        throw ValueAbiEncodeError{"Typed value string has an unpaired surrogate"};
+      } else {
+        codepoint(unit);
+      }
+    }
+  };
+  input.getStringData(js, write);
+  if (high_surrogate != 0) {
+    throw ValueAbiEncodeError{"Typed value string has an unpaired surrogate"};
+  }
+}
+
+class ValueAbiWriter {
+ public:
+  ValueAbiWriter(Runtime &js,
+                 const Value &commit_ts_placeholder,
+                 const ValueAbiIntrinsics &intrinsics,
+                 ValueAbiMode mode)
+      : js_(js),
+        commit_ts_placeholder_(commit_ts_placeholder),
+        intrinsics_(intrinsics),
+        mode_(mode) {}
+
+  std::vector<uint8_t> encode(const Value &input) {
+    static constexpr uint8_t magic[] = {'C', 'V', 'A', '1'};
+    try {
+      append(magic, sizeof(magic));
+      value(input, 0);
+      return std::move(bytes_);
+    } catch (const ValueAbiEncodeError &error) {
+      throw JSError(js_, error.message);
+    }
+  }
+
+ private:
+  void append(const uint8_t *source, size_t length) {
+    if (length > kValueAbiMaximumFrameBytes - bytes_.size()) {
+      throw ValueAbiEncodeError{"Typed value frame exceeds the byte limit"};
+    }
+    if (length != 0) bytes_.insert(bytes_.end(), source, source + length);
+  }
+
+  void byte(uint8_t value) { append(&value, 1); }
+
+  void u32(size_t value) {
+    if (value > std::numeric_limits<uint32_t>::max()) {
+      throw ValueAbiEncodeError{"Typed value length exceeds the byte limit"};
+    }
+    for (size_t shift = 0; shift < 32; shift += 8) {
+      byte(static_cast<uint8_t>(value >> shift));
+    }
+  }
+
+  void u64(uint64_t value) {
+    for (size_t shift = 0; shift < 64; shift += 8) {
+      byte(static_cast<uint8_t>(value >> shift));
+    }
+  }
+
+  void patch_u32(size_t offset, size_t value) {
+    if (value > std::numeric_limits<uint32_t>::max()) {
+      throw ValueAbiEncodeError{"Typed value length exceeds the byte limit"};
+    }
+    for (size_t index = 0; index < 4; ++index) {
+      bytes_[offset + index] = static_cast<uint8_t>(value >> (index * 8));
+    }
+  }
+
+  void string(const String &input) {
+    const size_t length_offset = bytes_.size();
+    u32(0);
+    const size_t start = bytes_.size();
+    // The callback reads Hermes string storage without creating a JS string
+    // property lookup or a second encoded copy.
+    append_hermes_utf8(js_, input, [&](const uint8_t *data, size_t count) {
+      append(data, count);
+    });
+    patch_u32(length_offset, bytes_.size() - start);
+  }
+
+  void field_name(const std::u16string &name) {
+    if (name.size() > 1024 || (!name.empty() && name[0] == '$')) {
+      throw ValueAbiEncodeError{"Typed value object field name is invalid"};
+    }
+    for (char16_t unit : name) {
+      if (unit < 0x20 || unit > 0x7e) {
+        throw ValueAbiEncodeError{"Typed value object field name is invalid"};
+      }
+    }
+    u32(name.size());
+    for (char16_t unit : name) byte(static_cast<uint8_t>(unit));
+  }
+
+  void value(const Value &input, size_t nesting) {
+    if (input.isObject() &&
+        Value::strictEquals(js_, input, commit_ts_placeholder_)) {
+      if (mode_ == ValueAbiMode::Committed) {
+        throw ValueAbiEncodeError{"Pending commit timestamp is not allowed in scheduled arguments"};
+      }
+      byte(9);
+      return;
+    }
+    if (input.isNull()) {
+      byte(0);
+    } else if (input.isBool()) {
+      byte(input.getBool() ? 2 : 1);
+    } else if (input.isNumber()) {
+      byte(3);
+      uint64_t bits;
+      const double number = input.getNumber();
+      std::memcpy(&bits, &number, sizeof(bits));
+      u64(bits);
+    } else if (input.isBigInt()) {
+      const auto integer = input.asBigInt(js_);
+      if (!integer.isInt64(js_)) {
+        throw ValueAbiEncodeError{"Typed value integer exceeds signed 64-bit range"};
+      }
+      byte(4);
+      u64(static_cast<uint64_t>(integer.getInt64(js_)));
+    } else if (input.isString()) {
+      byte(5);
+      string(input.asString(js_));
+    } else if (input.isObject()) {
+      const auto object = input.asObject(js_);
+      if (object.isArrayBuffer(js_)) {
+        const auto buffer = object.getArrayBuffer(js_);
+        byte(6);
+        u32(buffer.size(js_));
+        append(buffer.data(js_), buffer.size(js_));
+        return;
+      }
+      for (const auto &ancestor : ancestors_) {
+        if (Value::strictEquals(js_, ancestor, input)) {
+          throw ValueAbiEncodeError{"Cyclic objects are not Convex values"};
+        }
+      }
+      if (nesting >= kValueAbiMaximumNesting) {
+        throw ValueAbiEncodeError{"Typed value nesting exceeds the limit"};
+      }
+      ancestors_.emplace_back(js_, input);
+      if (object.isArray(js_)) {
+        const auto array = object.asArray(js_);
+        const size_t count = array.size(js_);
+        if (count > kValueAbiMaximumArrayLength) {
+          throw ValueAbiEncodeError{"Typed value array length exceeds the limit"};
+        }
+        byte(7);
+        u32(count);
+        for (size_t index = 0; index < count; ++index) {
+          const auto key = std::to_string(index);
+          if (!object.hasProperty(js_, key.c_str())) {
+            // The SDK's array map leaves a hole, which its JSON transport turns into null.
+            byte(0);
+            continue;
+          }
+          value(array.getValueAtIndex(js_, index), nesting + 1);
+        }
+      } else {
+        if (object.isFunction(js_)) {
+          throw ValueAbiEncodeError{"Functions are not Convex values"};
+        }
+        const auto prototype = js_.getPrototypeOf(object);
+        if (!prototype.isNull() &&
+            (!prototype.isObject() ||
+             !Object::strictEquals(js_, prototype.asObject(js_),
+                                   intrinsics_.object_prototype))) {
+          throw ValueAbiEncodeError{"Only plain objects are Convex values"};
+        }
+        // Snapshot values before sorting keys so getters observe property order.
+        auto own_entries = static_cast<facebook::hermes::HermesRuntime &>(js_)
+                               .getOwnEnumerableEntries(object);
+        struct Entry {
+          std::u16string units;
+          Value value;
+        };
+        std::vector<Entry> entries;
+        entries.reserve(own_entries.size());
+        for (auto &entry : own_entries) {
+          entries.push_back(Entry{entry.first.utf16(js_), std::move(entry.second)});
+        }
+        std::sort(entries.begin(), entries.end(), [](const Entry &left, const Entry &right) {
+          return left.units < right.units;
+        });
+        byte(8);
+        const size_t count_offset = bytes_.size();
+        u32(0);
+        size_t count = 0;
+        for (const auto &entry : entries) {
+          if (entry.value.isUndefined() &&
+              !(mode_ == ValueAbiMode::Patch && nesting == 0)) {
+            continue;
+          }
+          if (count >= kValueAbiMaximumObjectFields) {
+            throw ValueAbiEncodeError{"Typed value object length exceeds the limit"};
+          }
+          field_name(entry.units);
+          if (entry.value.isUndefined()) {
+            byte(12);
+          } else {
+            value(entry.value, nesting + 1);
+          }
+          ++count;
+        }
+        patch_u32(count_offset, count);
+      }
+      ancestors_.pop_back();
+    } else {
+      throw ValueAbiEncodeError{"Unsupported Convex value"};
+    }
+  }
+
+  Runtime &js_;
+  const Value &commit_ts_placeholder_;
+  const ValueAbiIntrinsics &intrinsics_;
+  ValueAbiMode mode_;
+  std::vector<uint8_t> bytes_;
+  std::vector<Value> ancestors_;
+};
+
+class QueryAbiWriter {
+ public:
+  explicit QueryAbiWriter(Runtime &js) : js_(js) {}
+
+  std::vector<uint8_t> encode(const Value &query_input,
+                              const Value &terminal_input,
+                              const Value &pagination_input) {
+    try {
+      const Object query = object(query_input);
+      const Value source_value = query.getProperty(js_, "source");
+      const Object source = object(source_value);
+      const Value source_type = source.getProperty(js_, "type");
+      const std::string terminal_name = string_value(terminal_input);
+      const std::string source_name = string_value(source_type);
+      append(reinterpret_cast<const uint8_t *>("CQR1"), 4);
+      if (terminal_name == "collect") byte(1);
+      else if (terminal_name == "first") byte(2);
+      else if (terminal_name == "unique") byte(3);
+      else if (terminal_name == "stream") byte(4);
+      else if (terminal_name == "paginate") byte(5);
+      else invalid();
+      if (source_name == "FullTableScan") byte(1);
+      else if (source_name == "IndexRange") byte(2);
+      else if (source_name == "Search") byte(3);
+      else invalid();
+      const Value order = source_name == "Search"
+                              ? Value::null()
+                              : source.getProperty(js_, "order");
+      if (order.isNull()) byte(0);
+      else if (string_value(order) == "asc") byte(1);
+      else if (string_value(order) == "desc") byte(2);
+      else invalid();
+      if (source_name == "FullTableScan") {
+        string(source.getProperty(js_, "tableName"));
+      } else {
+        const std::string index_name = string_value(source.getProperty(js_, "indexName"));
+        const size_t separator = index_name.find('.');
+        if (separator == 0 || separator == std::string::npos ||
+            separator + 1 == index_name.size() ||
+            index_name.find('.', separator + 1) != std::string::npos) invalid();
+        string_bytes(index_name.substr(0, separator));
+        string_bytes(index_name.substr(separator + 1));
+      }
+      if (source_name == "IndexRange") {
+        const Array constraints = array(source.getProperty(js_, "range"));
+        const size_t count = constraints.size(js_);
+        if (count > 256) invalid();
+        u32(count);
+        for (size_t i = 0; i < count; ++i) {
+          const Object constraint = object(constraints.getValueAtIndex(js_, i));
+          const std::string kind = string_value(constraint.getProperty(js_, "type"));
+          if (kind == "Eq") byte(1);
+          else if (kind == "Gt") byte(2);
+          else if (kind == "Gte") byte(3);
+          else if (kind == "Lt") byte(4);
+          else if (kind == "Lte") byte(5);
+          else invalid();
+          string(constraint.getProperty(js_, "fieldPath"));
+          optional_value(constraint.getProperty(js_, "value"));
+        }
+      } else if (source_name == "Search") {
+        const Array filters = array(source.getProperty(js_, "filters"));
+        const size_t count = filters.size(js_);
+        if (count == 0 || count > 256) invalid();
+        u32(count);
+        for (size_t i = 0; i < count; ++i) {
+          const Object filter = object(filters.getValueAtIndex(js_, i));
+          const std::string kind = string_value(filter.getProperty(js_, "type"));
+          if (i == 0 && kind == "Search") byte(1);
+          else if (i > 0 && kind == "Eq") byte(2);
+          else invalid();
+          string(filter.getProperty(js_, "fieldPath"));
+          if (i == 0) string(filter.getProperty(js_, "value"));
+          else optional_value(filter.getProperty(js_, "value"));
+        }
+      }
+      const Array operators = array(query.getProperty(js_, "operators"));
+      const size_t count = operators.size(js_);
+      if (count > 256) invalid();
+      u32(count);
+      for (size_t i = 0; i < count; ++i) {
+        const Object operator_object = object(operators.getValueAtIndex(js_, i));
+        const Array keys = operator_object.getPropertyNames(js_);
+        if (keys.size(js_) != 1) invalid();
+        const std::string kind = string_value(keys.getValueAtIndex(js_, 0));
+        if (kind == "filter") {
+          byte(1);
+          expression(operator_object.getProperty(js_, "filter"), 0);
+        } else if (kind == "limit") {
+          byte(2);
+          integer(operator_object.getProperty(js_, "limit"));
+        } else {
+          invalid();
+        }
+      }
+      if (terminal_name == "paginate") {
+        const Object pagination = object(pagination_input);
+        optional_string(pagination.getProperty(js_, "cursor"));
+        optional_string(pagination.getProperty(js_, "endCursor"));
+        optional_integer(pagination.getProperty(js_, "maximumBytesRead"));
+        optional_integer(pagination.getProperty(js_, "maximumRowsRead"));
+        integer(pagination.getProperty(js_, "pageSize"));
+      }
+      return std::move(bytes_);
+    } catch (const ValueAbiEncodeError &error) {
+      throw JSError(js_, error.message);
+    }
+  }
+
+ private:
+  [[noreturn]] void invalid() const {
+    throw ValueAbiEncodeError{"Typed query request is invalid"};
+  }
+
+  Object object(const Value &value) const {
+    if (!value.isObject() || value.asObject(js_).isArray(js_)) invalid();
+    return value.asObject(js_);
+  }
+
+  Array array(const Value &value) const {
+    if (!value.isObject() || !value.asObject(js_).isArray(js_)) invalid();
+    return value.asObject(js_).asArray(js_);
+  }
+
+  std::string string_value(const Value &value) const {
+    if (!value.isString()) invalid();
+    return value.asString(js_).utf8(js_);
+  }
+
+  void append(const uint8_t *data, size_t length) {
+    if (length > kValueAbiMaximumFrameBytes - bytes_.size()) {
+      throw ValueAbiEncodeError{"Typed query request exceeds the byte limit"};
+    }
+    if (length != 0) bytes_.insert(bytes_.end(), data, data + length);
+  }
+
+  void byte(uint8_t value) { append(&value, 1); }
+
+  void u32(size_t value) {
+    if (value > std::numeric_limits<uint32_t>::max()) invalid();
+    for (size_t shift = 0; shift < 32; shift += 8) byte(value >> shift);
+  }
+
+  void u64(uint64_t value) {
+    for (size_t shift = 0; shift < 64; shift += 8) byte(value >> shift);
+  }
+
+  void string_bytes(const std::string &value) {
+    u32(value.size());
+    append(reinterpret_cast<const uint8_t *>(value.data()), value.size());
+  }
+
+  void string(const Value &value) {
+    if (!value.isString()) invalid();
+    const size_t length_offset = bytes_.size();
+    u32(0);
+    const size_t start = bytes_.size();
+    append_hermes_utf8(js_, value.asString(js_), [&](const uint8_t *data, size_t count) {
+      append(data, count);
+    });
+    const size_t length = bytes_.size() - start;
+    if (length > std::numeric_limits<uint32_t>::max()) invalid();
+    for (size_t index = 0; index < 4; ++index) {
+      bytes_[length_offset + index] = static_cast<uint8_t>(length >> (index * 8));
+    }
+  }
+
+  void optional_string(const Value &value) {
+    if (value.isNull()) byte(0);
+    else { byte(1); string(value); }
+  }
+
+  void integer(const Value &value) {
+    if (!value.isNumber()) invalid();
+    const double number = value.getNumber();
+    if (!std::isfinite(number) || number < 0.0 ||
+        number > 9007199254740991.0 || std::floor(number) != number) invalid();
+    u64(static_cast<uint64_t>(number));
+  }
+
+  void optional_integer(const Value &value) {
+    if (value.isNull()) byte(0);
+    else { byte(1); integer(value); }
+  }
+
+  void optional_value(const Value &value) {
+    if (value.isUndefined()) {
+      byte(0);
+      return;
+    }
+    if (!value.isObject() || !value.asObject(js_).isArrayBuffer(js_)) invalid();
+    const auto buffer = value.asObject(js_).getArrayBuffer(js_);
+    const size_t length = buffer.size(js_);
+    byte(1);
+    u32(length);
+    append(buffer.data(js_), length);
+  }
+
+  void expression(const Value &value, size_t depth) {
+    if (depth >= 64 || ++expression_nodes_ > 4096) invalid();
+    const Object node = object(value);
+    const Array keys = node.getPropertyNames(js_);
+    if (keys.size(js_) != 1) invalid();
+    const std::string kind = string_value(keys.getValueAtIndex(js_, 0));
+    const Value operand = node.getProperty(js_, kind.c_str());
+    if (kind == "$literal") { byte(1); optional_value(operand); }
+    else if (kind == "$field") { byte(2); string(operand); }
+    else {
+      uint8_t tag;
+      if (kind == "$eq") tag = 3;
+      else if (kind == "$neq") tag = 4;
+      else if (kind == "$lt") tag = 5;
+      else if (kind == "$lte") tag = 6;
+      else if (kind == "$gt") tag = 7;
+      else if (kind == "$gte") tag = 8;
+      else if (kind == "$add") tag = 9;
+      else if (kind == "$sub") tag = 10;
+      else if (kind == "$mul") tag = 11;
+      else if (kind == "$div") tag = 12;
+      else if (kind == "$mod") tag = 13;
+      else if (kind == "$neg") tag = 14;
+      else if (kind == "$not") tag = 15;
+      else if (kind == "$and") tag = 16;
+      else if (kind == "$or") tag = 17;
+      else invalid();
+      byte(tag);
+      if (tag <= 13) {
+        const Array operands = array(operand);
+        if (operands.size(js_) != 2) invalid();
+        expression(operands.getValueAtIndex(js_, 0), depth + 1);
+        expression(operands.getValueAtIndex(js_, 1), depth + 1);
+      } else if (tag <= 15) {
+        expression(operand, depth + 1);
+      } else {
+        const Array operands = array(operand);
+        const size_t count = operands.size(js_);
+        if (count > 256) invalid();
+        u32(count);
+        for (size_t index = 0; index < count; ++index) {
+          expression(operands.getValueAtIndex(js_, index), depth + 1);
+        }
+      }
+    }
+  }
+
+  Runtime &js_;
+  std::vector<uint8_t> bytes_;
+  size_t expression_nodes_ = 0;
+};
+
+class ValueAbiReader {
+ public:
+  ValueAbiReader(Runtime &js,
+                 const uint8_t *bytes,
+                 size_t length,
+                 const Value &commit_ts_placeholder,
+                 const Function &array_buffer_constructor,
+                 const Function &define_property)
+      : js_(js),
+        cursor_(bytes),
+        end_(bytes + length),
+        commit_ts_placeholder_(commit_ts_placeholder),
+        array_buffer_constructor_(array_buffer_constructor),
+        define_property_(define_property) {}
+
+  Value decode() {
+    static constexpr uint8_t magic[] = {'C', 'V', 'A', '1'};
+    const uint8_t *header = take(sizeof(magic));
+    if (std::memcmp(header, magic, sizeof(magic)) != 0) {
+      throw JSError(js_, "Typed value frame has an invalid header");
+    }
+    Value result = value(0);
+    if (cursor_ != end_) {
+      throw JSError(js_, "Typed value frame has trailing bytes");
+    }
+    return result;
+  }
+
+ private:
+  const uint8_t *take(size_t length) {
+    if (length > static_cast<size_t>(end_ - cursor_)) {
+      throw JSError(js_, "Typed value frame is truncated");
+    }
+    const uint8_t *result = cursor_;
+    cursor_ += length;
+    return result;
+  }
+
+  uint8_t byte() { return *take(1); }
+
+  uint32_t u32() {
+    const uint8_t *bytes = take(4);
+    return static_cast<uint32_t>(bytes[0]) |
+           (static_cast<uint32_t>(bytes[1]) << 8) |
+           (static_cast<uint32_t>(bytes[2]) << 16) |
+           (static_cast<uint32_t>(bytes[3]) << 24);
+  }
+
+  uint64_t u64() {
+    const uint8_t *bytes = take(8);
+    uint64_t result = 0;
+    for (size_t index = 0; index < 8; ++index) {
+      result |= static_cast<uint64_t>(bytes[index]) << (index * 8);
+    }
+    return result;
+  }
+
+  std::pair<const uint8_t *, size_t> slice() {
+    const size_t length = u32();
+    return {take(length), length};
+  }
+
+  void define_field(Object &object,
+                    const char *bytes,
+                    size_t length,
+                    Value field) {
+    auto key = String::createFromUtf8(js_,
+                                      reinterpret_cast<const uint8_t *>(bytes),
+                                      length);
+    if (length == sizeof("__proto__") - 1 &&
+        std::memcmp(bytes, "__proto__", length) == 0) {
+      // Assignment invokes the inherited setter instead of defining an own
+      // field. Convex permits this field name.
+      Object descriptor(js_);
+      descriptor.setProperty(js_, "configurable", true);
+      descriptor.setProperty(js_, "enumerable", true);
+      descriptor.setProperty(js_, "writable", true);
+      descriptor.setProperty(js_, "value", std::move(field));
+      define_property_.call(js_, object, key, descriptor);
+    } else {
+      object.setProperty(js_, key, std::move(field));
+    }
+  }
+
+  Value packed(flexbuffers::Reference reference, size_t nesting) {
+    if (reference.IsNull()) return Value::null();
+    if (reference.IsBool()) return Value(reference.AsBool());
+    if (reference.IsInt()) {
+      return Value(BigInt::fromInt64(js_, reference.AsInt64()));
+    }
+    if (reference.IsFloat()) return Value(reference.AsDouble());
+    if (reference.IsString()) {
+      const auto string = reference.AsString();
+      return Value(String::createFromUtf8(
+          js_, reinterpret_cast<const uint8_t *>(string.c_str()),
+          string.length()));
+    }
+    if (reference.GetType() == flexbuffers::FBT_BLOB) {
+      const auto blob = reference.AsBlob();
+      auto buffer = array_buffer_constructor_
+                        .callAsConstructor(js_, static_cast<double>(blob.size()))
+                        .asObject(js_)
+                        .getArrayBuffer(js_);
+      if (buffer.size(js_) != blob.size()) {
+        throw JSError(js_, "Packed value byte buffer has an invalid size");
+      }
+      if (blob.size() != 0) {
+        std::memcpy(buffer.data(js_), blob.data(), blob.size());
+      }
+      return Value(std::move(buffer));
+    }
+    if (nesting >= kValueAbiMaximumNesting) {
+      throw JSError(js_, "Packed value nesting exceeds the limit");
+    }
+    if (reference.IsMap()) {
+      const auto map = reference.AsMap();
+      if (map.size() > kValueAbiMaximumObjectFields) {
+        throw JSError(js_, "Packed value object length is invalid");
+      }
+      const auto keys = map.Keys();
+      const auto values = map.Values();
+      Object result(js_);
+      const char *previous_key = nullptr;
+      for (size_t index = 0; index < map.size(); ++index) {
+        const char *key = keys[index].AsKey();
+        if (previous_key != nullptr && std::strcmp(previous_key, key) >= 0) {
+          throw JSError(js_, "Packed document object keys are invalid");
+        }
+        define_field(result, key, std::strlen(key),
+                     packed(values[index], nesting + 1));
+        previous_key = key;
+      }
+      return Value(std::move(result));
+    }
+    if (reference.IsAnyVector()) {
+      const size_t count = reference.IsUntypedVector()
+                               ? reference.AsVector().size()
+                               : reference.IsTypedVector()
+                                     ? reference.AsTypedVector().size()
+                                     : reference.AsFixedTypedVector().size();
+      if (count > kValueAbiMaximumArrayLength) {
+        throw JSError(js_, "Packed value array length is invalid");
+      }
+      Array result(js_, count);
+      for (size_t index = 0; index < count; ++index) {
+        const auto element = reference.IsUntypedVector()
+                                 ? reference.AsVector()[index]
+                                 : reference.IsTypedVector()
+                                       ? reference.AsTypedVector()[index]
+                                       : reference.AsFixedTypedVector()[index];
+        result.setValueAtIndex(js_, index, packed(element, nesting + 1));
+      }
+      return Value(std::move(result));
+    }
+    throw JSError(js_, "Packed document contains an unsupported value type");
+  }
+
+  Value value(size_t nesting) {
+    switch (byte()) {
+      case 0:
+        return Value::null();
+      case 1:
+        return Value(false);
+      case 2:
+        return Value(true);
+      case 3: {
+        const uint64_t bits = u64();
+        double number;
+        std::memcpy(&number, &bits, sizeof(number));
+        return Value(number);
+      }
+      case 4: {
+        const uint64_t bits = u64();
+        int64_t integer;
+        std::memcpy(&integer, &bits, sizeof(integer));
+        return Value(BigInt::fromInt64(js_, integer));
+      }
+      case 5: {
+        const auto [bytes, length] = slice();
+        return Value(String::createFromUtf8(js_, bytes, length));
+      }
+      case 6: {
+        const auto [bytes, length] = slice();
+        auto buffer = array_buffer_constructor_
+                          .callAsConstructor(js_, static_cast<double>(length))
+                          .asObject(js_)
+                          .getArrayBuffer(js_);
+        if (buffer.size(js_) != length) {
+          throw JSError(js_, "Typed value byte buffer has an invalid size");
+        }
+        if (length != 0) {
+          std::memcpy(buffer.data(js_), bytes, length);
+        }
+        return Value(std::move(buffer));
+      }
+      case 7: {
+        if (nesting >= kValueAbiMaximumNesting) {
+          throw JSError(js_, "Typed value nesting exceeds the limit");
+        }
+        const uint32_t count = u32();
+        if (count > kValueAbiMaximumArrayLength ||
+            count > static_cast<size_t>(end_ - cursor_)) {
+          throw JSError(js_, "Typed value array length is invalid");
+        }
+        Array result(js_, count);
+        for (uint32_t index = 0; index < count; ++index) {
+          result.setValueAtIndex(js_, index, value(nesting + 1));
+        }
+        return Value(std::move(result));
+      }
+      case 8: {
+        if (nesting >= kValueAbiMaximumNesting) {
+          throw JSError(js_, "Typed value nesting exceeds the limit");
+        }
+        const uint32_t count = u32();
+        if (count > kValueAbiMaximumObjectFields ||
+            count > static_cast<size_t>(end_ - cursor_) / 5) {
+          throw JSError(js_, "Typed value object length is invalid");
+        }
+        Object result(js_);
+        for (uint32_t index = 0; index < count; ++index) {
+          const auto [bytes, length] = slice();
+          Value field = value(nesting + 1);
+          define_field(result, reinterpret_cast<const char *>(bytes), length,
+                       std::move(field));
+        }
+        return Value(std::move(result));
+      }
+      case 9:
+        if (commit_ts_placeholder_.isUndefined()) {
+          throw JSError(js_, "Pending value is not allowed in this invocation");
+        }
+        return Value(js_, commit_ts_placeholder_);
+      case 10: {
+        const auto [bytes, length] = slice();
+        if (!flexbuffers::VerifyBuffer(bytes, length)) {
+          throw JSError(js_, "Packed document is invalid");
+        }
+        const auto root = flexbuffers::GetRoot(bytes, length);
+        if (!root.IsMap()) {
+          throw JSError(js_, "Packed document root is not an object");
+        }
+        return packed(root, nesting);
+      }
+      case 11: {
+        const uint32_t count = u32();
+        if (count > kValueAbiMaximumArrayLength ||
+            count > static_cast<size_t>(end_ - cursor_)) {
+          throw JSError(js_, "Document collection length is invalid");
+        }
+        Array result(js_, count);
+        for (uint32_t index = 0; index < count; ++index) {
+          if (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10)) {
+            throw JSError(js_, "Document collection entry is invalid");
+          }
+          result.setValueAtIndex(js_, index, value(0));
+        }
+        return Value(std::move(result));
+      }
+      default:
+        throw JSError(js_, "Typed value frame contains an unsupported tag");
+    }
+  }
+
+  Runtime &js_;
+  const uint8_t *cursor_;
+  const uint8_t *end_;
+  const Value &commit_ts_placeholder_;
+  const Function &array_buffer_constructor_;
+  const Function &define_property_;
+};
+
+Value take_typed_host_value(Runtime &js,
+                            int64_t consuming_value_handle,
+                            const Value &commit_ts_placeholder,
+                            const Function &array_buffer_constructor,
+                            const Function &define_property) {
+  const int64_t payload_handle =
+      convex_guest_value_encode_binary(consuming_value_handle);
+  if (payload_handle <= 0) {
+    throw JSError(js, "Typed host value encode failed");
+  }
+  std::vector<uint8_t> bytes;
+  {
+    ValueAbiPayloadLease payload{payload_handle};
+    const int32_t length = convex_guest_value_payload_len(payload_handle);
+    if (length < 5 || static_cast<size_t>(length) > kValueAbiMaximumFrameBytes) {
+      throw JSError(js, "Typed host value length is invalid");
+    }
+    bytes.resize(static_cast<size_t>(length));
+    if (convex_guest_value_payload_copy(
+            payload_handle,
+            reinterpret_cast<char *>(bytes.data()),
+            length) != length) {
+      throw JSError(js, "Typed host value copy failed");
+    }
+  }
+  return ValueAbiReader(js,
+                        bytes.data(),
+                        bytes.size(),
+                        commit_ts_placeholder,
+                        array_buffer_constructor,
+                        define_property)
+      .decode();
+}
 
 SHRuntime *initialize_runtime() {
   char program[] = "convex-wasm-native-capability";
@@ -679,6 +1535,7 @@ void evaluate_application_initializer(Runtime &js,
   }
 }
 
+int64_t exact_positive_handle(Runtime &js, const Value &value);
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
 int32_t exact_i32(Runtime &js, const Value &value, const char *description);
 Value initialize_official_chunk_unit(Runtime &js, int32_t unit_slot);
@@ -1189,10 +2046,327 @@ void install_guest_bridge(Runtime &js) {
         });
         return Value::undefined();
         });
-  bridge_bootstrap->call(js, install);
+  auto array_buffer_constructor = std::make_shared<Function>(
+      js.global().getPropertyAsFunction(js, "ArrayBuffer"));
+  auto define_property = std::make_shared<Function>(
+      js.global()
+          .getPropertyAsObject(js, "Object")
+          .getPropertyAsFunction(js, "defineProperty"));
+  auto object_constructor = js.global().getPropertyAsObject(js, "Object");
+  auto value_intrinsics = std::make_shared<ValueAbiIntrinsics>(ValueAbiIntrinsics{
+      object_constructor.getPropertyAsObject(js, "prototype"),
+  });
+  auto take_typed_value = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "takeTypedCapabilityValue"),
+      2,
+      [array_buffer_constructor, define_property](Runtime &js,
+                                                   const Value &,
+                                                   const Value *arguments,
+                                                   size_t count) -> Value {
+        if (count != 2) {
+          throw JSError(js, "Typed host value arguments are invalid");
+        }
+        return take_typed_host_value(js,
+                                     exact_positive_handle(js, arguments[0]),
+                                     arguments[1],
+                                     *array_buffer_constructor,
+                                     *define_property);
+      });
+  auto set_typed_result = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "setTypedCapabilityResult"),
+      2,
+      [value_intrinsics](Runtime &js,
+                         const Value &,
+                         const Value *arguments,
+                         size_t count) -> Value {
+        if (count != 2 || !arguments[1].isObject()) {
+          throw JSError(js, "Typed result arguments are invalid");
+        }
+        auto bytes = ValueAbiWriter(js, arguments[1], *value_intrinsics,
+                                    ValueAbiMode::Value)
+                         .encode(arguments[0]);
+        convex_guest_value_result_binary(
+            reinterpret_cast<const char *>(bytes.data()),
+            static_cast<int32_t>(bytes.size()));
+        return Value::undefined();
+      });
+  auto start_typed_get = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilityGet"),
+      3,
+      [](Runtime &js,
+         const Value &,
+         const Value *arguments,
+         size_t count) -> Value {
+        if (count != 3 || !arguments[0].isString() ||
+            (!arguments[1].isNull() && !arguments[1].isString()) ||
+            !arguments[2].isBool()) {
+          throw JSError(js, "Typed get arguments are invalid");
+        }
+        const std::string id = arguments[0].asString(js).utf8(js);
+        const std::string table = arguments[1].isString()
+                                      ? arguments[1].asString(js).utf8(js)
+                                      : std::string();
+        if (id.size() > kValueAbiMaximumFrameBytes ||
+            table.size() > kValueAbiMaximumFrameBytes - id.size()) {
+          throw JSError(js, "Typed get strings exceed the byte limit");
+        }
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_start_get(
+            capability, id.data(), static_cast<int32_t>(id.size()),
+            arguments[1].isString() ? table.data() : nullptr,
+            static_cast<int32_t>(table.size()), arguments[2].getBool() ? 1 : 0);
+        return Value(static_cast<double>(handle));
+      });
+  auto start_typed_string = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilityString"),
+      2,
+      [](Runtime &js,
+         const Value &,
+         const Value *arguments,
+         size_t count) -> Value {
+        if (count != 2 || !arguments[0].isNumber() ||
+            !arguments[1].isString()) {
+          throw JSError(js, "Typed string operation arguments are invalid");
+        }
+        const double code_number = arguments[0].getNumber();
+        if (code_number < 1 || code_number > 7 ||
+            code_number != static_cast<int32_t>(code_number)) {
+          throw JSError(js, "Typed string operation code is invalid");
+        }
+        const std::string value = arguments[1].asString(js).utf8(js);
+        if (value.size() > kValueAbiMaximumFrameBytes) {
+          throw JSError(js, "Typed string operation exceeds the byte limit");
+        }
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_start_string(
+            capability, static_cast<int32_t>(code_number), value.data(),
+            static_cast<int32_t>(value.size()));
+        return Value(static_cast<double>(handle));
+      });
+  auto start_typed_write = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilityWrite"),
+      5,
+      [value_intrinsics](Runtime &js,
+                         const Value &,
+                         const Value *arguments,
+                         size_t count) -> Value {
+        if (count != 5 || !arguments[0].isNumber() ||
+            !arguments[4].isObject()) {
+          throw JSError(js, "Typed write arguments are invalid");
+        }
+        const double kind_number = arguments[0].getNumber();
+        if (kind_number < 1 || kind_number > 4 ||
+            kind_number != static_cast<int32_t>(kind_number)) {
+          throw JSError(js, "Typed write kind is invalid");
+        }
+        const int32_t kind = static_cast<int32_t>(kind_number);
+        if ((kind == 1 && !arguments[1].isString()) ||
+            (kind != 1 && !arguments[2].isString()) ||
+            (kind == 1 && !arguments[2].isNull()) ||
+            (!arguments[1].isNull() && !arguments[1].isString())) {
+          throw JSError(js, "Typed write fields are invalid");
+        }
+        const std::string table = arguments[1].isString()
+                                      ? arguments[1].asString(js).utf8(js)
+                                      : std::string();
+        const std::string id = arguments[2].isString()
+                                   ? arguments[2].asString(js).utf8(js)
+                                   : std::string();
+        if (table.size() > kValueAbiMaximumFrameBytes ||
+            id.size() > kValueAbiMaximumFrameBytes) {
+          throw JSError(js, "Typed write string exceeds the byte limit");
+        }
+        std::vector<uint8_t> value_bytes;
+        if (kind != 4) {
+          value_bytes = ValueAbiWriter(
+                            js, arguments[4], *value_intrinsics,
+                            kind == 2 ? ValueAbiMode::Patch : ValueAbiMode::Value)
+                            .encode(arguments[3]);
+        }
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_start_write(
+            capability, kind, arguments[1].isString() ? table.data() : nullptr,
+            static_cast<int32_t>(table.size()),
+            arguments[2].isString() ? id.data() : nullptr,
+            static_cast<int32_t>(id.size()),
+            kind == 4 ? nullptr
+                      : reinterpret_cast<const char *>(value_bytes.data()),
+            static_cast<int32_t>(value_bytes.size()));
+        return Value(static_cast<double>(handle));
+      });
+  auto start_typed_run_udf = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilityRunUdf"),
+      6,
+      [value_intrinsics](Runtime &js,
+                         const Value &,
+                         const Value *arguments,
+                         size_t count) -> Value {
+        if (count != 6 || !arguments[0].isNumber() ||
+            !arguments[1].isNumber() || !arguments[2].isString() ||
+            !arguments[3].isObject() ||
+            (!arguments[4].isNull() && !arguments[4].isObject()) ||
+            !arguments[5].isObject()) {
+          throw JSError(js, "Typed nested UDF arguments are invalid");
+        }
+        const double udf_type = arguments[0].getNumber();
+        const double address_kind = arguments[1].getNumber();
+        if ((udf_type != 1 && udf_type != 2 && udf_type != 3) ||
+            (address_kind != 1 && address_kind != 2 && address_kind != 3)) {
+          throw JSError(js, "Typed nested UDF operation codes are invalid");
+        }
+        const std::string address = arguments[2].asString(js).utf8(js);
+        auto args_bytes = ValueAbiWriter(js, arguments[5], *value_intrinsics,
+                                         ValueAbiMode::Value)
+                              .encode(arguments[3]);
+        std::vector<uint8_t> limits_bytes;
+        if (arguments[4].isObject()) {
+          limits_bytes = ValueAbiWriter(js, arguments[5], *value_intrinsics,
+                                        ValueAbiMode::Value)
+                             .encode(arguments[4]);
+        }
+        if (address.size() > kValueAbiMaximumFrameBytes ||
+            args_bytes.size() > kValueAbiMaximumFrameBytes - address.size() ||
+            limits_bytes.size() >
+                kValueAbiMaximumFrameBytes - address.size() - args_bytes.size()) {
+          throw JSError(js, "Typed nested UDF request exceeds the byte limit");
+        }
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_start_run_udf(
+            capability, static_cast<int32_t>(udf_type),
+            static_cast<int32_t>(address_kind), address.data(),
+            static_cast<int32_t>(address.size()),
+            reinterpret_cast<const char *>(args_bytes.data()),
+            static_cast<int32_t>(args_bytes.size()),
+            limits_bytes.empty()
+                ? nullptr
+                : reinterpret_cast<const char *>(limits_bytes.data()),
+            static_cast<int32_t>(limits_bytes.size()));
+        return Value(static_cast<double>(handle));
+      });
+  auto start_typed_schedule = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilitySchedule"),
+      6,
+      [value_intrinsics](Runtime &js,
+                         const Value &,
+                         const Value *arguments,
+                         size_t count) -> Value {
+        if (count != 6 || !arguments[0].isNumber() ||
+            !arguments[1].isNumber() || !arguments[2].isNumber() ||
+            !arguments[3].isString() || !arguments[4].isObject() ||
+            !arguments[5].isObject()) {
+          throw JSError(js, "Typed schedule arguments are invalid");
+        }
+        const double kind = arguments[0].getNumber();
+        const double time = arguments[1].getNumber();
+        const double address_kind = arguments[2].getNumber();
+        if ((kind != 1 && kind != 2) || !std::isfinite(time) ||
+            (kind == 1 && time < 0.0) ||
+            (address_kind != 1 && address_kind != 2 && address_kind != 3)) {
+          throw JSError(js, "Typed schedule fields are invalid");
+        }
+        const std::string address = arguments[3].asString(js).utf8(js);
+        auto args_bytes = ValueAbiWriter(js, arguments[5], *value_intrinsics,
+                                         ValueAbiMode::Committed)
+                              .encode(arguments[4]);
+        if (address.empty() || address.size() > kValueAbiMaximumFrameBytes ||
+            args_bytes.size() > kValueAbiMaximumFrameBytes - address.size()) {
+          throw JSError(js, "Typed schedule request exceeds the byte limit");
+        }
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_start_schedule(
+            capability, static_cast<int32_t>(kind), time,
+            static_cast<int32_t>(address_kind), address.data(),
+            static_cast<int32_t>(address.size()),
+            reinterpret_cast<const char *>(args_bytes.data()),
+            static_cast<int32_t>(args_bytes.size()));
+        return Value(static_cast<double>(handle));
+      });
+  auto capture_query_value = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "captureTypedQueryValue"),
+      2,
+      [array_buffer_constructor, value_intrinsics](Runtime &js,
+                                                    const Value &,
+                                                    const Value *arguments,
+                                                    size_t count) -> Value {
+        if (count != 2 || !arguments[1].isObject()) {
+          throw JSError(js, "Typed query value arguments are invalid");
+        }
+        auto bytes = ValueAbiWriter(js, arguments[1], *value_intrinsics,
+                                    ValueAbiMode::Value)
+                         .encode(arguments[0]);
+        auto buffer = array_buffer_constructor
+                          ->callAsConstructor(js, static_cast<double>(bytes.size()))
+                          .asObject(js)
+                          .getArrayBuffer(js);
+        if (buffer.size(js) != bytes.size()) {
+          throw JSError(js, "Typed query value buffer has an invalid size");
+        }
+        std::memcpy(buffer.data(js), bytes.data(), bytes.size());
+        return Value(std::move(buffer));
+      });
+  auto start_typed_query = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startTypedCapabilityQuery"),
+      3,
+      [](Runtime &js, const Value &, const Value *arguments,
+         size_t count) -> Value {
+        if (count != 3 || !arguments[0].isObject() ||
+            !arguments[1].isString()) {
+          throw JSError(js, "Typed query arguments are invalid");
+        }
+        auto bytes = QueryAbiWriter(js).encode(arguments[0], arguments[1],
+                                               arguments[2]);
+        const int64_t capability = convex_capability_current();
+        if (capability <= 0) {
+          throw JSError(js, "Invocation capability is unavailable");
+        }
+        const int32_t handle = convex_capability_query_record(
+            capability, reinterpret_cast<const char *>(bytes.data()),
+            static_cast<int32_t>(bytes.size()));
+        return Value(static_cast<double>(handle));
+      });
+  bridge_bootstrap->call(js, install, take_typed_value, set_typed_result,
+                         start_typed_get, start_typed_string, start_typed_write,
+                         start_typed_run_udf, start_typed_schedule,
+                         start_typed_query, capture_query_value);
   if (guest_bridge == nullptr) {
     throw JSError(js, "Capability bootstrap did not install its bridge");
   }
+  guest_bridge->start_typed_get =
+      std::make_shared<Function>(std::move(start_typed_get));
+  guest_bridge->start_typed_string =
+      std::make_shared<Function>(std::move(start_typed_string));
+  guest_bridge->start_typed_write =
+      std::make_shared<Function>(std::move(start_typed_write));
+  guest_bridge->start_typed_run_udf =
+      std::make_shared<Function>(std::move(start_typed_run_udf));
+  guest_bridge->start_typed_schedule =
+      std::make_shared<Function>(std::move(start_typed_schedule));
+  guest_bridge->start_typed_query =
+      std::make_shared<Function>(std::move(start_typed_query));
   // Installation is one-shot. Keeping the bootstrap would retain authority
   // beyond the only lifecycle boundary where C++ is allowed to call it.
   bridge_bootstrap.reset();
@@ -1463,16 +2637,119 @@ Object invocation_context(Runtime &js,
         return Value(static_cast<double>(convex_capability_sync_take(
             capability_identity, request_handle)));
       });
+  auto start_typed_get = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundTypedCapabilityGet"),
+      3,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity ||
+            guest_bridge == nullptr ||
+            guest_bridge->start_typed_get == nullptr) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        return guest_bridge->start_typed_get->call(js, arguments, count);
+      });
+  auto start_scalar = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundScalarCapability"),
+      1,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        if (count != 1 || !arguments[0].isNumber()) {
+          throw JSError(js, "Scalar capability code is invalid");
+        }
+        const double code_number = arguments[0].getNumber();
+        if (code_number < 1 || code_number > 6 ||
+            code_number != static_cast<int32_t>(code_number)) {
+          throw JSError(js, "Scalar capability code is invalid");
+        }
+        return Value(static_cast<double>(convex_capability_start_scalar(
+            capability_identity, static_cast<int32_t>(code_number))));
+      });
+  auto start_typed_string = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundTypedCapabilityString"),
+      2,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity ||
+            guest_bridge == nullptr ||
+            guest_bridge->start_typed_string == nullptr) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        return guest_bridge->start_typed_string->call(js, arguments, count);
+      });
+  auto start_typed_write = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundTypedCapabilityWrite"),
+      5,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity ||
+            guest_bridge == nullptr ||
+            guest_bridge->start_typed_write == nullptr) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        return guest_bridge->start_typed_write->call(js, arguments, count);
+      });
+  auto start_typed_run_udf = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundTypedCapabilityRunUdf"),
+      6,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity ||
+            guest_bridge == nullptr ||
+            guest_bridge->start_typed_run_udf == nullptr) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        return guest_bridge->start_typed_run_udf->call(js, arguments, count);
+      });
+  auto start_typed_schedule = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "startBoundTypedCapabilitySchedule"),
+      6,
+      [capability_identity](Runtime &js,
+                            const Value &,
+                            const Value *arguments,
+                            size_t count) -> Value {
+        if (convex_capability_current() != capability_identity ||
+            guest_bridge == nullptr ||
+            guest_bridge->start_typed_schedule == nullptr) {
+          throw JSError(js, "Invocation capability is stale");
+        }
+        return guest_bridge->start_typed_schedule->call(js, arguments, count);
+      });
   Value context_arguments[] = {
       std::move(start),
       std::move(sync),
       Value(facebook::jsi::String::createFromAscii(js, udf_kind)),
       Value(js, commit_ts_placeholder),
+      std::move(start_typed_get),
+      std::move(start_scalar),
+      std::move(start_typed_string),
+      std::move(start_typed_write),
+      std::move(start_typed_run_udf),
+      std::move(start_typed_schedule),
   };
   return guest_bridge->create_context
       ->call(js,
              static_cast<const Value *>(context_arguments),
-             size_t{4})
+             size_t{10})
       .asObject(js);
 }
 
@@ -1510,6 +2787,10 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
   SelectedEntryLease selected_entry_lease;
   bool new_runtime = false;
   if (runtime == nullptr) {
+    if (convex_typed_value_abi_v1() != 1) {
+      convex_wasm_clear_selected_entry();
+      return 8;
+    }
     if (!retained_runtime_state_is_empty()) {
       reset_runtime_state();
       return 9;
@@ -1788,9 +3069,7 @@ extern "C" int convex_wasm_udf_run(void) {
         js, String::createFromAscii(js, udf_kind));
     invocation_activated = true;
     js_error_phase = JSErrorPhase::ReadInvocationRequest;
-    auto request = invocation_abi == kSelectedInvocationAbiOfficialWrapper
-                       ? guest_bridge->read_tagged_request->call(js)
-                       : guest_bridge->read_request->call(js);
+    auto request = guest_bridge->read_request->call(js);
     js_error_phase = JSErrorPhase::SelectHandler;
     auto selected_export =
         selected_application_export(js, entry_slot, export_name);

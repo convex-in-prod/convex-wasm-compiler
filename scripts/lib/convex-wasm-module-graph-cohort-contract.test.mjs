@@ -12,14 +12,22 @@ import { convexWasmCapabilityLegacyInvocationAbi } from "./convex-wasm-selector-
 
 const digest = (character) => character.repeat(64);
 
-test("creates the committed deployment-v8 cohort from its authenticated compiler contract", () => {
+function currentCohortFixture() {
   const fixture = JSON.parse(
     readFileSync(
       new URL("../test-fixtures/convex-wasm-module-graph-registry/fixture.json", import.meta.url)
     )
   );
   const deployment = JSON.parse(Buffer.from(fixture.material.deployment.base64, "base64"));
-  const cohort = deployment.moduleGraphCohorts[0];
+  const { cohortContractSha256: _previousIdentity, ...cohort } = deployment.moduleGraphCohorts[0];
+  cohort.compiler.staticHermesGlobalPolicy = convexWasmTargetRuntimeSurfacePolicyIdentity;
+  cohort.runtimeSurfacePolicySha256 =
+    convexWasmTargetRuntimeSurfacePolicyIdentity.runtimeSurfacePolicySha256;
+  return { ...cohort, cohortContractSha256: fingerprintJson(cohort) };
+}
+
+test("creates a current deployment-v8 cohort from its authenticated compiler contract", () => {
+  const cohort = currentCohortFixture();
   const {
     cohortContractSha256: ignoredCohortContractSha256,
     cohortId,
@@ -59,14 +67,8 @@ test("creates the committed deployment-v8 cohort from its authenticated compiler
   );
 });
 
-test("validates the committed deployment-v8 cohort and its nested value identities", () => {
-  const fixture = JSON.parse(
-    readFileSync(
-      new URL("../test-fixtures/convex-wasm-module-graph-registry/fixture.json", import.meta.url)
-    )
-  );
-  const deployment = JSON.parse(Buffer.from(fixture.material.deployment.base64, "base64"));
-  const cohort = deployment.moduleGraphCohorts[0];
+test("validates a current deployment-v8 cohort and its nested value identities", () => {
+  const cohort = currentCohortFixture();
   assert.equal(
     validateConvexWasmModuleGraphCohortContract(cohort).cohortContractSha256,
     cohort.cohortContractSha256

@@ -694,6 +694,13 @@ const CAPABILITY_RUNTIME_MAIN_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "convex-wasm-native-capability-runtime-main.cpp"
 );
+const FLATBUFFERS_INCLUDE_DIRECTORY = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "vendor",
+  "flatbuffers",
+  "include"
+);
 const COHORT_PACKAGE_FILES = new Set([
   "COMPLETE",
   "build-provenance.json",
@@ -940,6 +947,15 @@ const MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS = Object.freeze([
   ["convex", "convex_capability_request_decode", ["i32", "i32"], ["i64"]],
   ["convex", "convex_capability_request_release", ["i64"], []],
   ["convex", "convex_capability_start_take", ["i64", "i64"], ["i32"]],
+  ["convex", "convex_capability_start_scalar", ["i64", "i32"], ["i32"]],
+  ["convex", "convex_capability_start_get", ["i64", "i32", "i32", "i32", "i32", "i32"], ["i32"]],
+  ["convex", "convex_capability_start_string", ["i64", "i32", "i32", "i32"], ["i32"]],
+  ["convex", "convex_capability_start_write", ["i64", "i32", "i32", "i32", "i32", "i32", "i32", "i32"], ["i32"]],
+  ["convex", "convex_capability_start_run_udf", ["i64", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "i32"], ["i32"]],
+  ["convex", "convex_capability_start_schedule", ["i64", "i32", "f64", "i32", "i32", "i32", "i32", "i32"], ["i32"]],
+  ["convex", "convex_capability_query_record", ["i64", "i32", "i32"], ["i32"]],
+  ["convex", "convex_typed_value_abi_v1", [], ["i32"]],
+  ["convex", "convex_performance_now", ["i64"], ["f64"]],
   ["convex", "convex_capability_sync_take", ["i64", "i64"], ["i64"]],
   ["convex", "convex_console_message", ["i64", "i32", "i32", "i32"], ["i32"]],
   ["convex", "convex_crypto_get_random_values", ["i64", "i32", "i32"], []],
@@ -947,12 +963,14 @@ const MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS = Object.freeze([
   ["convex", "convex_crypto_subtle_digest_sha256", ["i64", "i32", "i32", "i32", "i32"], []],
   ["convex", "convex_developer_error", ["i32", "i32", "i32"], []],
   ["convex", "convex_guest_value_encode", ["i64"], ["i64"]],
+  ["convex", "convex_guest_value_encode_binary", ["i64"], ["i64"]],
   ["convex", "convex_guest_value_payload_copy", ["i64", "i32", "i32"], ["i32"]],
   ["convex", "convex_guest_value_payload_len", ["i64"], ["i32"]],
   ["convex", "convex_guest_value_payload_release", ["i64"], []],
   ["convex", "convex_guest_value_request_copy", ["i32", "i32"], ["i32"]],
   ["convex", "convex_guest_value_request_len", [], ["i32"]],
   ["convex", "convex_guest_value_result", ["i32", "i32"], []],
+  ["convex", "convex_guest_value_result_binary", ["i32", "i32"], []],
   ["convex", "convex_has_developer_error", [], ["i32"]],
   ["convex", "convex_invocation_unix_timestamp_ms", [], ["f64"]],
   ["convex", "convex_math_random", ["i64"], ["f64"]],
@@ -3009,6 +3027,15 @@ function normalizeBoundSharedOptions(
   if (includeDirectories.length === 0) {
     fail("runtime.includeDirectories must contain the Static Hermes generated-code headers");
   }
+  const runtimeMainSourcePath = resolve(
+    requireString(options.runtime.mainSourcePath, "runtime.mainSourcePath")
+  );
+  if (
+    runtimeMainSourcePath === CAPABILITY_RUNTIME_MAIN_PATH &&
+    !includeDirectories.includes(FLATBUFFERS_INCLUDE_DIRECTORY)
+  ) {
+    includeDirectories.push(FLATBUFFERS_INCLUDE_DIRECTORY);
+  }
 
   assertPlainObject(options.toolchain, "toolchain");
   assertExactKeys(
@@ -3169,9 +3196,7 @@ function normalizeBoundSharedOptions(
         options.runtime.mainCompileFlags,
         "runtime.mainCompileFlags"
       ),
-      mainSourcePath: resolve(
-        requireString(options.runtime.mainSourcePath, "runtime.mainSourcePath")
-      ),
+      mainSourcePath: runtimeMainSourcePath,
       materialInputs: normalizeMaterialInputs(
         options.runtime.materialInputs,
         "runtime.materialInputs"

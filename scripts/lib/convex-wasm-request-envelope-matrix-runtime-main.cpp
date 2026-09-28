@@ -86,6 +86,9 @@ extern "C" void convex_capability_request_release(long long request_handle) {
   request_envelope_state.released += 1;
 }
 extern "C" int convex_capability_start_take(long long, long long) { return 0; }
+extern "C" int convex_capability_start_scalar(long long, int) { return 0; }
+extern "C" int convex_capability_start_get(long long, const char *, int, const char *, int, int) { return 0; }
+extern "C" double convex_performance_now(long long) { return 0; }
 extern "C" long long convex_capability_sync_take(long long, long long) { return 0; }
 extern "C" void convex_crypto_subtle_digest_sha256(long long, const char *, int, char *, int) {}
 extern "C" void convex_crypto_get_random_values(long long, char *, int) {}
@@ -122,6 +125,7 @@ extern "C" int convex_guest_value_request_len(void) { return 0; }
 extern "C" int convex_guest_value_request_copy(char *, int) { return 0; }
 extern "C" long long convex_guest_value_decode(const char *, int) { return 0; }
 extern "C" long long convex_guest_value_encode(long long) { return 0; }
+extern "C" long long convex_guest_value_encode_binary(long long) { return 0; }
 extern "C" int convex_guest_value_payload_len(long long) { return 0; }
 extern "C" int convex_guest_value_payload_copy(long long, char *, int) { return 0; }
 extern "C" void convex_guest_value_payload_release(long long) {}

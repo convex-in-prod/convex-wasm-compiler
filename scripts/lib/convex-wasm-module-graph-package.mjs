@@ -63,6 +63,29 @@ import { authenticateConvexContextReuseCohortAnalysisIdentity } from "./convex-c
 export const convexWasmModuleGraphManifestKind = "convex-wasm-module-graph-manifest-v5";
 export const convexWasmModuleGraphPackageEntryKind = "convex-wasm-module-graph-package-v5";
 export const convexWasmModuleGraphProvenanceKind = "convex-wasm-module-graph-provenance-v5";
+// Retained packages bind their original compilation policy into their authenticated identity.
+// The old policy must remain readable so cache retention can trace its live artifact references.
+const historicalStaticHermesCBundleMemberCompilationPolicy = {
+  cOptimizationLevelZero: {
+    cOptimizationLevel: 0,
+    functionCount: 1,
+    optimizationFlag: "-O0",
+    role: "function",
+    stage: "c-optimization-level-zero-c-bundle-member-object",
+  },
+  kind: "convex-wasm-static-hermes-c-bundle-member-compilation-v3",
+  largeBundleFunction: {
+    appliesToFunctionFragments: false,
+    minimumTranslationUnitBytes: 64 * 1024 * 1024,
+    optimizationFlag: "-Oz",
+    role: "function",
+  },
+  normalOptimizationFlag: "-Oz",
+};
+const historicalStaticHermesCBundleMemberCompilationSpeedPolicy = {
+  ...historicalStaticHermesCBundleMemberCompilationPolicy,
+  normalOptimizationFlag: "-O2",
+};
 export const convexWasmModuleGraphSharedLinkOrderKind =
   "convex-wasm-module-graph-shared-source-membership-link-order-v1";
 
@@ -862,18 +885,27 @@ function normalizeModuleGraphToolchain(value) {
     ["aot", "core", "staticHermesCBundleMemberCompilation"],
     description
   );
-  if (
-    canonicalJson(value.staticHermesCBundleMemberCompilation) !==
-    canonicalJson(convexWasmStaticHermesCBundleMemberCompilationPolicy)
-  ) {
+  const memberCompilation = value.staticHermesCBundleMemberCompilation;
+  const currentPolicy = convexWasmStaticHermesCBundleMemberCompilationPolicy;
+  const normalizedPolicy =
+    canonicalJson(memberCompilation) === canonicalJson(currentPolicy)
+      ? currentPolicy
+      : canonicalJson(memberCompilation) ===
+          canonicalJson(historicalStaticHermesCBundleMemberCompilationPolicy)
+        ? historicalStaticHermesCBundleMemberCompilationPolicy
+        : canonicalJson(memberCompilation) ===
+            canonicalJson(historicalStaticHermesCBundleMemberCompilationSpeedPolicy)
+          ? historicalStaticHermesCBundleMemberCompilationSpeedPolicy
+        : undefined;
+  if (normalizedPolicy === undefined) {
     fail(
-      "module graph toolchain must preserve the authenticated -Oz application and forced -O0 member policy"
+      "module graph toolchain has an unsupported member compilation policy"
     );
   }
   return {
     aot: normalizeModuleGraphJsonValue(value.aot, `${description}.aot`),
     core: normalizeModuleGraphJsonValue(value.core, `${description}.core`),
-    staticHermesCBundleMemberCompilation: convexWasmStaticHermesCBundleMemberCompilationPolicy,
+    staticHermesCBundleMemberCompilation: normalizedPolicy,
   };
 }
 

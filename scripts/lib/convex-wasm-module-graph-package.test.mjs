@@ -13,7 +13,70 @@ import {
 import {
   createConvexWasmModuleGraphPackageValidationScope,
   loadAndVerifyConvexWasmModuleGraphPackage,
+  normalizeModuleGraphToolchain,
 } from "./convex-wasm-module-graph-package.mjs";
+import {
+  convexWasmStaticHermesCBundleMemberCompilationPolicy,
+} from "./convex-wasm-static-hermes-c-bundle.mjs";
+
+test("authenticates the exact former module-graph compilation policy", () => {
+  const historicalPolicy = {
+    cOptimizationLevelZero: {
+      cOptimizationLevel: 0,
+      functionCount: 1,
+      optimizationFlag: "-O0",
+      role: "function",
+      stage: "c-optimization-level-zero-c-bundle-member-object",
+    },
+    kind: "convex-wasm-static-hermes-c-bundle-member-compilation-v3",
+    largeBundleFunction: {
+      appliesToFunctionFragments: false,
+      minimumTranslationUnitBytes: 64 * 1024 * 1024,
+      optimizationFlag: "-Oz",
+      role: "function",
+    },
+    normalOptimizationFlag: "-Oz",
+  };
+  const toolchain = {
+    aot: { fixture: "aot" },
+    core: { fixture: "core" },
+    staticHermesCBundleMemberCompilation: historicalPolicy,
+  };
+  assert.deepEqual(normalizeModuleGraphToolchain(toolchain), toolchain);
+  assert.deepEqual(
+    normalizeModuleGraphToolchain({
+      ...toolchain,
+      staticHermesCBundleMemberCompilation: {
+        ...historicalPolicy,
+        normalOptimizationFlag: "-O2",
+      },
+    }).staticHermesCBundleMemberCompilation.normalOptimizationFlag,
+    "-O2"
+  );
+  assert.deepEqual(
+    normalizeModuleGraphToolchain({
+      ...toolchain,
+      staticHermesCBundleMemberCompilation:
+        convexWasmStaticHermesCBundleMemberCompilationPolicy,
+    }).staticHermesCBundleMemberCompilation,
+    convexWasmStaticHermesCBundleMemberCompilationPolicy
+  );
+  assert.throws(
+    () =>
+      normalizeModuleGraphToolchain({
+        ...toolchain,
+        staticHermesCBundleMemberCompilation: {
+          ...historicalPolicy,
+          largeBundleFunction: {
+            ...historicalPolicy.largeBundleFunction,
+            minimumTranslationUnitBytes:
+              historicalPolicy.largeBundleFunction.minimumTranslationUnitBytes + 1,
+          },
+        },
+      }),
+    /unsupported member compilation policy/u
+  );
+});
 
 const fixturePath = new URL("../test-fixtures/convex-wasm-module-graph-registry/fixture.json", import.meta.url);
 

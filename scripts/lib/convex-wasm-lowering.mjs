@@ -1373,6 +1373,64 @@ CONVEX_WASM_IMPORT("convex_capability_start_take")
 int convex_capability_start_take(
     long long capability_identity,
     long long request_handle);
+CONVEX_WASM_IMPORT("convex_capability_start_scalar")
+int convex_capability_start_scalar(
+    long long capability_identity,
+    int operation_code);
+CONVEX_WASM_IMPORT("convex_capability_start_get")
+int convex_capability_start_get(
+    long long capability_identity,
+    const char *id,
+    int id_length,
+    const char *table,
+    int table_length,
+    int is_system);
+CONVEX_WASM_IMPORT("convex_capability_start_string")
+int convex_capability_start_string(
+    long long capability_identity,
+    int operation_code,
+    const char *value,
+    int value_length);
+CONVEX_WASM_IMPORT("convex_capability_start_write")
+int convex_capability_start_write(
+    long long capability_identity,
+    int kind,
+    const char *table,
+    int table_length,
+    const char *id,
+    int id_length,
+    const char *value,
+    int value_length);
+CONVEX_WASM_IMPORT("convex_capability_start_run_udf")
+int convex_capability_start_run_udf(
+    long long capability_identity,
+    int udf_type_code,
+    int address_kind,
+    const char *address,
+    int address_length,
+    const char *args,
+    int args_length,
+    const char *transaction_limits,
+    int transaction_limits_length);
+CONVEX_WASM_IMPORT("convex_capability_start_schedule")
+int convex_capability_start_schedule(
+    long long capability_identity,
+    int kind,
+    double time_milliseconds,
+    int address_kind,
+    const char *address,
+    int address_length,
+    const char *args,
+    int args_length);
+CONVEX_WASM_IMPORT("convex_capability_query_record")
+int convex_capability_query_record(
+    long long capability_identity,
+    const char *record,
+    int record_length);
+CONVEX_WASM_IMPORT("convex_typed_value_abi_v1")
+int convex_typed_value_abi_v1(void);
+CONVEX_WASM_IMPORT("convex_performance_now")
+double convex_performance_now(long long capability_identity);
 CONVEX_WASM_IMPORT("convex_capability_query_stream_open_take")
 int convex_capability_query_stream_open_take(
     long long capability_identity,
@@ -1475,6 +1533,8 @@ CONVEX_WASM_IMPORT("convex_guest_value_decode")
 long long convex_guest_value_decode(const char *value, int value_len);
 CONVEX_WASM_IMPORT("convex_guest_value_encode")
 long long convex_guest_value_encode(long long consuming_value_handle);
+CONVEX_WASM_IMPORT("convex_guest_value_encode_binary")
+long long convex_guest_value_encode_binary(long long consuming_value_handle);
 CONVEX_WASM_IMPORT("convex_guest_value_payload_len")
 int convex_guest_value_payload_len(long long payload_handle);
 CONVEX_WASM_IMPORT("convex_guest_value_payload_copy")
@@ -1486,6 +1546,8 @@ CONVEX_WASM_IMPORT("convex_guest_value_payload_release")
 void convex_guest_value_payload_release(long long payload_handle);
 CONVEX_WASM_IMPORT("convex_guest_value_result")
 void convex_guest_value_result(const char *value, int value_len);
+CONVEX_WASM_IMPORT("convex_guest_value_result_binary")
+void convex_guest_value_result_binary(const char *value, int value_len);
 CONVEX_WASM_IMPORT("convex_function_result")
 void convex_function_result(long long value_handle);
 CONVEX_WASM_IMPORT("convex_developer_error")
@@ -1824,6 +1886,15 @@ const __convexAsciizToString = $SHBuiltin.extern_c(
     length: c_ptrdiff_t,
   ): string { throw 0; },
 );
+const __convexNativeStringWriteUtf8 = $SHBuiltin.extern_c(
+  {declared: true, hv: true},
+  function _sh_string_write_utf8(
+    runtime: c_ptr,
+    value: string,
+    destination: c_ptr,
+    capacity: c_size_t,
+  ): c_ptrdiff_t { throw 0; },
+);
 ${hostSecretBinding}
 ${invocationTimeBinding}
 const __convexHostRequestField = $SHBuiltin.extern_c(
@@ -2019,42 +2090,15 @@ function __convexAllocateUtf8(value: any): c_ptr {
 }
 
 function __convexWriteUtf8(value: any, pointer: c_ptr): number {
-  let offset = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    let codePoint = value.charCodeAt(index) | 0;
-    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
-      let next = 0;
-      if (index + 1 < value.length) next = value.charCodeAt(index + 1) | 0;
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (next - 0xdc00);
-        index += 1;
-      } else {
-        codePoint = 0xfffd;
-      }
-    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
-      codePoint = 0xfffd;
-    }
-    if (codePoint <= 0x7f) {
-      __convexPtrWriteChar(pointer, offset, codePoint);
-      offset += 1;
-    } else if (codePoint <= 0x7ff) {
-      __convexPtrWriteChar(pointer, offset, 0xc0 | (codePoint >> 6));
-      __convexPtrWriteChar(pointer, offset + 1, 0x80 | (codePoint & 0x3f));
-      offset += 2;
-    } else if (codePoint <= 0xffff) {
-      __convexPtrWriteChar(pointer, offset, 0xe0 | (codePoint >> 12));
-      __convexPtrWriteChar(pointer, offset + 1, 0x80 | ((codePoint >> 6) & 0x3f));
-      __convexPtrWriteChar(pointer, offset + 2, 0x80 | (codePoint & 0x3f));
-      offset += 3;
-    } else {
-      __convexPtrWriteChar(pointer, offset, 0xf0 | (codePoint >> 18));
-      __convexPtrWriteChar(pointer, offset + 1, 0x80 | ((codePoint >> 12) & 0x3f));
-      __convexPtrWriteChar(pointer, offset + 2, 0x80 | ((codePoint >> 6) & 0x3f));
-      __convexPtrWriteChar(pointer, offset + 3, 0x80 | (codePoint & 0x3f));
-      offset += 4;
-    }
-  }
-  return offset;
+  const capacity = value.length * 3 + 1;
+  const length = __convexNativeStringWriteUtf8(
+    $SHBuiltin.c_native_runtime(),
+    value,
+    pointer,
+    capacity,
+  );
+  if (length < 0) throw new Error("Static Hermes UTF-8 destination is too small");
+  return length;
 }
 
 function __convexReadHostString(handle: number): string {
@@ -3648,6 +3692,41 @@ function renderNativeCapabilityGuestValuePrelude() {
     "function __convexReadHostString(handle: number): string {",
     "function __convexReportThrown(error: any): void {"
   );
+  const jsonHostValue = `function __convexGuestFromHost(consumingValueHandle: number): any {
+  return __convexGuestRestoreTagged(
+    JSON.parse(__convexGuestTaggedJsonFromHost(consumingValueHandle)),
+  );
+}`;
+  if (!prelude.includes(jsonHostValue)) {
+    throw new Error("Native capability host-value decoder is missing");
+  }
+  prelude = prelude.replace(
+    jsonHostValue,
+    `function __convexGuestFromHost(consumingValueHandle: number): any {
+  if (typeof __convexNativeTakeTypedValue !== "function") {
+    throw new Error("Native typed host-value decoder is unavailable");
+  }
+  return __convexNativeTakeTypedValue(consumingValueHandle, __convexCommitTsPlaceholder);
+}`
+  );
+  const jsonFunctionResult = `function __convexSetGuestFunctionResult(value: any): void {
+  const source = JSON.stringify(__convexGuestEncodeTagged(value, []));
+  const pointer = __convexGuestTransferScratch(source.length * 3 + 1);
+  const length = __convexWriteUtf8(source, pointer);
+  __convexHostGuestResult(pointer, length);
+}`;
+  if (!prelude.includes(jsonFunctionResult)) {
+    throw new Error("Native capability function-result encoder is missing");
+  }
+  prelude = prelude.replace(
+    jsonFunctionResult,
+    `function __convexSetGuestFunctionResult(value: any): void {
+  if (typeof __convexNativeSetTypedResult !== "function") {
+    throw new Error("Native typed function-result encoder is unavailable");
+  }
+  __convexNativeSetTypedResult(value, __convexCommitTsPlaceholder);
+}`
+  );
   return `${ARRAY_PUSH_HELPER}\n\n${prelude}`;
 }
 
@@ -3694,6 +3773,17 @@ const __convexHostCapabilityStartTake = $SHBuiltin.extern_c(
     capabilityIdentity: c_longlong,
     requestHandle: c_longlong,
   ): c_int { throw 0; },
+);
+const __convexHostCapabilityStartScalar = $SHBuiltin.extern_c(
+  {include: "convex_wasm_opaque_abi_v3.h"},
+  function convex_capability_start_scalar(
+    capabilityIdentity: c_longlong,
+    operationCode: c_int,
+  ): c_int { throw 0; },
+);
+const __convexHostPerformanceNow = $SHBuiltin.extern_c(
+  {include: "convex_wasm_opaque_abi_v3.h"},
+  function convex_performance_now(capabilityIdentity: c_longlong): c_double { throw 0; },
 );
 const __convexHostCapabilityQueryStreamOpenTake = $SHBuiltin.extern_c(
   {include: "convex_wasm_opaque_abi_v3.h"},
@@ -3829,6 +3919,13 @@ function __convexSdkAsyncSyscallObjectArgs(operation: any, argumentsObject: any)
   });
 }
 
+function __convexSdkAsyncSyscallValueArgs(operation: any, argumentsObject: any): any {
+  return __convexSdkAsyncSyscall(operation, {
+    brand: __convexSdkObjectArgumentsBrand,
+    value: argumentsObject,
+  }, true);
+}
+
 function __convexSdkSyscallObjectArgs(operation: any, argumentsObject: any): any {
   return __convexSdkSyscall(operation, {
     brand: __convexSdkObjectArgumentsBrand,
@@ -3872,6 +3969,10 @@ function __convexSdkRestorePatch(value: any): any {
 }
 
 function __convexSdkRestoreOptionalQueryValue(value: any, description: string): any {
+  if (
+    __convexSdkFacade.typedQueryArgs === true &&
+    value instanceof __convexTargetGlobal.ArrayBuffer
+  ) return value;
   if (value !== null && typeof value === "object" && !__convexGuestIsArray(value)) {
     const keys = __convexCapabilityOwnDataKeys(value, description);
     if (keys.length === 1 && keys[0] === "$undefined") {
@@ -4201,12 +4302,17 @@ function __convexSdkReleaseQueryStream(state: any, closeHost: boolean): void {
   state.cleanupSlot = -1;
 }
 
-function __convexSdkOpenQueryStream(request: any): number {
+function __convexSdkOpenQueryStream(query: any): number {
+  const streamHandle = __convexSdkFacade.typedQueryArgs === true
+    ? __convexNativeStartTypedQuery(query, "stream", null)
+    : __convexCapabilityOpenQueryStream(__convexSdkQueryRequest(query, "stream", null));
+  if (streamHandle === -1) throw new Error("Invocation capability is stale");
+  if (streamHandle <= 0) throw new Error("Capability returned an invalid query stream handle");
   const state: any = {
     cleanupSlot: -1,
     done: false,
     pending: false,
-    streamHandle: __convexCapabilityOpenQueryStream(request),
+    streamHandle,
   };
   state.cleanupSlot = __convexRegisterOpenQueryStream(() => {
     state.done = true;
@@ -4217,16 +4323,37 @@ function __convexSdkOpenQueryStream(request: any): number {
   return __convexSdkQueryStreams.length;
 }
 
-function __convexSdkQueryStreamNext(queryId: any): any {
+function __convexSdkQueryStreamNext(queryId: any, valueArgs: boolean): any {
   const state = __convexSdkRequireQueryStream(queryId);
   if (state.done) throw new Error("Convex SDK query stream is closed");
   if (state.pending) throw new Error("Convex SDK query stream already has a pending read");
   state.pending = true;
-  return __convexStartCapabilityQueryStreamNext(state.streamHandle, "taggedJson").then(
+  return __convexStartCapabilityQueryStreamNext(
+    state.streamHandle,
+    valueArgs ? "hostValue" : "taggedJson",
+  ).then(
     (result) => {
       state.pending = false;
       let completed = false;
       try {
+        if (valueArgs) {
+          if (
+            result === null ||
+            typeof result !== "object" ||
+            typeof result.done !== "boolean" ||
+            !Object.prototype.hasOwnProperty.call(result, "value")
+          ) {
+            throw new Error("Convex SDK query stream result is invalid");
+          }
+          if (result.done) {
+            if (result.value !== null) {
+              throw new Error("Convex SDK query stream completion returned a value");
+            }
+            completed = true;
+            __convexSdkReleaseQueryStream(state, false);
+          }
+          return result;
+        }
         // The host creates and validates the canonical envelope. Inspect its
         // fixed prefix here so the SDK alone parses the returned document.
         if (result === '{"done":true,"value":null}') {
@@ -4266,7 +4393,7 @@ function __convexSdkCountQuery(request: any): any {
   return readNext(0);
 }
 
-function __convexSdkScheduleRequest(args: any): any {
+function __convexSdkScheduleRequest(args: any, valueArgs: boolean): any {
   const keys = __convexCapabilityOwnDataKeys(args, "Convex SDK schedule arguments");
   let functionAddress: any;
   if (keys.indexOf("functionHandle") !== -1) {
@@ -4302,7 +4429,7 @@ function __convexSdkScheduleRequest(args: any): any {
     timestampSeconds * 1000,
     "Convex SDK schedule timestamp",
   );
-  const functionArgs = __convexCapabilityTaggedValue(args.args);
+  const functionArgs = valueArgs ? args.args : __convexCapabilityTaggedValue(args.args);
   return {
     version: ${CAPABILITY_REQUEST_ABI_VERSION},
     kind: "schedulerRunAt",
@@ -4349,6 +4476,16 @@ function __convexSdkStartAsync(request: any, resultKind: string): any {
   );
 }
 
+function __convexSdkStartGet(id: string, table: ?string, isSystem: boolean, resultKind: string): any {
+  if (typeof __convexNativeStartTypedGet !== "function") {
+    throw new Error("Native typed get adapter is unavailable");
+  }
+  return __convexCapabilityOperationPromise(
+    __convexNativeStartTypedGet(id, table, isSystem),
+    resultKind,
+  );
+}
+
 function __convexSdkRunSync(request: any): any {
   const capabilityIdentity = __convexHostCapabilityCurrent();
   if (capabilityIdentity <= 0) throw new Error("Invocation capability is unavailable");
@@ -4384,11 +4521,16 @@ function __convexSdkEncodeFunctionHandle(handle: any): string {
   return JSON.stringify(handle);
 }
 
-function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
+function __convexSdkAsyncSyscall(
+  operation: any,
+  jsonArguments: any,
+  valueArgs: boolean = false,
+): any {
   const udfKind = __convexSdkRequireActive();
   if (typeof operation !== "string") {
     throw new Error("Convex SDK async syscall operation must be a string");
   }
+  const valueResultKind = valueArgs ? "hostValue" : "taggedJson";
   if (operation === "1.0/getUserIdentity") {
     const args = __convexSdkParseArguments(jsonArguments);
     __convexCapabilityRequireExactKeys(
@@ -4399,10 +4541,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
     if (args.requestId !== "") {
       throw new Error("Convex SDK getUserIdentity arguments are invalid");
     }
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "authGetUserIdentity"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(1, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "authGetUserIdentity"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/getFunctionMetadata") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4411,10 +4555,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       [],
       "Convex SDK getFunctionMetadata arguments",
     );
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getFunctionMetadata"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(2, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getFunctionMetadata"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/getDeploymentMetadata") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4423,10 +4569,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       [],
       "Convex SDK getDeploymentMetadata arguments",
     );
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getDeploymentMetadata"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(3, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getDeploymentMetadata"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/getTransactionMetrics") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4435,10 +4583,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       [],
       "Convex SDK getTransactionMetrics arguments",
     );
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getTransactionMetrics"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(4, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getTransactionMetrics"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/getRequestMetadata") {
     if (udfKind !== "mutation") {
@@ -4450,10 +4600,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       [],
       "Convex SDK getRequestMetadata arguments",
     );
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getRequestMetadata"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(5, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "getRequestMetadata"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/createFunctionHandle") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4463,14 +4615,26 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       "Convex SDK createFunctionHandle arguments",
     );
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK createFunctionHandle");
-    return __convexSdkStartAsync(
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "functionHandleCreate",
-        functionAddress,
-      },
-      "hostValue",
-    ).then(__convexSdkEncodeFunctionHandle);
+    const handlePromise = valueArgs
+      ? __convexCapabilityStartTypedString(
+          functionAddress.name !== undefined ? 5 :
+          functionAddress.reference !== undefined ? 6 : 7,
+          functionAddress.name !== undefined ? functionAddress.name :
+          functionAddress.reference !== undefined ? functionAddress.reference :
+          functionAddress.functionHandle,
+          "hostValue",
+          __convexNativeStartTypedString,
+        )
+      : __convexSdkStartAsync(
+          {
+            version: ${CAPABILITY_REQUEST_ABI_VERSION},
+            kind: "functionHandleCreate",
+            functionAddress,
+          },
+          "hostValue",
+        );
+    return handlePromise.then((handle: any): any =>
+      valueArgs ? handle : __convexSdkEncodeFunctionHandle(handle));
   }
   if (operation === "1.0/runUdf") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4500,21 +4664,30 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
     for (let index = 0; index < functionArgumentKeys.length; index += 1) {
       __convexGuestValidateObjectField(functionArgumentKeys[index]);
     }
-    const functionArgs = __convexCapabilityTaggedValue(args.args);
+    const functionArgs = valueArgs ? args.args : __convexCapabilityTaggedValue(args.args);
     const transactionLimits = Object.prototype.hasOwnProperty.call(args, "transactionLimits")
       ? __convexCapabilityEncodeTransactionLimits(args.transactionLimits)
       : null;
-    return __convexSdkStartAsync(
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "runUdf",
-        udfType: args.udfType,
-        functionAddress,
-        args: functionArgs,
-        transactionLimits,
-      },
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartTypedRunUdf(
+          args.udfType,
+          functionAddress,
+          functionArgs,
+          transactionLimits,
+          valueResultKind,
+          __convexNativeStartTypedRunUdf,
+        )
+      : __convexSdkStartAsync(
+          {
+            version: ${CAPABILITY_REQUEST_ABI_VERSION},
+            kind: "runUdf",
+            udfType: args.udfType,
+            functionAddress,
+            args: functionArgs,
+            transactionLimits,
+          },
+          valueResultKind,
+        );
   }
   if (operation === "1.0/auditLog") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4541,7 +4714,7 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       typeof args.table === "string" && args.table.charAt(0) === "_",
       "query",
     );
-    return __convexSdkCountQuery({
+    const count = __convexSdkCountQuery({
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
       kind: "dbQuery",
       table,
@@ -4549,7 +4722,8 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       operators: [],
       order: null,
       terminal: "stream",
-    }).then(__convexSdkEncodeResult);
+    });
+    return valueArgs ? count : count.then(__convexSdkEncodeResult);
   }
   if (operation === "1.0/queryCollect") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4559,19 +4733,19 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       "Convex SDK collect query arguments",
     );
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK collect query");
-    return __convexSdkStartAsync(
-      __convexSdkQueryRequest(args.query, "collect", null),
-      "taggedJson",
-    );
+    return valueArgs && __convexSdkFacade.typedQueryArgs === true
+      ? __convexCapabilityOperationPromise(
+          __convexNativeStartTypedQuery(args.query, "collect", null), valueResultKind)
+      : __convexSdkStartAsync(__convexSdkQueryRequest(args.query, "collect", null), valueResultKind);
   }
   if (operation === "1.0/queryPage") {
     const args = __convexSdkParseArguments(jsonArguments);
     const pagination = __convexSdkQueryPagePagination(args);
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK queryPage");
-    return __convexSdkStartAsync(
-      __convexSdkQueryRequest(args.query, "paginate", pagination),
-      "taggedJson",
-    );
+    return valueArgs && __convexSdkFacade.typedQueryArgs === true
+      ? __convexCapabilityOperationPromise(
+          __convexNativeStartTypedQuery(args.query, "paginate", pagination), valueResultKind)
+      : __convexSdkStartAsync(__convexSdkQueryRequest(args.query, "paginate", pagination), valueResultKind);
   }
   if (operation === "1.0/queryStreamNext") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4580,7 +4754,7 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       ["queryId"],
       "Convex SDK queryStreamNext arguments",
     );
-    return __convexSdkQueryStreamNext(args.queryId);
+    return __convexSdkQueryStreamNext(args.queryId, valueArgs);
   }
   if (operation === "1.0/get") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4594,12 +4768,13 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       throw new Error("Convex SDK get isSystem field is invalid");
     }
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK get");
-    const id = __convexGuestRestoreTagged(args.id);
+    const id = valueArgs ? args.id : __convexGuestRestoreTagged(args.id);
     if (typeof id !== "string") {
       throw new Error("Convex SDK get document ID is invalid");
     }
     if (hasTable) {
       const table = __convexCapabilityRequireTable(args.table, args.isSystem, "get");
+      if (valueArgs) return __convexSdkStartGet(id, table, args.isSystem, valueResultKind);
       return __convexSdkStartAsync(
         {
           version: ${CAPABILITY_REQUEST_ABI_VERSION},
@@ -4607,16 +4782,17 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
           id,
           table,
         },
-        "taggedJson",
+        valueResultKind,
       );
     }
+    if (valueArgs) return __convexSdkStartGet(id, null, args.isSystem, valueResultKind);
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: args.isSystem ? "dbSystemGet" : "dbGet",
         id,
       },
-      "taggedJson",
+      valueResultKind,
     );
   }
   if (operation === "1.0/insert") {
@@ -4626,6 +4802,10 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
     const args = __convexSdkParseArguments(jsonArguments);
     __convexCapabilityRequireExactKeys(args, ["table", "value"], "Convex SDK insert arguments");
     const table = __convexCapabilityRequireTable(args.table, false, "insert");
+    if (valueArgs) {
+      return __convexCapabilityStartTypedWrite(1, table, null, args.value, "hostValue", __convexNativeStartTypedWrite)
+        .then((id: any): any => ({_id: id}));
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
@@ -4634,76 +4814,126 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
         value: __convexCapabilityTaggedValue(args.value),
       },
       "hostValue",
-    ).then(__convexSdkEncodeInsertedId);
+    ).then((id: any): any => __convexSdkEncodeInsertedId(id));
   }
   if (operation === "1.0/shallowMerge") {
     if (udfKind !== "mutation") {
       throw new Error("Convex SDK shallowMerge is unavailable in queries");
     }
     const args = __convexSdkParseArguments(jsonArguments);
+    const hasTable = Object.prototype.hasOwnProperty.call(args, "table");
     __convexCapabilityRequireExactKeys(
       args,
-      ["id", "table", "value"],
+      hasTable ? ["id", "table", "value"] : ["id", "value"],
       "Convex SDK shallowMerge arguments",
     );
-    const table = __convexCapabilityRequireTable(args.table, false, "patch");
+    const table = hasTable ? __convexCapabilityRequireTable(args.table, false, "patch") : null;
+    if (valueArgs) {
+      return __convexCapabilityStartTypedWrite(2, table, args.id, args.value, "undefined", __convexNativeStartTypedWrite);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: "dbPatch",
-        table,
+        ...(table === null ? {} : {table}),
         id: __convexGuestRestoreTagged(args.id),
         patch: __convexSdkRestorePatch(args.value),
       },
       "undefined",
-    ).then((): string => "null");
+    ).then((): any => "null");
   }
   if (operation === "1.0/replace") {
     if (udfKind !== "mutation") {
       throw new Error("Convex SDK replace is unavailable in queries");
     }
     const args = __convexSdkParseArguments(jsonArguments);
+    const hasTable = Object.prototype.hasOwnProperty.call(args, "table");
     __convexCapabilityRequireExactKeys(
       args,
-      ["id", "table", "value"],
+      hasTable ? ["id", "table", "value"] : ["id", "value"],
       "Convex SDK replace arguments",
     );
-    const table = __convexCapabilityRequireTable(args.table, false, "replace");
+    const table = hasTable ? __convexCapabilityRequireTable(args.table, false, "replace") : null;
+    if (valueArgs) {
+      return __convexCapabilityStartTypedWrite(3, table, args.id, args.value, "undefined", __convexNativeStartTypedWrite);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: "dbReplace",
-        table,
+        ...(table === null ? {} : {table}),
         id: __convexGuestRestoreTagged(args.id),
         value: __convexCapabilityTaggedValue(args.value),
       },
       "undefined",
-    ).then((): string => "null");
+    ).then((): any => "null");
   }
   if (operation === "1.0/remove") {
     if (udfKind !== "mutation") {
       throw new Error("Convex SDK remove is unavailable in queries");
     }
     const args = __convexSdkParseArguments(jsonArguments);
-    __convexCapabilityRequireExactKeys(args, ["id", "table"], "Convex SDK remove arguments");
-    const table = __convexCapabilityRequireTable(args.table, false, "delete");
+    const hasTable = Object.prototype.hasOwnProperty.call(args, "table");
+    __convexCapabilityRequireExactKeys(
+      args, hasTable ? ["id", "table"] : ["id"], "Convex SDK remove arguments",
+    );
+    const table = hasTable ? __convexCapabilityRequireTable(args.table, false, "delete") : null;
+    if (valueArgs) {
+      return __convexCapabilityStartTypedWrite(4, table, args.id, null, "undefined", __convexNativeStartTypedWrite);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: "dbDelete",
-        table,
+        ...(table === null ? {} : {table}),
         id: __convexGuestRestoreTagged(args.id),
       },
       "undefined",
-    ).then((): string => "null");
+    ).then((): any => "null");
   }
   if (operation === "1.0/schedule") {
     if (udfKind !== "mutation") {
       throw new Error("Convex SDK schedule is unavailable in queries");
     }
     const args = __convexSdkParseArguments(jsonArguments);
-    return __convexSdkStartAsync(__convexSdkScheduleRequest(args), "hostValue").then(
-      __convexSdkEncodeScheduledId,
+    if (valueArgs) {
+      const keys = __convexCapabilityOwnDataKeys(args, "Convex SDK schedule arguments");
+      let functionAddress: any;
+      if (keys.indexOf("functionHandle") !== -1) {
+        __convexCapabilityRequireExactKeys(
+          args, ["args", "functionHandle", "ts", "version"],
+          "Convex SDK schedule arguments", keys,
+        );
+        functionAddress = {functionHandle: args.functionHandle};
+      } else if (keys.indexOf("name") !== -1) {
+        __convexCapabilityRequireExactKeys(
+          args, ["args", "name", "ts", "version"],
+          "Convex SDK schedule arguments", keys,
+        );
+        functionAddress = {name: args.name};
+      } else if (keys.indexOf("reference") !== -1) {
+        __convexCapabilityRequireExactKeys(
+          args, ["args", "reference", "ts", "version"],
+          "Convex SDK schedule arguments", keys,
+        );
+        functionAddress = {reference: args.reference};
+      } else {
+        throw new Error("Convex SDK schedule arguments have invalid fields");
+      }
+      __convexSdkRequireInstalledVersion(args.version, "Convex SDK schedule");
+      const timestampSeconds = __convexCapabilityRequireFiniteNumber(
+        args.ts, "Convex SDK schedule timestamp",
+      );
+      const timestampMilliseconds = __convexCapabilityRequireFiniteNumber(
+        timestampSeconds * 1000, "Convex SDK schedule timestamp",
+      );
+      return __convexCapabilityStartTypedSchedule(
+        2, timestampMilliseconds, functionAddress, args.args,
+        __convexNativeStartTypedSchedule,
+      );
+    }
+    return __convexSdkStartAsync(__convexSdkScheduleRequest(args, valueArgs), "hostValue").then(
+      (id: any): any => valueArgs ? id : __convexSdkEncodeScheduledId(id),
     );
   }
   if (operation === "1.0/cancel_job") {
@@ -4712,14 +4942,17 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
     }
     const args = __convexSdkParseArguments(jsonArguments);
     __convexCapabilityRequireExactKeys(args, ["id"], "Convex SDK cancel_job arguments");
-    const id = __convexGuestRestoreTagged(args.id);
+    const id = valueArgs ? args.id : __convexGuestRestoreTagged(args.id);
     if (typeof id !== "string") {
       throw new Error("Convex SDK cancel_job scheduled function ID is invalid");
+    }
+    if (valueArgs) {
+      return __convexCapabilityStartTypedString(4, id, "undefined", __convexNativeStartTypedString);
     }
     return __convexSdkStartAsync(
       {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "schedulerCancel", id},
       "undefined",
-    ).then((): string => "null");
+    ).then((): any => valueArgs ? undefined : "null");
   }
   if (operation === "1.0/storageDelete") {
     if (udfKind !== "mutation") {
@@ -4735,6 +4968,9 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       throw new Error("Convex SDK storageDelete arguments are invalid");
     }
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK storageDelete");
+    if (valueArgs) {
+      return __convexCapabilityStartTypedString(3, args.storageId, "undefined", __convexNativeStartTypedString);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
@@ -4742,7 +4978,7 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
         storageId: args.storageId,
       },
       "undefined",
-    ).then((): string => "null");
+    ).then((): any => valueArgs ? undefined : "null");
   }
   if (operation === "1.0/storageGenerateUploadUrl") {
     if (udfKind !== "mutation") {
@@ -4758,10 +4994,12 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       throw new Error("Convex SDK storageGenerateUploadUrl arguments are invalid");
     }
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK storageGenerateUploadUrl");
-    return __convexSdkStartAsync(
-      {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageGenerateUploadUrl"},
-      "taggedJson",
-    );
+    return valueArgs
+      ? __convexCapabilityStartAsyncScalar(6, valueResultKind)
+      : __convexSdkStartAsync(
+          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageGenerateUploadUrl"},
+          valueResultKind,
+        );
   }
   if (operation === "1.0/storageGetMetadata") {
     const args = __convexSdkParseArguments(jsonArguments);
@@ -4774,13 +5012,16 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
       throw new Error("Convex SDK storageGetMetadata arguments are invalid");
     }
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK storageGetMetadata");
+    if (valueArgs) {
+      return __convexCapabilityStartTypedString(2, args.storageId, valueResultKind, __convexNativeStartTypedString);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: "storageGetMetadata",
         storageId: args.storageId,
       },
-      "taggedJson",
+      valueResultKind,
     );
   }
   if (operation === "1.0/storageGetUrl") {
@@ -4798,13 +5039,16 @@ function __convexSdkAsyncSyscall(operation: any, jsonArguments: any): any {
     ) {
       throw new Error("Convex SDK storageGetUrl arguments are invalid");
     }
+    if (valueArgs) {
+      return __convexCapabilityStartTypedString(1, args.storageId, valueResultKind, __convexNativeStartTypedString);
+    }
     return __convexSdkStartAsync(
       {
         version: ${CAPABILITY_REQUEST_ABI_VERSION},
         kind: "storageGetUrl",
         storageId: args.storageId,
       },
-      "taggedJson",
+      valueResultKind,
     );
   }
   throw new Error("Convex SDK async syscall operation is unsupported");
@@ -4823,9 +5067,7 @@ function __convexSdkSyscall(operation: any, jsonArguments: any): string {
       "Convex SDK queryStream arguments",
     );
     __convexSdkRequireInstalledVersion(args.version, "Convex SDK queryStream");
-    const queryId = __convexSdkOpenQueryStream(
-      __convexSdkQueryRequest(args.query, "stream", null),
-    );
+    const queryId = __convexSdkOpenQueryStream(args.query);
     return JSON.stringify({queryId});
   }
   if (operation === "1.0/queryCleanup") {
@@ -4879,15 +5121,27 @@ function __convexSdkJsSyscall(operation: any, _arguments: any): any {
   throw new Error("Convex SDK JS syscall operation is unsupported");
 }
 
+function __convexSdkCaptureQueryValue(value: any): any {
+  if (typeof __convexNativeCaptureQueryValue !== "function") {
+    throw new Error("Native query value capture is unavailable");
+  }
+  return __convexNativeCaptureQueryValue(value, __convexCommitTsPlaceholder);
+}
+
 Object.freeze(__convexSdkAsyncSyscall);
 Object.freeze(__convexSdkAsyncSyscallObjectArgs);
+Object.freeze(__convexSdkAsyncSyscallValueArgs);
 Object.freeze(__convexSdkSyscall);
 Object.freeze(__convexSdkSyscallObjectArgs);
 Object.freeze(__convexSdkJsSyscall);
+Object.freeze(__convexSdkCaptureQueryValue);
 const __convexSdkFacade: any = Object.freeze({
   asyncSyscall: __convexSdkAsyncSyscall,
   asyncSyscallObjectArgs: __convexSdkAsyncSyscallObjectArgs,
+  asyncSyscallValueArgs: __convexSdkAsyncSyscallValueArgs,
+  captureQueryValue: __convexSdkCaptureQueryValue,
   queryCollect: true,
+  typedQueryArgs: true,
   jsSyscall: __convexSdkJsSyscall,
   syscall: __convexSdkSyscall,
   syscallObjectArgs: __convexSdkSyscallObjectArgs,
@@ -5481,27 +5735,14 @@ Object.defineProperty(__convexTargetGlobal, "process", {
 function renderNativePerformanceAdapter() {
   return String.raw`
 function __convexPerformanceNow(): number {
-  let requestHandle = __convexCapabilityRequestToHost({
-    version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    kind: "performanceNow",
-  });
-  try {
-    const capabilityIdentity = __convexHostCapabilityCurrent();
-    if (capabilityIdentity <= 0) throw new Error("Invocation capability is unavailable");
-    const resultHandle = __convexHostCapabilitySyncTake(capabilityIdentity, requestHandle);
-    if (resultHandle === -2) throw new Error("Invocation capability is stale");
-    requestHandle = 0;
-    if (resultHandle <= 0) {
-      throw new Error("Performance capability returned an invalid result");
-    }
-    const value = __convexGuestFromHost(resultHandle);
-    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-      throw new Error("Performance capability returned an invalid value");
-    }
-    return value;
-  } finally {
-    if (requestHandle > 0) __convexCapabilityRequestRelease(requestHandle);
+  const capabilityIdentity = __convexHostCapabilityCurrent();
+  if (capabilityIdentity <= 0) throw new Error("Invocation capability is unavailable");
+  const value = __convexHostPerformanceNow(capabilityIdentity);
+  if (value === -1) throw new Error("Invocation capability is stale");
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Performance capability returned an invalid value");
   }
+  return value;
 }
 
 Object.freeze(__convexPerformanceNow);
@@ -6072,12 +6313,18 @@ function __convexCapabilityEncodeRequest(request: any): any {
     };
   }
   if (kind === "dbDelete") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "version"], "Capability request", requestKeys);
-    if (typeof request.table !== "string") throw new Error("Database table must be a string");
+    const hasTable = requestKeys.indexOf("table") !== -1;
+    __convexCapabilityRequireExactKeys(
+      request, hasTable ? ["id", "kind", "table", "version"] : ["id", "kind", "version"],
+      "Capability request", requestKeys,
+    );
+    if (hasTable && typeof request.table !== "string") {
+      throw new Error("Database table must be a string");
+    }
     return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
-      table: request.table,
+      ...(hasTable ? {table: request.table} : {}),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
     };
   }
@@ -6114,23 +6361,37 @@ function __convexCapabilityEncodeRequest(request: any): any {
     };
   }
   if (kind === "dbPatch") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "patch", "table", "version"], "Capability request", requestKeys);
-    if (typeof request.table !== "string") throw new Error("Database table must be a string");
+    const hasTable = requestKeys.indexOf("table") !== -1;
+    __convexCapabilityRequireExactKeys(
+      request,
+      hasTable ? ["id", "kind", "patch", "table", "version"] : ["id", "kind", "patch", "version"],
+      "Capability request", requestKeys,
+    );
+    if (hasTable && typeof request.table !== "string") {
+      throw new Error("Database table must be a string");
+    }
     return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
       patch: __convexCapabilityEncodePatch(request.patch),
-      table: request.table,
+      ...(hasTable ? {table: request.table} : {}),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
     };
   }
   if (kind === "dbReplace") {
-    __convexCapabilityRequireExactKeys(request, ["id", "kind", "table", "value", "version"], "Capability request", requestKeys);
-    if (typeof request.table !== "string") throw new Error("Database table must be a string");
+    const hasTable = requestKeys.indexOf("table") !== -1;
+    __convexCapabilityRequireExactKeys(
+      request,
+      hasTable ? ["id", "kind", "table", "value", "version"] : ["id", "kind", "value", "version"],
+      "Capability request", requestKeys,
+    );
+    if (hasTable && typeof request.table !== "string") {
+      throw new Error("Database table must be a string");
+    }
     return {
       id: __convexCapabilityEncodeCommittedValue(request.id),
       kind,
-      table: request.table,
+      ...(hasTable ? {table: request.table} : {}),
       value: __convexCapabilityEncodeTaggedOrGuest(request.value),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
     };
@@ -6281,6 +6542,15 @@ function renderNativeCapabilityPromiseRuntime() {
 const __convexDynamicGlobal: any = __convexTargetGlobal;
 const __convexDynamicArrayIsArray: any = __convexDynamicGlobal.Array.isArray;
 const __convexDynamicPromise: any = __convexDynamicGlobal.Promise;
+let __convexNativeTakeTypedValue: any = undefined;
+let __convexNativeSetTypedResult: any = undefined;
+let __convexNativeStartTypedGet: any = undefined;
+let __convexNativeStartTypedString: any = undefined;
+let __convexNativeStartTypedWrite: any = undefined;
+let __convexNativeStartTypedRunUdf: any = undefined;
+let __convexNativeStartTypedSchedule: any = undefined;
+let __convexNativeStartTypedQuery: any = undefined;
+let __convexNativeCaptureQueryValue: any = undefined;
 let __convexPendingOperationKinds: Array<?string> = [];
 let __convexPendingOperationResolves: Array<any> = [];
 let __convexPendingOperationRejects: Array<any> = [];
@@ -6321,6 +6591,18 @@ function __convexRegisterCapabilityOperation(
   __convexPendingOperationRejects[slot] = reject;
 }
 
+function __convexCapabilityOperationPromise(operationHandle: number, resultKind: string): any {
+  if (operationHandle === -1) {
+    return __convexDynamicPromise.reject(new Error("Invocation capability is stale"));
+  }
+  if (operationHandle <= 0) {
+    throw new Error("Capability returned an invalid operation handle");
+  }
+  return new __convexDynamicPromise((resolve, reject) => {
+    __convexRegisterCapabilityOperation(operationHandle, resultKind, resolve, reject);
+  });
+}
+
 function __convexCapabilityStartAsync(
   start: any,
   request: any,
@@ -6330,19 +6612,121 @@ function __convexCapabilityStartAsync(
   let requestHandle = __convexCapabilityRequestToHost(request);
   try {
     const operationHandle = start(requestHandle);
-    if (operationHandle === -1) {
-      return __convexDynamicPromise.reject(new Error("Invocation capability is stale"));
-    }
-    if (operationHandle <= 0) {
-      throw new Error("Capability returned an invalid operation handle");
-    }
-    requestHandle = 0;
-    return new __convexDynamicPromise((resolve, reject) => {
-      __convexRegisterCapabilityOperation(operationHandle, resultKind, resolve, reject);
-    });
+    if (operationHandle > 0) requestHandle = 0;
+    return __convexCapabilityOperationPromise(operationHandle, resultKind);
   } finally {
     if (requestHandle > 0) __convexCapabilityRequestRelease(requestHandle);
   }
+}
+
+function __convexCapabilityStartAsyncScalar(operationCode: number, resultKind: string): any {
+  const capabilityIdentity = __convexHostCapabilityCurrent();
+  if (capabilityIdentity <= 0) throw new Error("Invocation capability is unavailable");
+  return __convexCapabilityOperationPromise(
+    __convexHostCapabilityStartScalar(capabilityIdentity, operationCode),
+    resultKind,
+  );
+}
+
+function __convexCapabilityStartTypedWrite(
+  kind: number,
+  table: ?string,
+  id: ?string,
+  value: any,
+  resultKind: string,
+  nativeStart: any,
+): any {
+  if (typeof nativeStart !== "function") {
+    throw new Error("Native typed write adapter is unavailable");
+  }
+  return __convexCapabilityOperationPromise(
+    nativeStart(kind, table, id, value, __convexCommitTsPlaceholder),
+    resultKind,
+  );
+}
+
+function __convexCapabilityStartTypedRunUdf(
+  udfType: string,
+  functionAddress: any,
+  args: any,
+  transactionLimits: any,
+  resultKind: string,
+  nativeStart: any,
+): any {
+  if (typeof nativeStart !== "function") {
+    throw new Error("Native typed nested UDF adapter is unavailable");
+  }
+  const typeCode = udfType === "query" ? 1 :
+    udfType === "mutation" ? 2 :
+    udfType === "snapshotQuery" ? 3 : 0;
+  if (typeCode === 0) throw new Error("Nested UDF type is unsupported");
+  const address = __convexCapabilityEncodeFunctionAddress(functionAddress);
+  const addressKind = address.name !== undefined ? 1 :
+    address.reference !== undefined ? 2 : 3;
+  const addressValue = address.name !== undefined ? address.name :
+    address.reference !== undefined ? address.reference : address.functionHandle;
+  return __convexCapabilityOperationPromise(
+    nativeStart(
+      typeCode,
+      addressKind,
+      addressValue,
+      args,
+      transactionLimits,
+      __convexCommitTsPlaceholder,
+    ),
+    resultKind,
+  );
+}
+
+function __convexCapabilityStartTypedSchedule(
+  kind: number,
+  timeMilliseconds: number,
+  functionAddress: any,
+  args: any,
+  nativeStart: any,
+): any {
+  if (typeof nativeStart !== "function") {
+    throw new Error("Native typed scheduling adapter is unavailable");
+  }
+  const address = __convexCapabilityEncodeFunctionAddress(functionAddress);
+  const addressKind = address.name !== undefined ? 1 :
+    address.reference !== undefined ? 2 : 3;
+  const addressValue = address.name !== undefined ? address.name :
+    address.reference !== undefined ? address.reference : address.functionHandle;
+  return __convexCapabilityOperationPromise(
+    nativeStart(
+      kind, timeMilliseconds, addressKind, addressValue,
+      args, __convexCommitTsPlaceholder,
+    ),
+    "hostValue",
+  );
+}
+
+function __convexCapabilityStartTypedString(
+  operationCode: number,
+  value: any,
+  resultKind: string,
+  nativeStart: any,
+): any {
+  if (operationCode >= 1 && operationCode <= 3 && typeof value !== "string") {
+    throw new Error("Storage ID must be a string");
+  }
+  if (operationCode === 4 && value === __convexCommitTsPlaceholder) {
+    throw new Error("Pending commit timestamp is not allowed in this capability request position");
+  }
+  if (operationCode === 4 && typeof value !== "string") {
+    throw new Error("Scheduled function ID must be a string");
+  }
+  if (operationCode >= 5 && operationCode <= 7 && typeof value !== "string") {
+    throw new Error("Function address must be a string");
+  }
+  if (typeof nativeStart !== "function") {
+    throw new Error("Native typed string adapter is unavailable");
+  }
+  return __convexCapabilityOperationPromise(
+    nativeStart(operationCode, value),
+    resultKind,
+  );
 }
 
 function __convexCapabilityRunSync(sync: any, request: any): any {
@@ -6837,30 +7221,28 @@ function __convexCapabilityQueryInitializer(start: any, table: string): any {
   };
 }
 
-function __convexCapabilityReader(start: any, sync: any, isSystem: boolean): any {
+function __convexCapabilityReader(
+  start: any,
+  sync: any,
+  isSystem: boolean,
+  startTypedGet: any,
+  startTypedWrite: any,
+): any {
   return {
     get(arg0, arg1) {
       const hasTable = arg1 !== undefined;
-      if (hasTable) {
-        const table = __convexCapabilityRequireTable(arg0, isSystem, "get");
-        return __convexCapabilityStartAsync(
-          start,
-          {
-            version: ${CAPABILITY_REQUEST_ABI_VERSION},
-            kind: isSystem ? "dbSystemGet" : "dbGet",
-            id: arg1,
-            table,
-          },
-          "hostValue",
-        );
+      const table = hasTable
+        ? __convexCapabilityRequireTable(arg0, isSystem, "get")
+        : null;
+      const id = hasTable ? arg1 : arg0;
+      if (id === __convexCommitTsPlaceholder) {
+        throw new Error("Pending commit timestamp is not allowed in this capability request position");
       }
-      return __convexCapabilityStartAsync(
-        start,
-        {
-          version: ${CAPABILITY_REQUEST_ABI_VERSION},
-          kind: isSystem ? "dbSystemGet" : "dbGet",
-          id: arg0,
-        },
+      if (typeof id !== "string") {
+        throw new Error("Database ID must be a string");
+      }
+      return __convexCapabilityOperationPromise(
+        startTypedGet(id, table, isSystem),
         "hostValue",
       );
     },
@@ -6886,6 +7268,12 @@ function __convexCapabilityCreateContext(
   sync: any,
   udfKind: any,
   commitTsPlaceholder: any,
+  startTypedGet: any,
+  startScalar: any,
+  startTypedString: any,
+  startTypedWrite: any,
+  startTypedRunUdf: any,
+  startTypedSchedule: any,
 ): any {
   if (udfKind !== "query" && udfKind !== "mutation") {
     throw new Error("Invocation UDF kind is invalid");
@@ -6893,35 +7281,33 @@ function __convexCapabilityCreateContext(
   if (commitTsPlaceholder === null || typeof commitTsPlaceholder !== "object") {
     throw new Error("Invocation SDK commit timestamp placeholder is invalid");
   }
+  if (
+    typeof startTypedGet !== "function" ||
+    typeof startScalar !== "function" ||
+    typeof startTypedString !== "function" ||
+    typeof startTypedWrite !== "function" ||
+    typeof startTypedRunUdf !== "function" ||
+    typeof startTypedSchedule !== "function"
+  ) {
+    throw new Error("Invocation native capability starts are unavailable");
+  }
   // The typed bridge is shared by application units. Link the selected unit's
   // authenticated SDK placeholder only for the current serial invocation.
   __convexCommitTsPlaceholder = commitTsPlaceholder;
-  const reader = __convexCapabilityReader(start, sync, false);
-  reader.system = __convexCapabilityReader(start, sync, true);
+  const reader = __convexCapabilityReader(start, sync, false, startTypedGet, startTypedWrite);
+  reader.system = __convexCapabilityReader(start, sync, true, startTypedGet, startTypedWrite);
   const storage: any = {
     getUrl(storageId) {
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageGetUrl", storageId},
-        "hostValue",
-      );
+      return __convexCapabilityStartTypedString(1, storageId, "hostValue", startTypedString);
     },
     getMetadata(storageId) {
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageGetMetadata", storageId},
-        "hostValue",
-      );
+      return __convexCapabilityStartTypedString(2, storageId, "hostValue", startTypedString);
     },
   };
   const context: any = {
     auth: {
       getUserIdentity() {
-        return __convexCapabilityStartAsync(
-          start,
-          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "authGetUserIdentity"},
-          "hostValue",
-        );
+        return __convexCapabilityOperationPromise(startScalar(1), "hostValue");
       },
     },
     db: reader,
@@ -6936,79 +7322,47 @@ function __convexCapabilityCreateContext(
         "`useStaleSnapshot` is only supported in mutations, not queries."
       )});
     }
-    return __convexCapabilityStartAsync(
-      start,
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "runUdf",
-        udfType: useStaleSnapshot ? "snapshotQuery" : "query",
-        functionAddress: __convexCapabilityFunctionAddress(functionReference),
-        args: __convexCapabilityFunctionArgs(args),
-        transactionLimits: __convexCapabilityTransactionLimits(options),
-      },
+    return __convexCapabilityStartTypedRunUdf(
+      useStaleSnapshot ? "snapshotQuery" : "query",
+      __convexCapabilityFunctionAddress(functionReference),
+      __convexCapabilityFunctionArgs(args),
+      __convexCapabilityTransactionLimits(options),
       "hostValue",
+      startTypedRunUdf,
     );
   };
   if (udfKind === "mutation") {
     storage.generateUploadUrl = function(): any {
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageGenerateUploadUrl"},
-        "hostValue",
-      );
+      return __convexCapabilityOperationPromise(startScalar(6), "hostValue");
     };
     storage.delete = function(storageId): any {
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "storageDelete", storageId},
-        "undefined",
-      );
+      return __convexCapabilityStartTypedString(3, storageId, "undefined", startTypedString);
     };
     reader.vars = {commitTs: __convexCommitTsPlaceholder};
     reader.insert = function(table, value): any {
       const checkedTable = __convexCapabilityRequireTable(table, false, "insert");
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbInsert", table: checkedTable, value},
-        "hostValue",
-      );
+      return __convexCapabilityStartTypedWrite(1, checkedTable, null, value, "hostValue", startTypedWrite);
     };
     reader.patch = function(table, id, patch): any {
       const checkedTable = __convexCapabilityRequireTable(table, false, "patch");
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbPatch", table: checkedTable, id, patch},
-        "undefined",
-      );
+      return __convexCapabilityStartTypedWrite(2, checkedTable, id, patch, "undefined", startTypedWrite);
     };
     reader.replace = function(table, id, value): any {
       const checkedTable = __convexCapabilityRequireTable(table, false, "replace");
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbReplace", table: checkedTable, id, value},
-        "undefined",
-      );
+      return __convexCapabilityStartTypedWrite(3, checkedTable, id, value, "undefined", startTypedWrite);
     };
     reader.delete = function(table, id): any {
       const checkedTable = __convexCapabilityRequireTable(table, false, "delete");
-      return __convexCapabilityStartAsync(
-        start,
-        {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbDelete", table: checkedTable, id},
-        "undefined",
-      );
+      return __convexCapabilityStartTypedWrite(4, checkedTable, id, null, "undefined", startTypedWrite);
     };
     context.runMutation = function(functionReference, args, options): any {
-      return __convexCapabilityStartAsync(
-        start,
-        {
-          version: ${CAPABILITY_REQUEST_ABI_VERSION},
-          kind: "runUdf",
-          udfType: "mutation",
-          functionAddress: __convexCapabilityFunctionAddress(functionReference),
-          args: __convexCapabilityFunctionArgs(args),
-          transactionLimits: __convexCapabilityTransactionLimits(options),
-        },
+      return __convexCapabilityStartTypedRunUdf(
+        "mutation",
+        __convexCapabilityFunctionAddress(functionReference),
+        __convexCapabilityFunctionArgs(args),
+        __convexCapabilityTransactionLimits(options),
         "hostValue",
+        startTypedRunUdf,
       );
     };
     context.scheduler = {
@@ -7016,16 +7370,10 @@ function __convexCapabilityCreateContext(
         if (typeof delayMilliseconds !== "number") throw new Error("delayMs must be a number");
         if (!isFinite(delayMilliseconds)) throw new Error("delayMs must be a finite number");
         if (delayMilliseconds < 0) throw new Error("delayMs must be non-negative");
-        return __convexCapabilityStartAsync(
-          start,
-          {
-            version: ${CAPABILITY_REQUEST_ABI_VERSION},
-            kind: "schedulerRunAfter",
-            delayMilliseconds,
-            functionAddress: __convexCapabilityFunctionAddress(functionReference),
-            args: __convexCapabilityFunctionArgs(args),
-          },
-          "hostValue",
+        return __convexCapabilityStartTypedSchedule(
+          1, delayMilliseconds,
+          __convexCapabilityFunctionAddress(functionReference),
+          __convexCapabilityFunctionArgs(args), startTypedSchedule,
         );
       },
       runAt(invokeTime, functionReference, args) {
@@ -7037,24 +7385,14 @@ function __convexCapabilityCreateContext(
         } else {
           throw new Error("The invoke time must a Date or a timestamp");
         }
-        return __convexCapabilityStartAsync(
-          start,
-          {
-            version: ${CAPABILITY_REQUEST_ABI_VERSION},
-            kind: "schedulerRunAt",
-            timestampMilliseconds,
-            functionAddress: __convexCapabilityFunctionAddress(functionReference),
-            args: __convexCapabilityFunctionArgs(args),
-          },
-          "hostValue",
+        return __convexCapabilityStartTypedSchedule(
+          2, timestampMilliseconds,
+          __convexCapabilityFunctionAddress(functionReference),
+          __convexCapabilityFunctionArgs(args), startTypedSchedule,
         );
       },
       cancel(id) {
-        return __convexCapabilityStartAsync(
-          start,
-          {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "schedulerCancel", id},
-          "undefined",
-        );
+        return __convexCapabilityStartTypedString(4, id, "undefined", startTypedString);
       },
     };
   }
@@ -7111,12 +7449,12 @@ function __convexCapabilityInvoke(handler: any, context: any, args: any): void {
   }
 }
 
-function __convexCapabilityInvokeRegisteredWrapper(wrapper: any, taggedArgs: any): void {
+function __convexCapabilityInvokeRegisteredWrapper(wrapper: any, args: any): void {
   if (typeof wrapper !== "function" || typeof wrapper._handler !== "function") {
     throw new Error("Selected Convex registration wrapper is invalid");
   }
   const udfKind = __convexSdkRequireActive();
-  const invocationMethod = udfKind === "query" ? "invokeQuery" : "invokeMutation";
+  const invocationMethod = udfKind === "query" ? "invokeQueryValue" : "invokeMutationValue";
   const kindProperty = udfKind === "query" ? "isQuery" : "isMutation";
   const otherKindProperty = udfKind === "query" ? "isMutation" : "isQuery";
   if (
@@ -7132,11 +7470,10 @@ function __convexCapabilityInvokeRegisteredWrapper(wrapper: any, taggedArgs: any
   __convexInvocationDone = false;
   __convexInvocationStatus = 0;
   try {
-    if (typeof taggedArgs !== "string") {
+    if (args === null || typeof args !== "object" || __convexGuestIsArray(args)) {
       throw new Error("Selected Convex registration wrapper arguments are invalid");
     }
-    const argsStr = "[" + taggedArgs + "]";
-    __convexCapabilityTrackInvocationResult(wrapper[invocationMethod](argsStr), true);
+    __convexCapabilityTrackInvocationResult(wrapper[invocationMethod](args), false);
   } catch (error) {
     try {
       __convexReportThrown(error);
@@ -7239,8 +7576,54 @@ function __convexCapabilitySettle(
   else resolve(completion);
 }
 
-function __convexWasmCapabilityBootstrap(install: any): void {
-  if (typeof install !== "function") throw new Error("Native capability installer is missing");
+function __convexWasmCapabilityBootstrap(
+  install: any,
+  takeTypedValue: any,
+  setTypedResult: any,
+  startTypedGet: any,
+  startTypedString: any,
+  startTypedWrite: any,
+  startTypedRunUdf: any,
+  startTypedSchedule: any,
+  startTypedQuery: any,
+  captureQueryValue: any,
+): void {
+  if (
+    typeof install !== "function" ||
+    typeof takeTypedValue !== "function" ||
+    typeof setTypedResult !== "function" ||
+    typeof startTypedGet !== "function" ||
+    typeof startTypedString !== "function" ||
+    typeof startTypedWrite !== "function" ||
+    typeof startTypedRunUdf !== "function" ||
+    typeof startTypedSchedule !== "function" ||
+    typeof startTypedQuery !== "function" ||
+    typeof captureQueryValue !== "function"
+  ) {
+    throw new Error("Native capability installer is missing");
+  }
+  if (
+    __convexNativeTakeTypedValue !== undefined ||
+    __convexNativeSetTypedResult !== undefined ||
+    __convexNativeStartTypedGet !== undefined ||
+    __convexNativeStartTypedString !== undefined ||
+    __convexNativeStartTypedWrite !== undefined ||
+    __convexNativeStartTypedRunUdf !== undefined ||
+    __convexNativeStartTypedSchedule !== undefined ||
+    __convexNativeStartTypedQuery !== undefined ||
+    __convexNativeCaptureQueryValue !== undefined
+  ) {
+    throw new Error("Native typed value adapter is already installed");
+  }
+  __convexNativeTakeTypedValue = takeTypedValue;
+  __convexNativeSetTypedResult = setTypedResult;
+  __convexNativeStartTypedGet = startTypedGet;
+  __convexNativeStartTypedString = startTypedString;
+  __convexNativeStartTypedWrite = startTypedWrite;
+  __convexNativeStartTypedRunUdf = startTypedRunUdf;
+  __convexNativeStartTypedSchedule = startTypedSchedule;
+  __convexNativeStartTypedQuery = startTypedQuery;
+  __convexNativeCaptureQueryValue = captureQueryValue;
   install(
     __convexCapabilityCreateContext,
     __convexCapabilityReadRequest,

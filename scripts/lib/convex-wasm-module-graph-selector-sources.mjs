@@ -71,6 +71,24 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_sync_take")
 int64_t convex_wasm_graph_import_capability_sync_take(int64_t, int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_take")
 int32_t convex_wasm_graph_import_capability_start_take(int64_t, int64_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_scalar")
+int32_t convex_wasm_graph_import_capability_start_scalar(int64_t, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_get")
+int32_t convex_wasm_graph_import_capability_start_get(int64_t, const char *, int32_t, const char *, int32_t, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_string")
+int32_t convex_wasm_graph_import_capability_start_string(int64_t, int32_t, const char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_write")
+int32_t convex_wasm_graph_import_capability_start_write(int64_t, int32_t, const char *, int32_t, const char *, int32_t, const char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_run_udf")
+int32_t convex_wasm_graph_import_capability_start_run_udf(int64_t, int32_t, int32_t, const char *, int32_t, const char *, int32_t, const char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_start_schedule")
+int32_t convex_wasm_graph_import_capability_start_schedule(int64_t, int32_t, double, int32_t, const char *, int32_t, const char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_query_record")
+int32_t convex_wasm_graph_import_capability_query_record(int64_t, const char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_typed_value_abi_v1")
+int32_t convex_wasm_graph_import_typed_value_abi_v1(void);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_performance_now")
+double convex_wasm_graph_import_performance_now(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_query_stream_open_take")
 int32_t convex_wasm_graph_import_capability_query_stream_open_take(int64_t, int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_query_stream_next")
@@ -98,6 +116,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_request_copy")
 int32_t convex_wasm_graph_import_guest_value_request_copy(char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_encode")
 int64_t convex_wasm_graph_import_guest_value_encode(int64_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_encode_binary")
+int64_t convex_wasm_graph_import_guest_value_encode_binary(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_payload_len")
 int32_t convex_wasm_graph_import_guest_value_payload_len(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_payload_copy")
@@ -106,6 +126,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_payload_release")
 void convex_wasm_graph_import_guest_value_payload_release(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_result")
 void convex_wasm_graph_import_guest_value_result(char *, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_result_binary")
+void convex_wasm_graph_import_guest_value_result_binary(const char *, int32_t);
 int32_t convex_async_operation_cancel_all(void) {
   return convex_wasm_graph_import_async_operation_cancel_all();
 }
@@ -139,6 +161,54 @@ int64_t convex_capability_sync_take(int64_t capability, int64_t request) {
 }
 int32_t convex_capability_start_take(int64_t capability, int64_t request) {
   return convex_wasm_graph_import_capability_start_take(capability, request);
+}
+int32_t convex_capability_start_scalar(int64_t capability, int32_t operation) {
+  return convex_wasm_graph_import_capability_start_scalar(capability, operation);
+}
+int32_t convex_capability_start_get(
+    int64_t capability, const char *id, int32_t id_length,
+    const char *table, int32_t table_length, int32_t is_system) {
+  return convex_wasm_graph_import_capability_start_get(
+      capability, id, id_length, table, table_length, is_system);
+}
+int32_t convex_capability_start_string(
+    int64_t capability, int32_t operation, const char *value, int32_t value_length) {
+  return convex_wasm_graph_import_capability_start_string(
+      capability, operation, value, value_length);
+}
+int32_t convex_capability_start_write(
+    int64_t capability, int32_t kind, const char *table, int32_t table_length,
+    const char *id, int32_t id_length, const char *value, int32_t value_length) {
+  return convex_wasm_graph_import_capability_start_write(
+      capability, kind, table, table_length, id, id_length, value, value_length);
+}
+int32_t convex_capability_start_run_udf(
+    int64_t capability, int32_t udf_type, int32_t address_kind,
+    const char *address, int32_t address_length,
+    const char *args, int32_t args_length,
+    const char *limits, int32_t limits_length) {
+  return convex_wasm_graph_import_capability_start_run_udf(
+      capability, udf_type, address_kind, address, address_length,
+      args, args_length, limits, limits_length);
+}
+int32_t convex_capability_start_schedule(
+    int64_t capability, int32_t kind, double time_milliseconds,
+    int32_t address_kind, const char *address, int32_t address_length,
+    const char *args, int32_t args_length) {
+  return convex_wasm_graph_import_capability_start_schedule(
+      capability, kind, time_milliseconds, address_kind,
+      address, address_length, args, args_length);
+}
+int32_t convex_capability_query_record(
+    int64_t capability, const char *record, int32_t record_length) {
+  return convex_wasm_graph_import_capability_query_record(
+      capability, record, record_length);
+}
+int32_t convex_typed_value_abi_v1(void) {
+  return convex_wasm_graph_import_typed_value_abi_v1();
+}
+double convex_performance_now(int64_t capability) {
+  return convex_wasm_graph_import_performance_now(capability);
 }
 int32_t convex_capability_query_stream_open_take(int64_t capability, int64_t request) {
   return convex_wasm_graph_import_capability_query_stream_open_take(capability, request);
@@ -183,6 +253,9 @@ int32_t convex_guest_value_request_copy(char *destination, int32_t capacity) {
 int64_t convex_guest_value_encode(int64_t consuming_value_handle) {
   return convex_wasm_graph_import_guest_value_encode(consuming_value_handle);
 }
+int64_t convex_guest_value_encode_binary(int64_t consuming_value_handle) {
+  return convex_wasm_graph_import_guest_value_encode_binary(consuming_value_handle);
+}
 int32_t convex_guest_value_payload_len(int64_t payload_handle) {
   return convex_wasm_graph_import_guest_value_payload_len(payload_handle);
 }
@@ -196,6 +269,9 @@ void convex_guest_value_payload_release(int64_t payload_handle) {
 }
 void convex_guest_value_result(char *payload, int32_t length) {
   convex_wasm_graph_import_guest_value_result(payload, length);
+}
+void convex_guest_value_result_binary(const char *payload, int32_t length) {
+  convex_wasm_graph_import_guest_value_result_binary(payload, length);
 }
 #undef CONVEX_WASM_GRAPH_HOST_IMPORT
 `;

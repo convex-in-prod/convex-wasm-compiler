@@ -159,7 +159,7 @@ function guestNativeCodec(commitTsPlaceholder) {
   return codec;
 }
 
-function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
+function nativeCapabilityHarness({ now = 1_700_000_000_250, typedQueryArgs = false } = {}) {
   const rendered = renderNativeDbGetCapabilityTarget({
     argumentFields: [],
     compileProfileJavascript: "var __convexWasmCompileProfile = {};",
@@ -197,6 +197,14 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
   const values = new Map();
   const requests = [];
   const requestCapabilityIdentities = [];
+  const scalarStarts = [];
+  const directGetStarts = [];
+  const directStringStarts = [];
+  const directWriteStarts = [];
+  const directRunUdfStarts = [];
+  const directScheduleStarts = [];
+  const capturedQueryValues = [];
+  const directWriteCapabilityIdentities = [];
   const requestPayloads = [];
   const restoredTransfers = [];
   const taggedTransfers = [];
@@ -273,6 +281,7 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
       }
     },
     __convexAllocateUtf8: (source) => source,
+    __convexNullPointer: null,
     __convexGuestTransferScratch: () => transferScratch,
     __convexWriteUtf8: (source, pointer) => {
       if (pointer === transferScratch) pointer.source = source;
@@ -294,6 +303,11 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     __convexHostCapabilityCurrent: () => currentCapabilityIdentity,
     __convexHostCapabilityStartTake: (identity, requestHandle) =>
       startOperation(requestHandle, identity),
+    __convexHostCapabilityStartScalar: (identity, operationCode) => {
+      requestCapabilityIdentities.push(identity);
+      scalarStarts.push(operationCode);
+      return nextOperation++;
+    },
     __convexHostCapabilitySyncTake: (identity, requestHandle) => {
       requestCapabilityIdentities.push(identity);
       requests.push(take(requestHandle));
@@ -334,19 +348,123 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
   };
   sandbox.__convexTargetGlobal = sandbox;
   const javascript = ts.transpileModule(
-    `${rendered.slice(requestStart, requestEnd)}\n${rendered.slice(
-      facadeStart,
-      facadeEnd
-    )}\n${rendered.slice(runtimeStart, end)}`,
+    `${rendered.slice(requestStart, requestEnd)}\n${
+      typedQueryArgs
+        ? rendered.slice(facadeStart, facadeEnd)
+        : rendered.slice(facadeStart, facadeEnd).replace("  typedQueryArgs: true,\n", "")
+    }\n${rendered.slice(runtimeStart, end)}`,
     {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }
   ).outputText;
   runInNewContext(javascript, sandbox);
   let bridge;
-  sandbox.__convexWasmCapabilityBootstrap((...installed) => {
-    bridge = installed;
-  });
+  const startTypedGet = (identity, id, table, isSystem) => {
+    assert.equal(typeof id, "string");
+    assert.ok(table === null || typeof table === "string");
+    assert.equal(typeof isSystem, "boolean");
+    requestCapabilityIdentities.push(identity);
+    directGetStarts.push({ id, table, isSystem: isSystem ? 1 : 0 });
+    return nextOperation++;
+  };
+  const startTypedString = (identity, operationCode, value) => {
+    assert.ok(Number.isInteger(operationCode) && operationCode >= 1 && operationCode <= 7);
+    assert.equal(typeof value, "string");
+    requestCapabilityIdentities.push(identity);
+    directStringStarts.push({ operationCode, value });
+    return nextOperation++;
+  };
+  const startTypedWrite = (identity, kind, table, id, value, commitTs) => {
+    assert.equal(commitTs, sdkCommitTsPlaceholder);
+    if (kind !== 1 && typeof id !== "string") {
+      throw new Error("Typed write fields are invalid");
+    }
+    directWriteCapabilityIdentities.push(identity);
+    directWriteStarts.push({ kind, table, id, value });
+    return nextOperation++;
+  };
+  const startTypedRunUdf = (
+    identity,
+    typeCode,
+    addressKind,
+    address,
+    args,
+    transactionLimits,
+    commitTs
+  ) => {
+    assert.equal(commitTs, sdkCommitTsPlaceholder);
+    requestCapabilityIdentities.push(identity);
+    directRunUdfStarts.push({ typeCode, addressKind, address, args, transactionLimits });
+    return nextOperation++;
+  };
+  const startTypedSchedule = (
+    identity,
+    kind,
+    timeMilliseconds,
+    addressKind,
+    address,
+    args,
+    commitTs
+  ) => {
+    assert.equal(commitTs, sdkCommitTsPlaceholder);
+    const containsPending = (value) =>
+      value === sdkCommitTsPlaceholder ||
+      (value !== null && typeof value === "object" &&
+        Object.values(value).some(containsPending));
+    if (containsPending(args)) {
+      throw new Error("Pending commit timestamp is not allowed in scheduled arguments");
+    }
+    requestCapabilityIdentities.push(identity);
+    directScheduleStarts.push({ kind, timeMilliseconds, addressKind, address, args });
+    return nextOperation++;
+  };
+  sandbox.__convexWasmCapabilityBootstrap(
+    (...installed) => {
+      bridge = installed;
+    },
+    (handle) => take(handle),
+    (value) => results.push(value),
+    (id, table, isSystem) =>
+      startTypedGet(currentCapabilityIdentity, id, table, isSystem),
+    (operationCode, value) =>
+      startTypedString(currentCapabilityIdentity, operationCode, value),
+    (kind, table, id, value, commitTs) =>
+      startTypedWrite(currentCapabilityIdentity, kind, table, id, value, commitTs),
+    (typeCode, addressKind, address, args, transactionLimits, commitTs) =>
+      startTypedRunUdf(
+        currentCapabilityIdentity,
+        typeCode,
+        addressKind,
+        address,
+        args,
+        transactionLimits,
+        commitTs
+      ),
+    (kind, timeMilliseconds, addressKind, address, args, commitTs) =>
+      startTypedSchedule(
+        currentCapabilityIdentity, kind, timeMilliseconds,
+        addressKind, address, args, commitTs
+      ),
+    (query, terminal, pagination) => {
+      if (!typedQueryArgs) throw new Error("Typed query adapter is unavailable");
+      requestCapabilityIdentities.push(currentCapabilityIdentity);
+      const request = {query, terminal, pagination};
+      requests.push(request);
+      if (terminal === "stream") {
+        const streamHandle = nextQueryStream++;
+        openQueryStreams.add(streamHandle);
+        return streamHandle;
+      }
+      return nextOperation++;
+    },
+    (value) => {
+      if (!typedQueryArgs) return value;
+      const buffer = runInNewContext("new ArrayBuffer(5)", sandbox);
+      new Uint8Array(buffer).set([67, 86, 65, 49, 0]);
+      capturedQueryValues.push({ value: structuredClone(value), buffer });
+      return buffer;
+    }
+  );
   assert.equal(bridge.length, 10);
   const [
     createContext,
@@ -387,7 +505,22 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     if (Object.getPrototypeOf(argumentsObject) !== Object.prototype) return argumentsObject;
     sandbox.__convexHostSdkArguments = argumentsObject;
     try {
-      return runInNewContext("JSON.parse(JSON.stringify(__convexHostSdkArguments))", sandbox);
+      return runInNewContext(
+        typedQueryArgs
+          ? `((input) => {
+              const copy = (value) => {
+                if (value === null || typeof value !== "object") return value;
+                if (value instanceof ArrayBuffer) return value;
+                if (Array.isArray(value)) return value.map(copy);
+                const result = {};
+                for (const key of Object.keys(value)) result[key] = copy(value[key]);
+                return result;
+              };
+              return copy(input);
+            })(__convexHostSdkArguments)`
+          : "JSON.parse(JSON.stringify(__convexHostSdkArguments))",
+        sandbox
+      );
     } finally {
       delete sandbox.__convexHostSdkArguments;
     }
@@ -396,6 +529,8 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     ...sandbox.Convex,
     asyncSyscallObjectArgs: (operation, argumentsObject) =>
       sandbox.Convex.asyncSyscallObjectArgs(operation, guestArguments(argumentsObject)),
+    asyncSyscallValueArgs: (operation, argumentsObject) =>
+      sandbox.Convex.asyncSyscallValueArgs(operation, guestArguments(argumentsObject)),
     syscallObjectArgs: (operation, argumentsObject) =>
       sandbox.Convex.syscallObjectArgs(operation, guestArguments(argumentsObject)),
   };
@@ -404,14 +539,46 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     activateSdk,
     cleanup,
     closedQueryStreams,
+    capturedQueryValues,
     createContext: (udfKind, sync = syncOperation, capabilityIdentity = 1) =>
       createContext(
         (requestHandle) => startOperation(requestHandle, capabilityIdentity),
         sync,
         udfKind,
-        selectedCommitTsPlaceholder
+        selectedCommitTsPlaceholder,
+        (id, table, isSystem) =>
+          startTypedGet(capabilityIdentity, id, table, isSystem),
+        (operationCode) => {
+          requestCapabilityIdentities.push(capabilityIdentity);
+          scalarStarts.push(operationCode);
+          return nextOperation++;
+        },
+        (operationCode, value) => startTypedString(capabilityIdentity, operationCode, value),
+        (kind, table, id, value, commitTs) =>
+          startTypedWrite(capabilityIdentity, kind, table, id, value, commitTs),
+        (typeCode, addressKind, address, args, transactionLimits, commitTs) =>
+          startTypedRunUdf(
+            capabilityIdentity,
+            typeCode,
+            addressKind,
+            address,
+            args,
+            transactionLimits,
+            commitTs
+          ),
+        (kind, timeMilliseconds, addressKind, address, args, commitTs) =>
+          startTypedSchedule(
+            capabilityIdentity, kind, timeMilliseconds,
+            addressKind, address, args, commitTs
+          )
       ),
     date: (value) => new sandbox.Date(value),
+    directGetStarts,
+    directStringStarts,
+    directWriteStarts,
+    directRunUdfStarts,
+    directScheduleStarts,
+    directWriteCapabilityIdentities,
     done,
     guestValue: (source, values = {}) => {
       Object.assign(sandbox, values);
@@ -431,6 +598,7 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     queryStreamReads,
     queueSdkSyncResult: (value) => sdkSyncResults.push(value),
     requestCapabilityIdentities,
+    scalarStarts,
     requests,
     requestPayloads,
     restoredTransfers,
@@ -442,6 +610,8 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250 } = {}) {
     status,
     rawSdkFacade: sandbox.Convex,
     sdkFacade: hostSdkFacade,
+    // The installed SDK must still work against runtimes without its private typed hook.
+    legacySdkFacade: { ...hostSdkFacade, asyncSyscallValueArgs: undefined },
     taggedTransfers,
     taggedResultSources,
     setCapabilityIdentity: (identity) => {
@@ -543,7 +713,7 @@ function nativeConsoleHarness({
   };
 }
 
-function nativePerformanceHarness({ capabilityIdentity = 7, result = 12.3, syncResult } = {}) {
+function nativePerformanceHarness({ capabilityIdentity = 7, result = 12.3 } = {}) {
   const rendered = renderNativeDbGetCapabilityTarget({
     argumentFields: [],
     compileProfileJavascript:
@@ -553,34 +723,12 @@ function nativePerformanceHarness({ capabilityIdentity = 7, result = 12.3, syncR
   const end = rendered.indexOf("function __convexEnvironmentVariableGet", start);
   assert.ok(start >= 0 && end > start);
 
-  let nextHandle = 1;
-  const values = new Map();
-  const requests = [];
-  const allocate = (value) => {
-    const handle = nextHandle++;
-    values.set(handle, value);
-    return handle;
-  };
-  const take = (handle) => {
-    assert.ok(values.has(handle), `unknown performance harness value handle ${String(handle)}`);
-    const value = values.get(handle);
-    values.delete(handle);
-    return value;
-  };
+  const calls = [];
   const sandbox = {
-    __convexGuestFromHost: take,
-    __convexCapabilityRequestToHost: allocate,
-    __convexCapabilityRequestRelease: (handle) => {
-      assert.ok(
-        values.delete(handle),
-        `released unknown performance request handle ${String(handle)}`
-      );
-    },
     __convexHostCapabilityCurrent: () => capabilityIdentity,
-    __convexHostCapabilitySyncTake: (_identity, requestHandle) => {
-      if (syncResult === -2) return -2;
-      requests.push(take(requestHandle));
-      return allocate(result);
+    __convexHostPerformanceNow: (identity) => {
+      calls.push(identity);
+      return result;
     },
   };
   sandbox.__convexTargetGlobal = sandbox;
@@ -591,8 +739,7 @@ function nativePerformanceHarness({ capabilityIdentity = 7, result = 12.3, syncR
   return {
     evaluate: (source) => runInNewContext(source, sandbox),
     now: () => runInNewContext("performance.now()", sandbox),
-    outstandingHandles: () => values.size,
-    requests,
+    calls,
   };
 }
 
@@ -3209,18 +3356,18 @@ test("renders the generic native capability target without operation-ID authorit
     code,
     /Object\.defineProperty\(__convexTargetGlobal, "__convexWasmCapabilityBootstrap"/u
   );
-  assert.match(code, /kind: isSystem \? "dbSystemGet" : "dbGet"/u);
+  assert.match(code, /startTypedGet\(id, table, isSystem\)/u);
   assert.doesNotMatch(code, /operators\[constraint\.type\]/u);
   assert.match(code, /if \(constraint\.type === "Eq"\) operator = "eq";/u);
   assert.match(code, /else if \(constraint\.type === "Lte"\) operator = "lte";/u);
   assert.doesNotMatch(code, /request\.table = table/u);
   assert.match(
     code,
-    /if \(hasTable\) \{[^]*__convexCapabilityRequireTable\(args\.table, args\.isSystem, "get"\)[^]*id,[^]*table,[^]*"taggedJson"[^]*\}[^]*kind: args\.isSystem \? "dbSystemGet" : "dbGet",[^]*id,[^]*"taggedJson"/u
+    /if \(hasTable\) \{[^]*__convexCapabilityRequireTable\(args\.table, args\.isSystem, "get"\)[^]*id,[^]*table,[^]*valueResultKind[^]*\}[^]*kind: args\.isSystem \? "dbSystemGet" : "dbGet",[^]*id,[^]*valueResultKind/u
   );
   assert.match(
     code,
-    /if \(hasTable\) \{[^]*id: arg1,[^]*table,[^]*"hostValue",[^]*\}[^]*id: arg0,[^]*"hostValue"/u
+    /const id = hasTable \? arg1 : arg0;[^]*startTypedGet\(id, table, isSystem\)/u
   );
   assert.match(code, /kind: "dbQuery"/u);
   assert.match(code, /kind: "dbNormalizeId"/u);
@@ -3233,10 +3380,10 @@ test("renders the generic native capability target without operation-ID authorit
   assert.match(code, /kind: "storageGenerateUploadUrl"/u);
   assert.match(code, /kind: "storageDelete"/u);
   assert.match(code, /context\.runQuery = function\(functionReference, args, options\)/u);
-  assert.match(code, /udfType: useStaleSnapshot \? "snapshotQuery" : "query"/u);
+  assert.match(code, /__convexCapabilityStartTypedRunUdf\(\s*useStaleSnapshot \? "snapshotQuery" : "query"/u);
   assert.match(code, /request\.udfType !== "query"/u);
   assert.match(code, /request\.udfType !== "snapshotQuery"/u);
-  assert.match(code, /kind: "schedulerRunAfter"/u);
+  assert.match(code, /__convexCapabilityStartTypedSchedule\(\s*1, delayMilliseconds/u);
   assert.match(code, /kind: "schedulerRunAt"/u);
   assert.match(code, /kind: "schedulerCancel"/u);
   assert.match(code, /kind: "environmentVariableGet"/u);
@@ -3246,7 +3393,7 @@ test("renders the generic native capability target without operation-ID authorit
   assert.match(code, /function convex_crypto_random_uuid\(/u);
   assert.match(code, /function convex_math_random\(/u);
   assert.match(code, /Object\.defineProperty\(__convexTargetGlobal, "crypto"/u);
-  assert.match(code, /kind: "performanceNow"/u);
+  assert.match(code, /__convexHostPerformanceNow\(capabilityIdentity\)/u);
   assert.match(code, /const performance: any = __convexPerformance/u);
   assert.match(code, /function __convexDatabaseUdfTimerDeveloperError\(message: string\): number/u);
   assert.doesNotMatch(code, /__convexDatabaseUdfTimerDeveloperError[^\n]*:\s*never\b/u);
@@ -3278,6 +3425,27 @@ test("renders the generic native capability target without operation-ID authorit
     header,
     /int convex_capability_start_take\(\s*long long capability_identity,\s*long long request_handle\)/u
   );
+  assert.match(
+    header,
+    /int convex_capability_start_scalar\(\s*long long capability_identity,\s*int operation_code\)/u
+  );
+  assert.match(header, /double convex_performance_now\(long long capability_identity\)/u);
+  for (const [operation, codeValue] of [
+    ["getUserIdentity", 1],
+    ["getFunctionMetadata", 2],
+    ["getDeploymentMetadata", 3],
+    ["getTransactionMetrics", 4],
+    ["getRequestMetadata", 5],
+    ["storageGenerateUploadUrl", 6],
+  ]) {
+    assert.match(
+      code,
+      new RegExp(
+        `if \\(operation === "1\\.0/${operation}"\\)[^]*?__convexCapabilityStartAsyncScalar\\(${codeValue},`,
+        "u"
+      )
+    );
+  }
   assert.match(code, /value === undefined \? null : value/u);
   assert.equal(code.match(/function __convexArrayPush\(/gu)?.length, 1);
   assert.doesNotMatch(code, /__convexReleaseLiveOpaqueValues/u);
@@ -4431,13 +4599,10 @@ var __convexWasmCompileProfile = {
   assert.doesNotMatch(code, /ImportedOperationDescriptor|operationId|compilerCallsite/u);
 });
 
-test("native performance uses the closed invocation capability and consumes handles exactly", () => {
+test("native performance uses a direct scalar import with invocation authority", () => {
   const harness = nativePerformanceHarness({ result: 42.7 });
   assert.equal(harness.now(), 42.7);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.requests)), [
-    { version: convexWasmCapabilityRequestAbiVersion, kind: "performanceNow" },
-  ]);
-  assert.equal(harness.outstandingHandles(), 0);
+  assert.deepEqual(harness.calls, [7]);
   assert.equal(harness.evaluate("performance['now']()"), 42.7);
   assert.equal(
     harness.evaluate("(() => { const now = performance.now; return now.call(performance); })()"),
@@ -4445,17 +4610,15 @@ test("native performance uses the closed invocation capability and consumes hand
   );
   assert.equal(harness.evaluate("({ ...performance }).now()"), 42.7);
   assert.equal(harness.evaluate("performance.timeOrigin"), undefined);
-  assert.equal(harness.outstandingHandles(), 0);
+  assert.deepEqual(harness.calls, [7, 7, 7, 7]);
 
   const unavailable = nativePerformanceHarness({ capabilityIdentity: 0 });
   assert.throws(() => unavailable.now(), /capability is unavailable/u);
-  assert.deepEqual(unavailable.requests, []);
-  assert.equal(unavailable.outstandingHandles(), 0);
+  assert.deepEqual(unavailable.calls, []);
 
-  const stale = nativePerformanceHarness({ syncResult: -2 });
+  const stale = nativePerformanceHarness({ result: -1 });
   assert.throws(() => stale.now(), /capability is stale/u);
-  assert.deepEqual(stale.requests, []);
-  assert.equal(stale.outstandingHandles(), 0);
+  assert.deepEqual(stale.calls, [7]);
 });
 
 test("native WebCrypto SHA-256 accepts BufferSource views and snapshots input synchronously", async () => {
@@ -5076,10 +5239,15 @@ test("generic capability requests match installed Convex query, write, scheduler
       const capabilityScheduled = mutationContext.scheduler.runAfter(250, reference, {
         sequence: index,
       });
-      const scheduleRequest = normalize(harness.requests.shift());
+      const scheduleStart = normalize(harness.directScheduleStarts.shift());
       harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("scheduled-id"));
       assert.equal(await capabilityScheduled, "scheduled-id");
-      assert.deepEqual(scheduleRequest.functionAddress, expected);
+      assert.equal(scheduleStart.kind, 1);
+      assert.deepEqual(
+        { [Object.keys(expected)[0]]: scheduleStart.address }, expected
+      );
+      assert.equal(scheduleStart.addressKind,
+        expected.name !== undefined ? 1 : expected.reference !== undefined ? 2 : 3);
       assert.deepEqual(
         Object.fromEntries(
           Object.entries(sdkSchedule).filter(([key]) =>
@@ -5088,8 +5256,8 @@ test("generic capability requests match installed Convex query, write, scheduler
         ),
         expected
       );
-      assert.deepEqual(scheduleRequest.args, sdkSchedule.args);
-      assert.equal((harness.now() + scheduleRequest.delayMilliseconds) / 1000, sdkSchedule.ts);
+      assert.deepEqual(scheduleStart.args, sdkSchedule.args);
+      assert.equal((harness.now() + scheduleStart.timeMilliseconds) / 1000, sdkSchedule.ts);
     }
 
     const patch = mutationContext.db.patch(
@@ -5097,7 +5265,12 @@ test("generic capability requests match installed Convex query, write, scheduler
       "document-id",
       harness.guestValue("({ sequence: 4 })")
     );
-    assert.equal(harness.requests.shift().kind, "dbPatch");
+    assert.deepEqual(normalize(harness.directWriteStarts.shift()), {
+      kind: 2,
+      table: "documents",
+      id: "document-id",
+      value: { sequence: 4 },
+    });
     harness.settle(harness.lastStartedOperationHandle(), 0, 0);
     assert.equal(await patch, undefined);
 
@@ -5105,26 +5278,18 @@ test("generic capability requests match installed Convex query, write, scheduler
     await writer.replace("documents", "document-id", { sequence: 5 });
     const sdkReplace = takeSdkAsyncCall("1.0/replace");
     const replacement = mutationContext.db.replace("documents", "document-id", { sequence: 5 });
-    const replaceRequest = normalize(harness.requests.shift());
+    const replaceStart = normalize(harness.directWriteStarts.shift());
     harness.settle(harness.lastStartedOperationHandle(), 0, 0);
     assert.equal(await replacement, undefined);
-    assert.deepEqual(replaceRequest, {
-      version: convexWasmCapabilityRequestAbiVersion,
-      kind: "dbReplace",
-      ...sdkReplace,
-    });
+    assert.deepEqual(replaceStart, { kind: 3, ...sdkReplace });
 
     await writer.delete("documents", "document-id");
     const sdkDelete = takeSdkAsyncCall("1.0/remove");
     const deletion = mutationContext.db.delete("documents", "document-id");
-    const deleteRequest = normalize(harness.requests.shift());
+    const deleteStart = normalize(harness.directWriteStarts.shift());
     harness.settle(harness.lastStartedOperationHandle(), 0, 0);
     assert.equal(await deletion, undefined);
-    assert.deepEqual(deleteRequest, {
-      version: convexWasmCapabilityRequestAbiVersion,
-      kind: "dbDelete",
-      ...sdkDelete,
-    });
+    assert.deepEqual(deleteStart, { kind: 4, table: sdkDelete.table, id: sdkDelete.id, value: null });
 
     const runAtTimes = [
       {
@@ -5147,25 +5312,23 @@ test("generic capability requests match installed Convex query, write, scheduler
         "tasks:run",
         { sequence: index + 5 }
       );
-      const runAtRequest = normalize(harness.requests.shift());
+      const runAtStart = normalize(harness.directScheduleStarts.shift());
       harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("scheduled-id"));
       assert.equal(await capabilityScheduled, "scheduled-id");
-      assert.deepEqual(runAtRequest.functionAddress, { name: "tasks:run" });
-      assert.deepEqual(runAtRequest.args, sdkRunAt.args);
-      assert.equal(runAtRequest.timestampMilliseconds / 1000, sdkRunAt.ts);
+      assert.equal(runAtStart.kind, 2);
+      assert.equal(runAtStart.addressKind, 1);
+      assert.equal(runAtStart.address, "tasks:run");
+      assert.deepEqual(runAtStart.args, sdkRunAt.args);
+      assert.equal(runAtStart.timeMilliseconds / 1000, sdkRunAt.ts);
     }
 
     await setupMutationScheduler().cancel("scheduled-id");
     const sdkCancel = takeSdkAsyncCall("1.0/cancel_job");
     const cancellation = mutationContext.scheduler.cancel("scheduled-id");
-    const cancelRequest = normalize(harness.requests.shift());
+    const cancelStart = harness.directStringStarts.shift();
     harness.settle(harness.lastStartedOperationHandle(), 0, 0);
     assert.equal(await cancellation, undefined);
-    assert.deepEqual(cancelRequest, {
-      version: convexWasmCapabilityRequestAbiVersion,
-      kind: "schedulerCancel",
-      ...sdkCancel,
-    });
+    assert.deepEqual(cancelStart, { operationCode: 4, value: sdkCancel.id });
     assert.equal(sdkAsyncCalls.length, 0);
 
     const normalizeRequestCount = harness.requests.length;
@@ -5266,21 +5429,17 @@ test("generic capability search filters are single-use and fail closed", () => {
   assert.equal(harness.outstandingHandles(), 0);
 });
 
-test("generic storage capabilities use authenticated v4 request envelopes", async () => {
+test("generic storage capabilities use bound typed string starts", async () => {
   const harness = nativeCapabilityHarness();
   const queryContext = harness.createContext("query", undefined, 41);
   const mutationContext = harness.createContext("mutation", undefined, 73);
 
   const queryUrl = queryContext.storage.getUrl("storage-query-url");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGetUrl",
-    storageId: "storage-query-url",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 1,
+    value: "storage-query-url",
   });
-  assert.equal(
-    harness.requestPayloads.shift(),
-    '{"kind":"storageGetUrl","storageId":"storage-query-url","version":4}'
-  );
+  assert.equal(harness.requestPayloads.length, 0);
   harness.settle(
     harness.lastStartedOperationHandle(),
     0,
@@ -5289,10 +5448,9 @@ test("generic storage capabilities use authenticated v4 request envelopes", asyn
   assert.equal(await queryUrl, "https://storage.example/query");
 
   const queryMetadata = queryContext.storage.getMetadata("storage-query-metadata");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGetMetadata",
-    storageId: "storage-query-metadata",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 2,
+    value: "storage-query-metadata",
   });
   const metadata = {
     contentType: "application/octet-stream",
@@ -5304,29 +5462,23 @@ test("generic storage capabilities use authenticated v4 request envelopes", asyn
   assert.deepEqual(JSON.parse(JSON.stringify(await queryMetadata)), metadata);
 
   const mutationUrl = mutationContext.storage.getUrl("storage-mutation-url");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGetUrl",
-    storageId: "storage-mutation-url",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 1,
+    value: "storage-mutation-url",
   });
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(null));
   assert.equal(await mutationUrl, null);
 
   const mutationMetadata = mutationContext.storage.getMetadata("storage-mutation-metadata");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGetMetadata",
-    storageId: "storage-mutation-metadata",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 2,
+    value: "storage-mutation-metadata",
   });
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(null));
   assert.equal(await mutationMetadata, null);
 
   const uploadUrl = mutationContext.storage.generateUploadUrl();
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGenerateUploadUrl",
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
-  assert.equal(harness.requestPayloads.at(-1), '{"kind":"storageGenerateUploadUrl","version":4}');
+  assert.equal(harness.scalarStarts.shift(), 6);
   harness.settle(
     harness.lastStartedOperationHandle(),
     0,
@@ -5335,15 +5487,10 @@ test("generic storage capabilities use authenticated v4 request envelopes", asyn
   assert.equal(await uploadUrl, "https://storage.example/upload");
 
   const deletion = mutationContext.storage.delete("storage-delete");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageDelete",
-    storageId: "storage-delete",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 3,
+    value: "storage-delete",
   });
-  assert.equal(
-    harness.requestPayloads.at(-1),
-    '{"kind":"storageDelete","storageId":"storage-delete","version":4}'
-  );
   harness.settle(harness.lastStartedOperationHandle(), 0, 0);
   assert.equal(await deletion, undefined);
 
@@ -5359,7 +5506,7 @@ test("canonical SDK facade runs installed function-handle creation over ABI v4",
   );
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   try {
     harness.activateSdk("query");
     const queryCases = [
@@ -5406,7 +5553,22 @@ test("canonical SDK facade runs installed function-handle creation over ABI v4",
     );
     assert.equal(await created, "function://created-mutation");
 
-    assert.deepEqual(harness.requestCapabilityIdentities, [1, 1, 1]);
+    const nativeCreated = harness.sdkFacade.asyncSyscallValueArgs(
+      "1.0/createFunctionHandle",
+      { name: "tasks:read", version: convexSdkVersion },
+    );
+    assert.deepEqual(harness.directStringStarts.shift(), {
+      operationCode: 5,
+      value: "tasks:read",
+    });
+    harness.settle(
+      harness.lastStartedOperationHandle(),
+      0,
+      harness.allocate("function://created-native"),
+    );
+    assert.equal(await nativeCreated, "function://created-native");
+
+    assert.deepEqual(harness.requestCapabilityIdentities, [1, 1, 1, 1]);
     assert.equal(harness.requests.length, 0);
     assert.equal(harness.requestPayloads.length, 0);
     assert.equal(harness.outstandingHandles(), 0);
@@ -5424,7 +5586,7 @@ test("canonical SDK facade runs installed generic query and mutation nesting ove
   const previousConvex = globalThis.Convex;
   try {
     const queryHarness = nativeCapabilityHarness();
-    globalThis.Convex = queryHarness.sdkFacade;
+    globalThis.Convex = queryHarness.legacySdkFacade;
     queryHarness.activateSdk("query");
     const queryArgs = {
       bytes: Uint8Array.from([1, 2, 3]).buffer,
@@ -5457,7 +5619,7 @@ test("canonical SDK facade runs installed generic query and mutation nesting ove
     assert.equal(queryHarness.cleanup(), 0);
 
     const mutationHarness = nativeCapabilityHarness();
-    globalThis.Convex = mutationHarness.sdkFacade;
+    globalThis.Convex = mutationHarness.legacySdkFacade;
     mutationHarness.activateSdk("mutation");
     const nestedMutationReference = {
       [Symbol.for("toReferencePath")]: "_reference/function/tasks:write",
@@ -5766,7 +5928,7 @@ test("canonical SDK facade runs the installed storage family over ABI v4", async
   const previousConvex = globalThis.Convex;
   try {
     const queryHarness = nativeCapabilityHarness();
-    globalThis.Convex = queryHarness.sdkFacade;
+    globalThis.Convex = queryHarness.legacySdkFacade;
     queryHarness.activateSdk("query");
     const reader = setupStorageReader("");
 
@@ -5811,7 +5973,7 @@ test("canonical SDK facade runs the installed storage family over ABI v4", async
     assert.equal(queryHarness.cleanup(), 0);
 
     const mutationHarness = nativeCapabilityHarness();
-    globalThis.Convex = mutationHarness.sdkFacade;
+    globalThis.Convex = mutationHarness.legacySdkFacade;
     mutationHarness.activateSdk("mutation");
     const writer = setupStorageWriter("");
 
@@ -6044,6 +6206,19 @@ test("SDK write and nested-call values cross the request envelope without guest 
   assert.equal(query.guestEncodes.length, 0);
   query.settle(query.lastStartedOperationHandle(), 0, query.allocate({ count: -3n }));
   assert.equal(await nested, JSON.stringify(convexToJson({ count: -3n })));
+  const typed = query.rawSdkFacade.asyncSyscallValueArgs(
+    "1.0/runUdf",
+    query.guestValue('({ args: { count: 1 }, name: "tasks:read", udfType: "query" })')
+  );
+  const start = query.directRunUdfStarts.shift();
+  assert.equal(start.typeCode, 1);
+  assert.equal(start.addressKind, 1);
+  assert.equal(start.address, "tasks:read");
+  assert.equal(start.args.count, 1);
+  assert.equal(start.transactionLimits, null);
+  assert.equal(query.requests.length, 0);
+  query.settle(query.lastStartedOperationHandle(), 0, query.allocate({ count: 1 }));
+  assert.deepEqual(JSON.parse(JSON.stringify(await typed)), { count: 1 });
   assert.equal(query.cleanup(), 0);
 });
 
@@ -6061,7 +6236,7 @@ test("canonical SDK facade runs installed authentication and direct database rea
   ]);
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   try {
     harness.activateSdk("query");
 
@@ -6137,7 +6312,7 @@ test("SDK mutation read-back retains the pending commit timestamp singleton for 
   );
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   try {
     harness.activateSdk("mutation");
     const writer = setupWriter();
@@ -6172,7 +6347,7 @@ test("canonical SDK facade runs installed metadata readers over their closed ABI
   const previousConvex = globalThis.Convex;
   try {
     const queryHarness = nativeCapabilityHarness();
-    globalThis.Convex = queryHarness.sdkFacade;
+    globalThis.Convex = queryHarness.legacySdkFacade;
     queryHarness.activateSdk("query");
     const queryMeta = setupQueryMeta("public");
 
@@ -6245,7 +6420,7 @@ test("canonical SDK facade runs installed metadata readers over their closed ABI
     assert.equal(queryHarness.cleanup(), 0);
 
     const mutationHarness = nativeCapabilityHarness();
-    globalThis.Convex = mutationHarness.sdkFacade;
+    globalThis.Convex = mutationHarness.legacySdkFacade;
     mutationHarness.activateSdk("mutation");
     const mutationMeta = setupMutationMeta("internal");
 
@@ -6456,13 +6631,79 @@ test("metadata and audit facade validation rejects malformed or unauthorized cal
   assert.equal(harness.cleanup(), 0);
 });
 
+test("value-argument metadata calls use one scalar capability start", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("query");
+  const result = harness.sdkFacade.asyncSyscallValueArgs("1.0/getFunctionMetadata", {});
+  assert.deepEqual(harness.scalarStarts, [2]);
+  assert.deepEqual(harness.requestCapabilityIdentities, [1]);
+  assert.equal(harness.requests.length, 0);
+  assert.equal(harness.requestPayloads.length, 0);
+  assert.equal(harness.outstandingHandles(), 0);
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate({ path: "tasks:read" }));
+  assert.deepEqual(await result, { path: "tasks:read" });
+  assert.equal(harness.cleanup(), 0);
+});
+
+test("value-argument database gets use one native start without a JSON request", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("query");
+  const withTable = harness.sdkFacade.asyncSyscallValueArgs("1.0/get", {
+    id: "document-é",
+    isSystem: false,
+    table: "documents",
+    version: convexSdkVersion,
+  });
+  const withoutTable = harness.sdkFacade.asyncSyscallValueArgs("1.0/get", {
+    id: "storage-a",
+    isSystem: true,
+    version: convexSdkVersion,
+  });
+  assert.deepEqual(harness.directGetStarts, [
+    { id: "document-é", table: "documents", isSystem: 0 },
+    { id: "storage-a", table: null, isSystem: 1 },
+  ]);
+  assert.equal(harness.requests.length, 0);
+  assert.equal(harness.requestPayloads.length, 0);
+  harness.settle(1, 0, harness.allocate({ _id: "document-é" }));
+  harness.settle(2, 0, harness.allocate(null));
+  assert.deepEqual(await withTable, { _id: "document-é" });
+  assert.equal(await withoutTable, null);
+  assert.equal(harness.cleanup(), 0);
+});
+
+test("value-argument storage and cancellation use native string starts", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("mutation");
+  const calls = [
+    ["1.0/storageGetUrl", { requestId: "", storageId: "url-id", version: convexSdkVersion }, 1, "url-id"],
+    ["1.0/storageGetMetadata", { requestId: "", storageId: "metadata-id", version: convexSdkVersion }, 2, "metadata-id"],
+    ["1.0/storageDelete", { requestId: "", storageId: "delete-id", version: convexSdkVersion }, 3, "delete-id"],
+    ["1.0/cancel_job", { id: "job-id" }, 4, "job-id"],
+  ];
+  for (const [operation, args, operationCode, value] of calls) {
+    const result = harness.sdkFacade.asyncSyscallValueArgs(operation, args);
+    assert.deepEqual(harness.directStringStarts.shift(), { operationCode, value });
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.requestPayloads.length, 0);
+    const payload = operationCode === 1 ? harness.allocate("https://storage.example/read") :
+      operationCode === 2 ? harness.allocate({ storageId: value }) : 0;
+    harness.settle(harness.lastStartedOperationHandle(), 0, payload);
+    if (operationCode === 1) assert.equal(await result, "https://storage.example/read");
+    else if (operationCode === 2) assert.deepEqual(await result, { storageId: value });
+    else assert.equal(await result, undefined);
+  }
+  assert.equal(harness.outstandingHandles(), 0);
+  assert.equal(harness.cleanup(), 0);
+});
+
 test("canonical SDK facade runs installed direct database writers over ABI v4", async () => {
   const { setupWriter } = await import(
     new URL("../../node_modules/convex/dist/esm/server/impl/database_impl.js", import.meta.url)
   );
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   try {
     harness.activateSdk("mutation");
     const writer = setupWriter();
@@ -6530,14 +6771,14 @@ test("canonical SDK facade runs installed direct database writers over ABI v4", 
   }
 });
 
-test("canonical SDK facade runs table-less database reads and keeps table-less writes incomplete", async () => {
+test("canonical SDK facade runs table-less reads and legacy writes", async () => {
   const { setupReader, setupWriter } = await import(
     new URL("../../node_modules/convex/dist/esm/server/impl/database_impl.js", import.meta.url)
   );
   const previousConvex = globalThis.Convex;
   try {
     const queryHarness = nativeCapabilityHarness();
-    globalThis.Convex = queryHarness.sdkFacade;
+    globalThis.Convex = queryHarness.legacySdkFacade;
     queryHarness.activateSdk("query");
     const reader = setupReader();
     const documentPromise = reader.get("document-a");
@@ -6579,14 +6820,38 @@ test("canonical SDK facade runs table-less database reads and keeps table-less w
     assert.equal(queryHarness.cleanup(), 0);
 
     const mutationHarness = nativeCapabilityHarness();
-    globalThis.Convex = mutationHarness.sdkFacade;
+    globalThis.Convex = mutationHarness.legacySdkFacade;
     mutationHarness.activateSdk("mutation");
     const writer = setupWriter();
-    await assert.rejects(writer.patch("document-a", { enabled: true }), /invalid fields/u);
-    await assert.rejects(writer.replace("document-a", { enabled: true }), /invalid fields/u);
-    await assert.rejects(writer.delete("document-a"), /invalid fields/u);
+    const patched = writer.patch("document-a", { enabled: true });
+    assert.deepEqual(mutationHarness.requests.shift(), {
+      version: convexWasmCapabilityRequestAbiVersion,
+      kind: "dbPatch",
+      id: "document-a",
+      patch: { enabled: true },
+    });
+    mutationHarness.settle(mutationHarness.lastStartedOperationHandle(), 0, 0);
+    assert.equal(await patched, undefined);
+    const replaced = writer.replace("document-a", { enabled: true });
+    assert.deepEqual(mutationHarness.requests.shift(), {
+      version: convexWasmCapabilityRequestAbiVersion,
+      kind: "dbReplace",
+      id: "document-a",
+      value: { enabled: true },
+    });
+    mutationHarness.settle(mutationHarness.lastStartedOperationHandle(), 0, 0);
+    assert.equal(await replaced, undefined);
+    const deleted = writer.delete("document-a");
+    assert.deepEqual(mutationHarness.requests.shift(), {
+      version: convexWasmCapabilityRequestAbiVersion,
+      kind: "dbDelete",
+      id: "document-a",
+    });
+    mutationHarness.settle(mutationHarness.lastStartedOperationHandle(), 0, 0);
+    assert.equal(await deleted, undefined);
     assert.equal(mutationHarness.requests.length, 0);
-    assert.equal(mutationHarness.requestPayloads.length, 0);
+    assert.equal(mutationHarness.requestPayloads.length, 3);
+    assert.equal(mutationHarness.directWriteStarts.length, 0);
     assert.equal(mutationHarness.outstandingHandles(), 0);
     assert.equal(mutationHarness.cleanup(), 0);
   } finally {
@@ -6595,13 +6860,33 @@ test("canonical SDK facade runs table-less database reads and keeps table-less w
   }
 });
 
+test("value-argument SDK writes retain an omitted table on the typed import", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("mutation");
+  const patched = harness.sdkFacade.asyncSyscallValueArgs("1.0/shallowMerge", {
+    id: "document-a",
+    value: { enabled: true },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.directWriteStarts.shift())), {
+    kind: 2,
+    table: null,
+    id: "document-a",
+    value: { enabled: true },
+  });
+  harness.settle(harness.lastStartedOperationHandle(), 0, 0);
+  assert.equal(await patched, undefined);
+  assert.equal(harness.requests.length, 0);
+  assert.equal(harness.outstandingHandles(), 0);
+  assert.equal(harness.cleanup(), 0);
+});
+
 test("canonical SDK facade maps installed query and count envelopes onto generic ABI v4 requests", async () => {
   const { setupReader } = await import(
     new URL("../../node_modules/convex/dist/esm/server/impl/database_impl.js", import.meta.url)
   );
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   try {
     harness.activateSdk("query");
     const reader = setupReader();
@@ -6869,6 +7154,77 @@ test("canonical SDK query facade rejects open-field and lifecycle violations bef
   assert.equal(harness.cleanup(), 0);
 });
 
+test("typed SDK query stream uses captured operands and the direct query start", () => {
+  const harness = nativeCapabilityHarness({ typedQueryArgs: true });
+  harness.activateSdk("query");
+  const queryId = harness.guestValue(`
+    (() => {
+      const argument = {number: 42};
+      const value = Convex.captureQueryValue(argument);
+      argument.number = 7;
+      const query = {
+        source: {
+          type: "IndexRange",
+          indexName: "documents.by_number",
+          order: null,
+          range: [{type: "Eq", fieldPath: "number", value}],
+        },
+        operators: [{filter: {$eq: [{$field: "number"}, {$literal: value}]}}],
+      };
+      return JSON.parse(Convex.syscallObjectArgs("1.0/queryStream", {
+        query,
+        version: ${JSON.stringify(convexSdkVersion)},
+      })).queryId;
+    })()
+  `);
+  assert.equal(queryId, 1);
+  assert.deepEqual(harness.capturedQueryValues[0].value, { number: 42 });
+  assert.equal(harness.requests.length, 1);
+  const request = harness.requests[0];
+  assert.equal(request.terminal, "stream");
+  assert.equal(request.query.source.type, "IndexRange");
+  assert.equal(request.query.source.range[0].value, harness.capturedQueryValues[0].buffer);
+  assert.equal(
+    request.query.operators[0].filter.$eq[1].$literal,
+    harness.capturedQueryValues[0].buffer
+  );
+  harness.guestValue('Convex.syscallObjectArgs("1.0/queryCleanup", {queryId: 1})');
+  assert.deepEqual(harness.closedQueryStreams, [1]);
+});
+
+test("installed SDK collection preserves a captured query value through the direct start", async () => {
+  const { setupReader } = await import(
+    new URL("../../node_modules/convex/dist/esm/server/impl/database_impl.js", import.meta.url)
+  );
+  const harness = nativeCapabilityHarness({ typedQueryArgs: true });
+  const previousConvex = globalThis.Convex;
+  globalThis.Convex = harness.sdkFacade;
+  try {
+    harness.activateSdk("query");
+    const argument = { number: 42 };
+    const collected = setupReader()
+      .query("documents")
+      .withIndex("by_number", (range) => range.eq("number", argument))
+      .collect();
+    argument.number = 7;
+
+    assert.deepEqual(harness.capturedQueryValues[0].value, { number: 42 });
+    assert.equal(harness.requests.length, 1);
+    const request = harness.requests.shift();
+    assert.equal(request.terminal, "collect");
+    assert.equal(request.query.source.type, "IndexRange");
+    assert.equal(request.query.source.range[0].value, harness.capturedQueryValues[0].buffer);
+    assert.equal(harness.requestPayloads.length, 0);
+
+    harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate([{ _id: "one" }]));
+    assert.deepEqual(await collected, [{ _id: "one" }]);
+    assert.equal(harness.outstandingHandles(), 0);
+    assert.equal(harness.cleanup(), 0);
+  } finally {
+    globalThis.Convex = previousConvex;
+  }
+});
+
 test("canonical SDK facade rejects malformed, wrong-kind, and unleased database calls before effects", () => {
   const harness = nativeCapabilityHarness();
   const facade = harness.sdkFacade;
@@ -6997,7 +7353,7 @@ test("canonical SDK facade runs the installed mutation scheduler over ABI v4", a
   const harness = nativeCapabilityHarness();
   const previousConvex = globalThis.Convex;
   const previousDateNow = Date.now;
-  globalThis.Convex = harness.sdkFacade;
+  globalThis.Convex = harness.legacySdkFacade;
   Date.now = () => 1_700_000_000_250;
   try {
     harness.activateSdk("mutation");
@@ -7071,6 +7427,28 @@ test("canonical SDK facade runs the installed mutation scheduler over ABI v4", a
     if (previousConvex === undefined) delete globalThis.Convex;
     else globalThis.Convex = previousConvex;
   }
+});
+
+test("SDK value-argument scheduling starts a typed host operation", async () => {
+  const harness = nativeCapabilityHarness();
+  harness.activateSdk("mutation");
+  const scheduled = harness.sdkFacade.asyncSyscallValueArgs("1.0/schedule", {
+    name: "tasks:run",
+    ts: 1_710_000_000.125,
+    args: { sequence: 4 },
+    version: convexSdkVersion,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.directScheduleStarts.shift())), {
+    kind: 2,
+    timeMilliseconds: 1_710_000_000_125,
+    addressKind: 1,
+    address: "tasks:run",
+    args: { sequence: 4 },
+  });
+  assert.equal(harness.requests.length, 0);
+  assert.equal(harness.requestPayloads.length, 0);
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("scheduled-id"));
+  assert.equal(await scheduled, "scheduled-id");
 });
 
 test("canonical SDK facade rejects malformed, wrong-kind, and unleased scheduler calls before effects", () => {
@@ -7203,10 +7581,9 @@ test("storage request validation and reuse cleanup retain no guest handles", asy
   }
 
   void firstContext.storage.getUrl("abandoned-storage-id");
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGetUrl",
-    storageId: "abandoned-storage-id",
-    version: convexWasmCapabilityRequestAbiVersion,
+  assert.deepEqual(harness.directStringStarts.shift(), {
+    operationCode: 1,
+    value: "abandoned-storage-id",
   });
   assert.equal(harness.cleanup(), 1);
   assert.equal(harness.outstandingHandles(), 0);
@@ -7214,10 +7591,7 @@ test("storage request validation and reuse cleanup retain no guest handles", asy
   harness.restartOperationHandles();
   const reusedContext = harness.createContext("mutation", undefined, 97);
   const freshUpload = reusedContext.storage.generateUploadUrl();
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "storageGenerateUploadUrl",
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
+  assert.equal(harness.scalarStarts.shift(), 6);
   harness.settle(
     harness.lastStartedOperationHandle(),
     0,
@@ -7230,7 +7604,7 @@ test("storage request validation and reuse cleanup retain no guest handles", asy
   assert.equal(harness.outstandingHandles(), 0);
 });
 
-test("native capability request envelopes isolate patch and query syntax from committed values", async () => {
+test("native capability patch uses the typed import while query syntax stays in its request envelope", async () => {
   const harness = nativeCapabilityHarness();
   const context = harness.createContext("mutation");
 
@@ -7241,20 +7615,14 @@ test("native capability request envelopes isolate patch and query syntax from co
       nested: { kept: 3, removed: undefined },
     })
   );
-  assert.deepEqual(harness.requests.shift(), {
-    id: "document-id",
-    kind: "dbPatch",
-    patch: {
-      nested: { kept: 3 },
-      removed: { $undefined: null },
-    },
-    table: "documents",
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
-  assert.equal(
-    harness.requestPayloads.shift(),
-    '{"id":"document-id","kind":"dbPatch","patch":{"nested":{"kept":3},"removed":{"$undefined":null}},"table":"documents","version":4}'
-  );
+  const patchStart = harness.directWriteStarts.shift();
+  assert.equal(patchStart.kind, 2);
+  assert.equal(patchStart.table, "documents");
+  assert.equal(patchStart.id, "document-id");
+  assert.deepEqual(JSON.parse(JSON.stringify(patchStart.value.nested)), { kept: 3 });
+  assert.equal(Object.hasOwn(patchStart.value, "removed"), true);
+  assert.equal(patchStart.value.removed, undefined);
+  assert.equal(harness.requestPayloads.length, 0);
   harness.settle(harness.lastStartedOperationHandle(), 0, 0);
   assert.equal(await patch, undefined);
 
@@ -7294,16 +7662,6 @@ test("native capability request envelopes isolate patch and query syntax from co
 
   const { encode: encodeCommittedValue } = guestNativeCodec();
   assert.throws(() => encodeCommittedValue({ $literal: "not-a-value" }, []), /reserved prefix/u);
-  assert.throws(() => context.db.insert("documents", { $eq: [1, 2] }), /reserved prefix/u);
-  assert.throws(
-    () =>
-      context.db.patch(
-        "documents",
-        "document-id",
-        harness.guestValue("({ nested })", { nested: { $undefined: null } })
-      ),
-    /reserved prefix/u
-  );
   assert.throws(
     () =>
       context.db
@@ -7317,7 +7675,7 @@ test("native capability request envelopes isolate patch and query syntax from co
   assert.equal(harness.outstandingHandles(), 0);
 });
 
-test("native capability v4 exposes and encodes the pending commit timestamp by identity", async () => {
+test("native capability preserves the pending commit timestamp identity in typed writes", async () => {
   const sdkCommitTsPlaceholder = jsonToConvex({ $commitTs: null });
   const codec = guestNativeCodec(sdkCommitTsPlaceholder);
   assert.equal(codec.commitTs, sdkCommitTsPlaceholder);
@@ -7348,15 +7706,11 @@ test("native capability v4 exposes and encodes the pending commit timestamp by i
     commitTs,
     nested: [{ commitTs }],
   });
-  assert.deepEqual(harness.requests.shift(), {
-    kind: "dbInsert",
-    table: "documents",
-    value: {
-      commitTs: { $commitTs: null },
-      nested: [{ commitTs: { $commitTs: null } }],
-    },
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
+  const insertStart = harness.directWriteStarts.shift();
+  assert.equal(insertStart.kind, 1);
+  assert.equal(insertStart.table, "documents");
+  assert.equal(insertStart.value.commitTs, commitTs);
+  assert.equal(insertStart.value.nested[0].commitTs, commitTs);
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("document-id"));
   assert.equal(await insert, "document-id");
 
@@ -7385,15 +7739,10 @@ test("native capability v4 exposes and encodes the pending commit timestamp by i
     "document-id",
     harness.guestValue("({ commitTs })", { commitTs })
   );
-  assert.deepEqual(harness.requests.shift(), {
-    id: "document-id",
-    kind: "dbPatch",
-    patch: {
-      commitTs: { $commitTs: null },
-    },
-    table: "documents",
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
+  const patchStart = harness.directWriteStarts.shift();
+  assert.equal(patchStart.kind, 2);
+  assert.equal(patchStart.id, "document-id");
+  assert.equal(patchStart.value.commitTs, commitTs);
   harness.settle(harness.lastStartedOperationHandle(), 0, 0);
   assert.equal(await patch, undefined);
 
@@ -7401,31 +7750,26 @@ test("native capability v4 exposes and encodes the pending commit timestamp by i
     commitTs,
     nested: [{ commitTs }],
   });
-  assert.deepEqual(harness.requests.shift(), {
-    id: "document-id",
-    kind: "dbReplace",
-    table: "documents",
-    value: {
-      commitTs: { $commitTs: null },
-      nested: [{ commitTs: { $commitTs: null } }],
-    },
-    version: convexWasmCapabilityRequestAbiVersion,
-  });
+  const replaceStart = harness.directWriteStarts.shift();
+  assert.equal(replaceStart.kind, 3);
+  assert.equal(replaceStart.id, "document-id");
+  assert.equal(replaceStart.value.commitTs, commitTs);
+  assert.equal(replaceStart.value.nested[0].commitTs, commitTs);
   harness.settle(harness.lastStartedOperationHandle(), 0, 0);
   assert.equal(await replacement, undefined);
   assert.equal(harness.outstandingHandles(), 0);
 });
 
-test("native capability v4 rejects pending commit timestamps in every committed-only request position", () => {
+test("native capability rejects pending commit timestamps in committed-only request positions", () => {
   const harness = nativeCapabilityHarness();
   const context = harness.createContext("mutation");
   const commitTs = context.db.vars.commitTs;
   const rejectedRequests = [
-    ["db-get-pending-id", () => context.db.get("documents", commitTs)],
-    ["db-system-get-pending-id", () => context.db.system.get("_storage", commitTs)],
-    ["db-patch-pending-id", () => context.db.patch("documents", commitTs, { status: "ready" })],
-    ["db-replace-pending-id", () => context.db.replace("documents", commitTs, { status: "ready" })],
-    ["db-delete-pending-id", () => context.db.delete("documents", commitTs)],
+    ["db-get-pending-id", () => context.db.get("documents", commitTs), /Pending commit timestamp is not allowed in this capability request position/u],
+    ["db-system-get-pending-id", () => context.db.system.get("_storage", commitTs), /Pending commit timestamp is not allowed in this capability request position/u],
+    ["db-patch-pending-id", () => context.db.patch("documents", commitTs, { status: "ready" }), /Typed write fields are invalid/u],
+    ["db-replace-pending-id", () => context.db.replace("documents", commitTs, { status: "ready" }), /Typed write fields are invalid/u],
+    ["db-delete-pending-id", () => context.db.delete("documents", commitTs), /Typed write fields are invalid/u],
     [
       "db-query-pending-filter-literal",
       () =>
@@ -7433,31 +7777,30 @@ test("native capability v4 rejects pending commit timestamps in every committed-
           .query("documents")
           .filter((q) => q.eq(q.field("commitTs"), commitTs))
           .collect(),
+      /Pending commit timestamp is not allowed in this capability request position/u,
     ],
     [
       "scheduler-run-after-pending-args",
       () => context.scheduler.runAfter(125, "tasks:run", { nested: [{ commitTs }] }),
+      /Pending commit timestamp is not allowed in scheduled arguments/u,
     ],
     [
       "scheduler-run-at-pending-args",
       () => context.scheduler.runAt(1_710_000_000_000, "tasks:run", { nested: [{ commitTs }] }),
+      /Pending commit timestamp is not allowed in scheduled arguments/u,
     ],
-    ["scheduler-cancel-pending-id", () => context.scheduler.cancel(commitTs)],
+    ["scheduler-cancel-pending-id", () => context.scheduler.cancel(commitTs), /Pending commit timestamp is not allowed in this capability request position/u],
   ];
 
-  for (const [name, request] of rejectedRequests) {
-    assert.throws(
-      request,
-      /Pending commit timestamp is not allowed in this capability request position/u,
-      name
-    );
+  for (const [name, request, expectedError] of rejectedRequests) {
+    assert.throws(request, expectedError, name);
     assert.equal(harness.requests.length, 0, name);
     assert.equal(harness.requestPayloads.length, 0, name);
     assert.equal(harness.outstandingHandles(), 0, name);
   }
 });
 
-test("native capability v4 emits generic nested mutation requests with pending arguments", async () => {
+test("native capability starts typed nested mutations with pending arguments", async () => {
   const harness = nativeCapabilityHarness();
   const context = harness.createContext("mutation");
   const commitTs = context.db.vars.commitTs;
@@ -7470,17 +7813,17 @@ test("native capability v4 emits generic nested mutation requests with pending a
     { transactionLimits: { documentsWritten: 2, bytesWritten: 4096 } }
   );
 
-  assert.deepEqual(harness.requests.shift(), {
-    args: {
-      payload: "queued",
-      updatedAt: { $commitTs: null },
-    },
-    functionAddress: { reference: "tasks:enqueueWithTimestamp" },
-    kind: "runUdf",
-    transactionLimits: { bytesWritten: 4096, documentsWritten: 2 },
-    udfType: "mutation",
-    version: convexWasmCapabilityRequestAbiVersion,
+  const start = harness.directRunUdfStarts.shift();
+  assert.equal(start.typeCode, 2);
+  assert.equal(start.addressKind, 2);
+  assert.equal(start.address, "tasks:enqueueWithTimestamp");
+  assert.equal(start.args.payload, "queued");
+  assert.equal(start.args.updatedAt, commitTs);
+  assert.deepEqual(JSON.parse(JSON.stringify(start.transactionLimits)), {
+    bytesWritten: 4096,
+    documentsWritten: 2,
   });
+  assert.equal(harness.requests.length, 0);
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(commitTs));
   assert.equal(await result, commitTs);
   assert.equal(harness.outstandingHandles(), 0);
@@ -7493,7 +7836,7 @@ test("native capability v4 emits generic nested mutation requests with pending a
   );
 });
 
-test("native capability v4 emits canonical nested query requests for query and mutation callers", async () => {
+test("native capability starts typed nested queries for query and mutation callers", async () => {
   const harness = nativeCapabilityHarness();
   const queryContext = harness.createContext("query");
   const mutationContext = harness.createContext("mutation");
@@ -7503,18 +7846,15 @@ test("native capability v4 emits canonical nested query requests for query and m
     {},
     { transactionLimits: { documentsRead: 2, bytesRead: 1024 } }
   );
-  assert.deepEqual(harness.requests.shift(), {
-    args: {},
-    functionAddress: { name: "tasks:read" },
-    kind: "runUdf",
-    transactionLimits: { bytesRead: 1024, documentsRead: 2 },
-    udfType: "query",
-    version: convexWasmCapabilityRequestAbiVersion,
+  const queryStart = harness.directRunUdfStarts.shift();
+  assert.equal(queryStart.typeCode, 1);
+  assert.equal(queryStart.addressKind, 1);
+  assert.equal(queryStart.address, "tasks:read");
+  assert.deepEqual(JSON.parse(JSON.stringify(queryStart.args)), {});
+  assert.deepEqual(JSON.parse(JSON.stringify(queryStart.transactionLimits)), {
+    bytesRead: 1024,
+    documentsRead: 2,
   });
-  assert.equal(
-    harness.requestPayloads.shift(),
-    '{"args":{},"functionAddress":{"name":"tasks:read"},"kind":"runUdf","transactionLimits":{"bytesRead":1024,"documentsRead":2},"udfType":"query","version":4}'
-  );
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate({ status: "ready" }));
   assert.deepEqual(await queried, { status: "ready" });
 
@@ -7527,21 +7867,15 @@ test("native capability v4 emits canonical nested query requests for query and m
     { payload: "pending", updatedAt: commitTs },
     { transactionLimits: { databaseQueries: 1 } }
   );
-  assert.deepEqual(harness.requests.shift(), {
-    args: {
-      payload: "pending",
-      updatedAt: { $commitTs: null },
-    },
-    functionAddress: { reference: "tasks:readPending" },
-    kind: "runUdf",
-    transactionLimits: { databaseQueries: 1 },
-    udfType: "query",
-    version: convexWasmCapabilityRequestAbiVersion,
+  const pendingStart = harness.directRunUdfStarts.shift();
+  assert.equal(pendingStart.typeCode, 1);
+  assert.equal(pendingStart.addressKind, 2);
+  assert.equal(pendingStart.address, "tasks:readPending");
+  assert.equal(pendingStart.args.payload, "pending");
+  assert.equal(pendingStart.args.updatedAt, commitTs);
+  assert.deepEqual(JSON.parse(JSON.stringify(pendingStart.transactionLimits)), {
+    databaseQueries: 1,
   });
-  assert.equal(
-    harness.requestPayloads.shift(),
-    '{"args":{"payload":"pending","updatedAt":{"$commitTs":null}},"functionAddress":{"reference":"tasks:readPending"},"kind":"runUdf","transactionLimits":{"databaseQueries":1},"udfType":"query","version":4}'
-  );
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(commitTs));
   assert.equal(await pendingQuery, commitTs);
 
@@ -7553,18 +7887,14 @@ test("native capability v4 emits canonical nested query requests for query and m
       useStaleSnapshot: true,
     }
   );
-  assert.deepEqual(harness.requests.shift(), {
-    args: { updatedAt: { $commitTs: null } },
-    functionAddress: { functionHandle: "function://stale-query-handle" },
-    kind: "runUdf",
-    transactionLimits: { bytesRead: 2048 },
-    udfType: "snapshotQuery",
-    version: convexWasmCapabilityRequestAbiVersion,
+  const staleStart = harness.directRunUdfStarts.shift();
+  assert.equal(staleStart.typeCode, 3);
+  assert.equal(staleStart.addressKind, 3);
+  assert.equal(staleStart.address, "function://stale-query-handle");
+  assert.equal(staleStart.args.updatedAt, commitTs);
+  assert.deepEqual(JSON.parse(JSON.stringify(staleStart.transactionLimits)), {
+    bytesRead: 2048,
   });
-  assert.equal(
-    harness.requestPayloads.shift(),
-    '{"args":{"updatedAt":{"$commitTs":null}},"functionAddress":{"functionHandle":"function://stale-query-handle"},"kind":"runUdf","transactionLimits":{"bytesRead":2048},"udfType":"snapshotQuery","version":4}'
-  );
   harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate({ status: "stale" }));
   assert.deepEqual(await staleQuery, { status: "stale" });
 
@@ -7680,7 +8010,7 @@ test("native capability terminal Promise failures close and clean the invocation
   assert.deepEqual(harness.results, ["reused"]);
 });
 
-test("registered-wrapper invocation uses positional tagged JSON without double encoding", async () => {
+test("registered-wrapper invocation passes values through the official SDK boundary", async () => {
   const harness = nativeCapabilityHarness();
   const calls = [];
   const wrapper = function registeredQueryCannotBeCalledDirectly() {
@@ -7691,48 +8021,38 @@ test("registered-wrapper invocation uses positional tagged JSON without double e
   wrapper._handler = () => {
     throw new Error("raw handler was called");
   };
-  wrapper.invokeQuery = function invokeQuery(argsStr) {
-    calls.push({ argsStr, receiver: this });
-    return Promise.resolve(
-      JSON.stringify(
-        convexToJson({
-          bytes: new Uint8Array([1, 2, 3]).buffer,
-          count: 9n,
-          nested: [null, "result"],
-        })
-      )
-    );
+  wrapper.invokeQueryValue = function invokeQueryValue(args) {
+    calls.push({ args, receiver: this });
+    return Promise.resolve({
+      bytes: new Uint8Array([1, 2, 3]).buffer,
+      count: 9n,
+      nested: [null, "result"],
+    });
   };
 
   harness.activateSdk("query");
-  harness.invokeRegisteredWrapper(
-    wrapper,
-    JSON.stringify(convexToJson({ bytes: new Uint8Array([4, 5]).buffer, count: -7n }))
-  );
+  harness.invokeRegisteredWrapper(wrapper, {
+    bytes: new Uint8Array([4, 5]).buffer,
+    count: -7n,
+  });
   await drainCapabilityMicrotasks();
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].receiver, wrapper);
-  assert.deepEqual(JSON.parse(calls[0].argsStr), [
-    convexToJson({ bytes: new Uint8Array([4, 5]).buffer, count: -7n }),
-  ]);
+  assert.equal(calls[0].args.count, -7n);
+  assert.deepEqual([...new Uint8Array(calls[0].args.bytes)], [4, 5]);
   assert.equal(harness.done(), true);
   assert.equal(harness.status(), 0);
   assert.equal(harness.results.length, 1);
-  assert.equal(
-    harness.taggedResultSources[0],
-    JSON.stringify(
-      convexToJson({ bytes: new Uint8Array([1, 2, 3]).buffer, count: 9n, nested: [null, "result"] })
-    )
-  );
+  assert.equal(harness.taggedResultSources.length, 0);
   assert.equal(harness.results[0].count, 9n);
   assert.deepEqual([...new Uint8Array(harness.results[0].bytes)], [1, 2, 3]);
   assert.deepEqual(Array.from(harness.results[0].nested), [null, "result"]);
   assert.equal(harness.cleanup(), 0);
 
   harness.activateSdk("query");
-  wrapper.invokeQuery = () => ({ invalid: true });
-  harness.invokeRegisteredWrapper(wrapper, "{}");
+  wrapper.invokeQueryValue = () => Promise.reject(new Error("invalid result"));
+  harness.invokeRegisteredWrapper(wrapper, {});
   await drainCapabilityMicrotasks();
   assert.equal(harness.done(), true);
   assert.equal(harness.status(), 1);
@@ -7752,10 +8072,7 @@ test("native capability getStatus clears operation slots when handles restart", 
     {}
   );
   await drainCapabilityMicrotasks();
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.requests.shift())), {
-    version: convexWasmCapabilityRequestAbiVersion,
-    kind: "authGetUserIdentity",
-  });
+  assert.equal(harness.scalarStarts.shift(), 1);
   assert.equal(harness.lastStartedOperationHandle(), 1);
   assert.equal(harness.done(), true);
   assert.equal(harness.status(), 0);
@@ -7780,10 +8097,7 @@ test("native capability getStatus clears operation slots when handles restart", 
       {}
     );
 
-    assert.deepEqual(JSON.parse(JSON.stringify(harness.requests.shift())), {
-      version: convexWasmCapabilityRequestAbiVersion,
-      kind: "authGetUserIdentity",
-    });
+    assert.equal(harness.scalarStarts.shift(), 1);
     harness.settle(
       harness.lastStartedOperationHandle(),
       0,
@@ -7796,11 +8110,10 @@ test("native capability getStatus clears operation slots when handles restart", 
       table: "selfHostedExecutionProbeStates",
       value: "singleton",
     });
-    assert.deepEqual(JSON.parse(JSON.stringify(harness.requests.shift())), {
-      version: convexWasmCapabilityRequestAbiVersion,
-      kind: "dbGet",
+    assert.deepEqual(harness.directGetStarts.shift(), {
       table: "selfHostedExecutionProbeStates",
       id: "singleton",
+      isSystem: 0,
     });
     harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate({ sequence }));
     await drainCapabilityMicrotasks();
@@ -8190,7 +8503,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /constexpr size_t kGuestInitializationDiagnosticMaximumBytes = 640;\s*#if defined\(CONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS\)\s*constexpr size_t kGuestInitializationExceptionMessageMaximumBytes = 512;\s*constexpr size_t kGuestInitializationExceptionMessageMaximumCodeUnits = 128;\s*#endif/u
+    /constexpr size_t kGuestInitializationDiagnosticMaximumBytes = 640;[\s\S]*?#if defined\(CONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS\)\s*constexpr size_t kGuestInitializationExceptionMessageMaximumBytes = 512;\s*constexpr size_t kGuestInitializationExceptionMessageMaximumCodeUnits = 128;\s*#endif/u
   );
   assert.match(
     initializationDiagnostic,
@@ -8269,7 +8582,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /bridge_bootstrap->call\(js, install\);[\s\S]*?if \(guest_bridge == nullptr\)[\s\S]*?bridge_bootstrap\.reset\(\);/u
+    /bridge_bootstrap->call\(js, install, take_typed_value, set_typed_result,\s*start_typed_get, start_typed_string, start_typed_write,\s*start_typed_run_udf, start_typed_schedule,\s*start_typed_query, capture_query_value\);[\s\S]*?if \(guest_bridge == nullptr\)[\s\S]*?bridge_bootstrap\.reset\(\);/u
   );
   assert.match(
     source,
@@ -8280,7 +8593,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   assert.match(source, /convex_capability_sync_take/u);
   assert.match(
     source,
-    /Value context_arguments\[\] = \{[\s\S]*?Value\(js, commit_ts_placeholder\),\s*\};[\s\S]*?size_t\{4\}/u
+    /Value context_arguments\[\] = \{[\s\S]*?Value\(js, commit_ts_placeholder\),\s*std::move\(start_typed_get\),\s*std::move\(start_scalar\),\s*std::move\(start_typed_string\),\s*std::move\(start_typed_write\),\s*std::move\(start_typed_run_udf\),\s*std::move\(start_typed_schedule\),\s*\};[\s\S]*?size_t\{10\}/u
   );
   assert.match(
     source,
@@ -8390,7 +8703,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /if \(runtime == nullptr\) \{\s*if \(!retained_runtime_state_is_empty\(\)\) \{\s*reset_runtime_state\(\);\s*return 9;\s*\}\s*runtime = initialize_runtime\(\);/u
+    /if \(runtime == nullptr\) \{\s*if \(convex_typed_value_abi_v1\(\) != 1\) \{\s*convex_wasm_clear_selected_entry\(\);\s*return 8;\s*\}\s*if \(!retained_runtime_state_is_empty\(\)\) \{\s*reset_runtime_state\(\);\s*return 9;\s*\}\s*runtime = initialize_runtime\(\);/u
   );
   assert.match(
     source,
@@ -8402,11 +8715,16 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   const guestBridge = source.match(/struct GuestBridge \{([\s\S]*?)\n\};/u);
   assert.ok(guestBridge);
-  assert.equal(guestBridge[1].match(/std::shared_ptr<Function>/gu)?.length, 10);
+  assert.equal(guestBridge[1].match(/std::shared_ptr<Function>/gu)?.length, 16);
   assert.match(guestBridge[1], /std::shared_ptr<Function> activate_sdk;/u);
+  assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_string;/u);
+  assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_write;/u);
+  assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_run_udf;/u);
+  assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_query;/u);
+  assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_schedule;/u);
   assert.match(
     source,
-    /invocation_abi == kSelectedInvocationAbiOfficialWrapper\s*\? guest_bridge->read_tagged_request->call\(js\)\s*: guest_bridge->read_request->call\(js\)/u
+    /auto request = guest_bridge->read_request->call\(js\);[\s\S]*?if \(invocation_abi == kSelectedInvocationAbiOfficialWrapper\)/u
   );
   assert.doesNotMatch(guestBridge[1], /entry_selector|handler/u);
   assert.doesNotMatch(source, /guest_bridge->entry_selector/u);
