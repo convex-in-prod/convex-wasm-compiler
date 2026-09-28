@@ -11369,7 +11369,7 @@ async function mapWithScheduler(values, scheduler, callback) {
   return results;
 }
 
-function convexWasmModuleGraphProductionHostAbi() {
+export function convexWasmModuleGraphProductionHostAbi() {
   const imports = MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS.map(
     ([module, name, parameters, results]) => {
       const canonical = `func(${parameters.join(",")})->(${results.join(",")})`;

@@ -278,6 +278,15 @@ async function buildRunner(gateRoot, jobs) {
   }
 }
 
+async function buildTargetsPending(buildRoot, targets) {
+  const output = await run("ninja", ["-C", buildRoot, "-n", ...targets], {
+    cwd: buildRoot,
+    timeoutMs: 30_000,
+    capture: true,
+  });
+  return !output.endsWith("ninja: no work to do.");
+}
+
 async function checkGate(root) {
   for (const name of Object.keys(sources)) {
     const actual = await run("git", ["-C", join(root, name), "rev-parse", "HEAD"], {
@@ -330,12 +339,13 @@ async function checkGate(root) {
   ) {
     throw new Error("Wasm Hermes archive was built with host Unicode imports");
   }
-  const version = await run(join(root, "emsdk", "upstream", "emscripten", "emcc"), ["--version"], {
+  const emsdk = await fs.realpath(join(root, "emsdk"));
+  const version = await run(join(emsdk, "upstream", "emscripten", "emcc"), ["--version"], {
     cwd: root,
     env: {
       ...process.env,
-      EM_CONFIG: join(root, "emsdk", ".emscripten"),
-      EMSDK: join(root, "emsdk"),
+      EM_CONFIG: join(emsdk, ".emscripten"),
+      EMSDK: emsdk,
     },
     timeoutMs: 30_000,
     capture: true,
@@ -347,6 +357,20 @@ async function checkGate(root) {
   if (runner !== "verified") {
     throw new Error(`Wasmtime runner is ${runner}; rerun convex-wasm-setup-gate without --check-only`);
   }
+  for (const [name, buildRoot, targets] of [
+    [
+      "host",
+      join(root, "build-host"),
+      ["shermes", "hermesc", "hermesvm_a", "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi"],
+    ],
+    ["wasm", join(root, "build-wasm"), ["hermesvm_a", "jsi"]],
+  ]) {
+    if (await buildTargetsPending(buildRoot, targets)) {
+      throw new Error(
+        `Static Hermes ${name} build is stale; rerun convex-wasm-setup-gate without --check-only`
+      );
+    }
+  }
 }
 
 export async function setupGate({ gateRoot, jobs, checkOnly }) {
@@ -357,7 +381,9 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   await fs.mkdir(gateRoot, { recursive: true });
   for (const name of Object.keys(sources)) await checkout(gateRoot, name);
 
-  const emsdk = join(gateRoot, "emsdk");
+  // Emscripten includes its configured LLVM path in the sysroot cache identity.
+  // A gate symlink must not make setup and application compilation clear it in turn.
+  const emsdk = await fs.realpath(join(gateRoot, "emsdk"));
   const emcc = join(emsdk, "upstream", "emscripten", "emcc");
   let installEmscripten = false;
   try {
@@ -425,6 +451,16 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       })
     )
   );
+  const wasmBuildEnv = {
+    ...process.env,
+    EM_CONFIG: join(emsdk, ".emscripten"),
+    EMSDK: emsdk,
+    PATH: [
+      join(emsdk, "upstream", "emscripten"),
+      join(emsdk, "upstream", "bin"),
+      process.env.PATH,
+    ].join(":"),
+  };
   const wasmNeedsConfiguration = wasmBuildOutputStates.some((state) => state === null) ||
     !(await cmakeCacheHas(
       join(wasm, "CMakeCache.txt"),
@@ -455,12 +491,6 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       throw error;
     })) !== staticHermesWasmExceptionFlags;
   if (wasmNeedsConfiguration) {
-    const env = {
-      ...process.env,
-      EM_CONFIG: join(emsdk, ".emscripten"),
-      EMSDK: emsdk,
-      PATH: [join(emsdk, "upstream", "emscripten"), join(emsdk, "upstream", "bin"), process.env.PATH].join(":"),
-    };
     await run(join(emsdk, "upstream", "emscripten", "emcmake"), [
       "cmake", "-S", hermes, "-B", wasm, "-G", "Ninja",
       "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=OFF",
@@ -471,12 +501,17 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       `-DCMAKE_CXX_FLAGS=${staticHermesWasmExceptionFlags}`,
       `-DIMPORT_HOST_COMPILERS=${hostCompilerImport}`,
       ...staticHermesRuntimeCmakeFlags,
-    ], { cwd: gateRoot, env, timeoutMs: 10 * 60 * 1000 });
+    ], { cwd: gateRoot, env: wasmBuildEnv, timeoutMs: 10 * 60 * 1000 });
+  }
+  // Emscripten can generate sysroot headers during the first build, making objects
+  // compiled earlier in that build stale. Finish the resulting incremental work.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     await run("cmake", ["--build", wasm, "--target", "hermesvm_a", "jsi", "--parallel", String(jobs)], {
       cwd: gateRoot,
-      env,
+      env: wasmBuildEnv,
       timeoutMs: buildTimeoutMs,
     });
+    if (!(await buildTargetsPending(wasm, ["hermesvm_a", "jsi"]))) break;
   }
   if ((await runnerStatus(gateRoot)) !== "verified") {
     await buildRunner(gateRoot, jobs);

@@ -507,6 +507,9 @@ async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
     precompilerPackageDirectory,
     wasmtimeRevision: packagedWasmtimeRevision,
   });
+  // Keep Emscripten's cache identity stable when the gate links to a shared SDK.
+  config.command.environment.EM_CONFIG = await fs.realpath(config.command.environment.EM_CONFIG);
+  config.command.environment.EMSDK = await fs.realpath(config.command.environment.EMSDK);
   await Promise.all([
     requireRegularFile(
       config.toolchain.staticHermes.executable,
