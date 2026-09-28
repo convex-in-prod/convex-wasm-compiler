@@ -3692,6 +3692,11 @@ function renderNativeCapabilityGuestValuePrelude() {
     "function __convexReadHostString(handle: number): string {",
     "function __convexReportThrown(error: any): void {"
   );
+  prelude = removeGeneratedSection(
+    prelude,
+    "const __convexHostGuestResult = $SHBuiltin.extern_c(",
+    "const __convexCommitTsUnresolved ="
+  );
   const jsonHostValue = `function __convexGuestFromHost(consumingValueHandle: number): any {
   return __convexGuestRestoreTagged(
     JSON.parse(__convexGuestTaggedJsonFromHost(consumingValueHandle)),
@@ -3725,6 +3730,22 @@ function renderNativeCapabilityGuestValuePrelude() {
     throw new Error("Native typed function-result encoder is unavailable");
   }
   __convexNativeSetTypedResult(value, __convexCommitTsPlaceholder);
+}`
+  );
+  const taggedJsonFunctionResult = `function __convexSetGuestFunctionTaggedJsonResult(source: string): void {
+  const pointer = __convexGuestTransferScratch(source.length * 3 + 1);
+  const length = __convexWriteUtf8(source, pointer);
+  __convexHostGuestResult(pointer, length);
+}`;
+  if (!prelude.includes(taggedJsonFunctionResult)) {
+    throw new Error("Native capability tagged function-result adapter is missing");
+  }
+  // Legacy SDK wrappers return tagged JSON, but this runtime has one binary
+  // result ABI. Retaining their JSON host import makes the linked guest invalid.
+  prelude = prelude.replace(
+    taggedJsonFunctionResult,
+    `function __convexSetGuestFunctionTaggedJsonResult(source: string): void {
+  __convexSetGuestFunctionResult(__convexGuestRestoreTagged(JSON.parse(source)));
 }`
   );
   return `${ARRAY_PUSH_HELPER}\n\n${prelude}`;

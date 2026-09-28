@@ -3552,6 +3552,44 @@ test("renders the generic native capability target without operation-ID authorit
   );
 });
 
+test("native results use one binary boundary for value and legacy SDK wrappers", () => {
+  const { bridgeJavascript } = renderNativeDbGetCapabilityTargetUnits({
+    argumentFields: [],
+    compileProfileJavascript: "var __convexWasmCompileProfile = {};",
+  });
+  assert.doesNotMatch(bridgeJavascript, /\bconvex_guest_value_result\b|\b__convexHostGuestResult\b/u);
+  const start = bridgeJavascript.indexOf("function __convexSetGuestFunctionResult(");
+  const taggedStart = bridgeJavascript.indexOf(
+    "function __convexSetGuestFunctionTaggedJsonResult(", start
+  );
+  const end = bridgeJavascript.indexOf("\n}", taggedStart) + 2;
+  assert.ok(start >= 0 && taggedStart > start && end > taggedStart);
+  const codec = guestNativeCodec();
+  const results = [];
+  const sandbox = {
+    __convexCommitTsPlaceholder: codec.commitTs,
+    __convexGuestRestoreTagged: codec.restore,
+    __convexNativeSetTypedResult(value, commitTs) {
+      assert.equal(commitTs, codec.commitTs);
+      results.push(value);
+    },
+  };
+  const javascript = ts.transpileModule(bridgeJavascript.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  runInNewContext(
+    `${javascript}\nglobalThis.writeValue = __convexSetGuestFunctionResult;\nglobalThis.writeTagged = __convexSetGuestFunctionTaggedJsonResult;`,
+    sandbox
+  );
+  const value = { count: -7n, bytes: new Uint8Array([1, 2, 3]).buffer, negativeZero: -0 };
+  sandbox.writeValue(value);
+  assert.equal(results[0], value);
+  sandbox.writeTagged(JSON.stringify(convexToJson(value)));
+  assert.deepEqual(convexToJson(results[1]), convexToJson(value));
+  assert.throws(() => sandbox.writeTagged("{"), /JSON/u);
+  assert.equal(results.length, 2);
+});
+
 test("official wrapper request reader preserves tagged JSON for the SDK to parse", () => {
   const { bridgeJavascript } = renderNativeDbGetCapabilityTargetUnits({
     argumentFields: [],
