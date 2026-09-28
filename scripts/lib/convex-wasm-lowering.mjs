@@ -4303,7 +4303,7 @@ function __convexSdkReleaseQueryStream(state: any, closeHost: boolean): void {
 }
 
 function __convexSdkOpenQueryStream(query: any): number {
-  const streamHandle = __convexSdkFacade.typedQueryArgs === true
+  const streamHandle: number = __convexSdkFacade.typedQueryArgs === true
     ? __convexNativeStartTypedQuery(query, "stream", null)
     : __convexCapabilityOpenQueryStream(__convexSdkQueryRequest(query, "stream", null));
   if (streamHandle === -1) throw new Error("Invocation capability is stale");
@@ -4831,14 +4831,12 @@ function __convexSdkAsyncSyscall(
     if (valueArgs) {
       return __convexCapabilityStartTypedWrite(2, table, args.id, args.value, "undefined", __convexNativeStartTypedWrite);
     }
+    const id = __convexGuestRestoreTagged(args.id);
+    const patch = __convexSdkRestorePatch(args.value);
     return __convexSdkStartAsync(
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "dbPatch",
-        ...(table === null ? {} : {table}),
-        id: __convexGuestRestoreTagged(args.id),
-        patch: __convexSdkRestorePatch(args.value),
-      },
+      table === null
+        ? {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbPatch", id, patch}
+        : {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbPatch", table, id, patch},
       "undefined",
     ).then((): any => "null");
   }
@@ -4857,14 +4855,12 @@ function __convexSdkAsyncSyscall(
     if (valueArgs) {
       return __convexCapabilityStartTypedWrite(3, table, args.id, args.value, "undefined", __convexNativeStartTypedWrite);
     }
+    const id = __convexGuestRestoreTagged(args.id);
+    const value = __convexCapabilityTaggedValue(args.value);
     return __convexSdkStartAsync(
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "dbReplace",
-        ...(table === null ? {} : {table}),
-        id: __convexGuestRestoreTagged(args.id),
-        value: __convexCapabilityTaggedValue(args.value),
-      },
+      table === null
+        ? {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbReplace", id, value}
+        : {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbReplace", table, id, value},
       "undefined",
     ).then((): any => "null");
   }
@@ -4881,13 +4877,11 @@ function __convexSdkAsyncSyscall(
     if (valueArgs) {
       return __convexCapabilityStartTypedWrite(4, table, args.id, null, "undefined", __convexNativeStartTypedWrite);
     }
+    const id = __convexGuestRestoreTagged(args.id);
     return __convexSdkStartAsync(
-      {
-        version: ${CAPABILITY_REQUEST_ABI_VERSION},
-        kind: "dbDelete",
-        ...(table === null ? {} : {table}),
-        id: __convexGuestRestoreTagged(args.id),
-      },
+      table === null
+        ? {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbDelete", id}
+        : {version: ${CAPABILITY_REQUEST_ABI_VERSION}, kind: "dbDelete", table, id},
       "undefined",
     ).then((): any => "null");
   }
@@ -6321,12 +6315,11 @@ function __convexCapabilityEncodeRequest(request: any): any {
     if (hasTable && typeof request.table !== "string") {
       throw new Error("Database table must be a string");
     }
-    return {
-      id: __convexCapabilityEncodeCommittedValue(request.id),
-      kind,
-      ...(hasTable ? {table: request.table} : {}),
-      version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    };
+    const id = __convexCapabilityEncodeCommittedValue(request.id);
+    if (hasTable) {
+      return {id, kind, table: request.table, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
+    }
+    return {id, kind, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
   }
   if (
     kind === "storageGetUrl" ||
@@ -6370,13 +6363,12 @@ function __convexCapabilityEncodeRequest(request: any): any {
     if (hasTable && typeof request.table !== "string") {
       throw new Error("Database table must be a string");
     }
-    return {
-      id: __convexCapabilityEncodeCommittedValue(request.id),
-      kind,
-      patch: __convexCapabilityEncodePatch(request.patch),
-      ...(hasTable ? {table: request.table} : {}),
-      version: ${CAPABILITY_REQUEST_ABI_VERSION},
-    };
+    const id = __convexCapabilityEncodeCommittedValue(request.id);
+    const patch = __convexCapabilityEncodePatch(request.patch);
+    if (hasTable) {
+      return {id, kind, patch, table: request.table, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
+    }
+    return {id, kind, patch, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
   }
   if (kind === "dbReplace") {
     const hasTable = requestKeys.indexOf("table") !== -1;
@@ -6388,10 +6380,15 @@ function __convexCapabilityEncodeRequest(request: any): any {
     if (hasTable && typeof request.table !== "string") {
       throw new Error("Database table must be a string");
     }
+    const id = __convexCapabilityEncodeCommittedValue(request.id);
+    if (hasTable) {
+      const table = request.table;
+      const value = __convexCapabilityEncodeTaggedOrGuest(request.value);
+      return {id, kind, table, value, version: ${CAPABILITY_REQUEST_ABI_VERSION}};
+    }
     return {
-      id: __convexCapabilityEncodeCommittedValue(request.id),
+      id,
       kind,
-      ...(hasTable ? {table: request.table} : {}),
       value: __convexCapabilityEncodeTaggedOrGuest(request.value),
       version: ${CAPABILITY_REQUEST_ABI_VERSION},
     };

@@ -186,6 +186,7 @@
     "scripts/lib/convex-wasm-static-hermes-c-bundle.mjs",
     "scripts/lib/convex-wasm-static-hermes-engine-globals.mjs",
     "scripts/lib/convex-wasm-static-hermes-global-probe-runtime-main.cpp",
+    "scripts/lib/convex-wasm-static-hermes-host-archives.mjs",
     "scripts/lib/convex-wasm-static-hermes-member-archive.mjs",
     "scripts/lib/convex-wasm-static-hermes-precompile-protocol.mjs",
     "scripts/lib/convex-wasm-static-hermes-stage.mjs",

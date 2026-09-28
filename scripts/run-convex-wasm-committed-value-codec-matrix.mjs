@@ -15,6 +15,7 @@ import {
   renderConvexWasmCommittedValueCodecMatrixLegacyIntegerRejector,
 } from "./lib/convex-wasm-committed-value-codec-matrix.mjs";
 import { renderOpaqueAbiHeader } from "./lib/convex-wasm-lowering.mjs";
+import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
 
 const kind = "convex-wasm-committed-value-codec-matrix-report-v1";
 const runnerExport = "convex_wasm_committed_value_codec_matrix_run";
@@ -175,32 +176,6 @@ async function requireFile(path, description) {
   }
 }
 
-async function hostBoostContextArchive(hostBuildPath) {
-  const boostRoot = resolve(hostBuildPath, "external/boost");
-  let versionDirectories;
-  try {
-    versionDirectories = await fs.readdir(boostRoot, { withFileTypes: true });
-  } catch (error) {
-    throw new Error("Static Hermes host build omitted Boost context", { cause: error });
-  }
-  const candidates = versionDirectories
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => resolve(boostRoot, entry.name, "libs/context/libboost_context.a"));
-  const available = [];
-  for (const candidate of candidates) {
-    try {
-      const stats = await fs.stat(candidate);
-      if (stats.isFile()) available.push(candidate);
-    } catch {
-      // This Boost version does not provide the required archive.
-    }
-  }
-  if (available.length !== 1) {
-    throw new Error("Static Hermes host build must provide exactly one Boost context archive");
-  }
-  return available[0];
-}
-
 function targetName(runtime, optimization) {
   return `static-hermes-${runtime}-${optimization}`;
 }
@@ -249,14 +224,7 @@ async function compileNativeTarget({
     "-DCONVEX_WASM_COMMITTED_VALUE_CODEC_MATRIX_HOST_MAIN",
     ...objectFlags,
   ]);
-  const archives = [
-    resolve(hostBuildPath, "lib/libhermesvm_a.a"),
-    resolve(hostBuildPath, "lib/VM/libhermesVMRuntime.a"),
-    resolve(hostBuildPath, "API/hermes/libhermesapi.a"),
-    resolve(hostBuildPath, "public/hermes/Public/libhermesPublic.a"),
-    await hostBoostContextArchive(hostBuildPath),
-    resolve(hostBuildPath, "jsi/libjsi.a"),
-  ];
+  const archives = await staticHermesHostArchives(hostBuildPath);
   await Promise.all(archives.map((path) => requireFile(path, "Static Hermes host archive")));
   run(cxxPath, [
     generatedObjectPath,

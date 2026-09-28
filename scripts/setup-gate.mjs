@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { emscriptenVersion, gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
+import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
 
 const sources = Object.freeze({
   emsdk: {
@@ -296,6 +297,9 @@ async function checkGate(root) {
     requireFile(join(root, "build-wasm", "jsi", "libjsi.a"), "Wasm JSI archive"),
     requireFile(join(root, "build-wasm", "lib", "config", "libhermesvm-config.h"), "Wasm Hermes configuration"),
   ]);
+  await Promise.all((await staticHermesHostArchives(join(root, "build-host"))).map((path) =>
+    requireFile(path, "Static Hermes host archive")
+  ));
   if (
     !(await cmakeCacheHas(
       join(root, "build-wasm", "CMakeCache.txt"),
@@ -401,11 +405,12 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       cwd: gateRoot,
       timeoutMs: 10 * 60 * 1000,
     });
-    await run("cmake", ["--build", host, "--target", "shermes", "hermesc", "--parallel", String(jobs)], {
-      cwd: gateRoot,
-      timeoutMs: buildTimeoutMs,
-    });
   }
+  await run("cmake", [
+    "--build", host, "--target", "shermes", "hermesc", "hermesvm_a",
+    "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi",
+    "--parallel", String(jobs),
+  ], { cwd: gateRoot, timeoutMs: buildTimeoutMs });
 
   const wasmBuildOutputs = [
     join(wasm, "lib", "libhermesvm_a.a"),

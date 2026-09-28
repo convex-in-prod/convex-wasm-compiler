@@ -2,6 +2,11 @@
 #include "hermes/hermes.h"
 #include "hermes/VM/static_h.h"
 #include "jsi/jsi.h"
+#if defined(__EMSCRIPTEN__)
+// Packed values are verified and dispatched by type. Avoid FlexBuffers' unused
+// string-to-number fallback, which pulls a non-PIC locale singleton into the base module.
+#define FLATBUFFERS_LOCALE_INDEPENDENT 0
+#endif
 #include "flatbuffers/flexbuffers.h"
 
 #include <algorithm>

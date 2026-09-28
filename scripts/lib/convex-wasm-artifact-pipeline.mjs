@@ -25898,7 +25898,9 @@ function planCapabilityBridgeGeneratedC({
           request
         );
         if (response.kind === "sourceRejected") {
-          fail("the shared capability bridge was rejected by Static Hermes");
+          fail(`the shared capability bridge was rejected by Static Hermes: ${response.diagnostics.map(
+            ({ category, line, column }) => `${category} at ${line}:${column}`
+          ).join(", ")}`);
         }
         if (bundleOutput !== (response.output !== undefined)) {
           fail("Static Hermes bridge response does not match the configured C output mode");
@@ -26024,7 +26026,9 @@ function planCapabilityFormatterGeneratedC({
           request
         );
         if (response.kind === "sourceRejected") {
-          fail("the shared runtime-support unit was rejected by Static Hermes");
+          fail(`the shared runtime-support unit was rejected by Static Hermes: ${response.diagnostics.map(
+            ({ category, line, column }) => `${category} at ${line}:${column}`
+          ).join(", ")}`);
         }
         if (bundleOutput !== (response.output !== undefined)) {
           fail("Static Hermes formatter response does not match the configured C output mode");
