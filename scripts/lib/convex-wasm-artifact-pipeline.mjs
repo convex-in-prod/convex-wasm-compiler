@@ -20466,6 +20466,16 @@ async function buildModuleGraphBaseArtifacts({
     prelink: basePrelink,
     role: MODULE_GRAPH_BASE_ROLE,
   });
+  const resultImports = baseInspection.contract.imports.filter(
+    ({ module, name }) =>
+      module === "convex" &&
+      (name === "convex_guest_value_result" || name === "convex_guest_value_result_binary")
+  );
+  // Speculative base AOT starts as soon as this returns, before final package
+  // description. Reject competing formats here so invalid output never reaches AOT.
+  if (resultImports.length > 1) {
+    fail("module graph base imports both JSON and binary final-result formats");
+  }
   return { baseInspection, basePrelink, baseSourceProvenance };
 }
 
@@ -23690,16 +23700,6 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
           const moduleOrder = compareStrings(left.module, right.module);
           return moduleOrder === 0 ? compareStrings(left.name, right.name) : moduleOrder;
         });
-      const resultImports = hostImports.filter(
-        ({ module, name }) =>
-          module === "convex" &&
-          (name === "convex_guest_value_result" || name === "convex_guest_value_result_binary")
-      );
-      // Check the linked combination before AOT; individual signatures can be
-      // valid while the backend rejects two competing final-result formats.
-      if (resultImports.length > 1) {
-        fail("module graph base imports both JSON and binary final-result formats");
-      }
       const hostAbi = {
         imports: hostImports,
         kind: allowedHostAbi.kind,

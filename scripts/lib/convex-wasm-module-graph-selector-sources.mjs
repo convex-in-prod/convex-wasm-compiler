@@ -46,6 +46,8 @@ ${wrappers.join("\n")}
 }
 
 function renderConvexWasmModuleGraphHostForwarders() {
+  // The base uses --export-all for side modules, which retains even unused
+  // wrappers. Its native runtime must expose only the binary final-result ABI.
   return `#include <stdint.h>
 #define CONVEX_WASM_GRAPH_HOST_IMPORT(name) \\
   __attribute__((import_module("convex"), import_name(name)))
@@ -124,8 +126,6 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_payload_copy")
 int32_t convex_wasm_graph_import_guest_value_payload_copy(int64_t, char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_payload_release")
 void convex_wasm_graph_import_guest_value_payload_release(int64_t);
-CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_result")
-void convex_wasm_graph_import_guest_value_result(char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_result_binary")
 void convex_wasm_graph_import_guest_value_result_binary(const char *, int32_t);
 int32_t convex_async_operation_cancel_all(void) {
@@ -266,9 +266,6 @@ int32_t convex_guest_value_payload_copy(
 }
 void convex_guest_value_payload_release(int64_t payload_handle) {
   convex_wasm_graph_import_guest_value_payload_release(payload_handle);
-}
-void convex_guest_value_result(char *payload, int32_t length) {
-  convex_wasm_graph_import_guest_value_result(payload, length);
 }
 void convex_guest_value_result_binary(const char *payload, int32_t length) {
   convex_wasm_graph_import_guest_value_result_binary(payload, length);
