@@ -368,6 +368,13 @@ report cannot stand in for it.
 
 ## Development
 
+When updating the pinned Hermes revision, run
+`scripts/generate-convex-wasm-static-hermes-global-probe.mjs` against its host and
+Wasm builds with `--output scripts/convex-wasm-static-hermes-global-probe-report.json`
+and `--inventory scripts/convex-wasm-static-hermes-engine-globals.json`.
+This refreshes the build evidence, inventory and derived runtime-policy identity
+together. A changed global surface requires an explicit semantic-policy update.
+
 The compiler and precompiler use their own pinned Rust toolchains and lockfiles.
 Install the repository-local JavaScript dependencies before checking the
 source-graph tooling. The lowering tests pin one public Convex SDK fixture;

@@ -72,7 +72,9 @@ export const convexWasmIntrinsicHardeningPolicySha256 = createHash("sha256")
   .update(JSON.stringify(canonicalValue(convexWasmIntrinsicHardeningPolicy)))
   .digest("hex");
 
-export function renderConvexWasmIntrinsicHardeningPrelude() {
+export function renderConvexWasmIntrinsicHardeningPrelude({
+  nativeDescriptorValidation = false,
+} = {}) {
   return String.raw`{
 const __convexIntrinsicPolicySha256: string = ${JSON.stringify(
     convexWasmIntrinsicHardeningPolicySha256
@@ -467,6 +469,21 @@ for (
   }
 }
 
+${
+  nativeDescriptorValidation
+    ? String.raw`
+const __convexNativeCapture: any = __convexIntrinsicGlobal.__convexWasmCaptureIntrinsicState;
+if (typeof __convexNativeCapture !== "function") {
+  throw new Error("Native intrinsic snapshot factory is unavailable");
+}
+const __convexIntrinsicDescriptorStateIsValid: any = __convexNativeCapture(
+  __convexIntrinsicObjects, __convexIntrinsicGlobal, __convexIntrinsicGlobalKeys,
+);
+if (!delete __convexIntrinsicGlobal.__convexWasmCaptureIntrinsicState) {
+  throw new Error("Native intrinsic snapshot factory was retained");
+}
+`
+    : String.raw`
 const __convexIntrinsicDescriptorStates: Array<any> = [];
 for (
   let __convexIntrinsicIndex = 0;
@@ -598,6 +615,8 @@ function __convexIntrinsicDescriptorStateIsValid(): boolean {
   }
   return true;
 }
+`
+}
 
 __convexIntrinsicFreeze(__convexIntrinsicDescriptorStateIsValid);
 __convexIntrinsicDefineProperty(
@@ -632,4 +651,14 @@ if (
 
 export const convexWasmIntrinsicHardeningSourceSha256 = createHash("sha256")
   .update(renderConvexWasmIntrinsicHardeningPrelude())
+  .digest("hex");
+
+export const convexWasmNativeIntrinsicHardeningSourceSha256 = createHash(
+  "sha256",
+)
+  .update(
+    renderConvexWasmIntrinsicHardeningPrelude({
+      nativeDescriptorValidation: true,
+    }),
+  )
   .digest("hex");

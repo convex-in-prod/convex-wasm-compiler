@@ -802,14 +802,12 @@ class ValueAbiReader {
                  const uint8_t *bytes,
                  size_t length,
                  const Value &commit_ts_placeholder,
-                 const Function &array_buffer_constructor,
-                 const Function &define_property)
+                 const Function &array_buffer_constructor)
       : js_(js),
         cursor_(bytes),
         end_(bytes + length),
         commit_ts_placeholder_(commit_ts_placeholder),
-        array_buffer_constructor_(array_buffer_constructor),
-        define_property_(define_property) {}
+        array_buffer_constructor_(array_buffer_constructor) {}
 
   Value decode() {
     static constexpr uint8_t magic[] = {'C', 'V', 'A', '1'};
@@ -858,28 +856,6 @@ class ValueAbiReader {
     return {take(length), length};
   }
 
-  void define_field(Object &object,
-                    const char *bytes,
-                    size_t length,
-                    Value field) {
-    auto key = String::createFromUtf8(js_,
-                                      reinterpret_cast<const uint8_t *>(bytes),
-                                      length);
-    if (length == sizeof("__proto__") - 1 &&
-        std::memcmp(bytes, "__proto__", length) == 0) {
-      // Assignment invokes the inherited setter instead of defining an own
-      // field. Convex permits this field name.
-      Object descriptor(js_);
-      descriptor.setProperty(js_, "configurable", true);
-      descriptor.setProperty(js_, "enumerable", true);
-      descriptor.setProperty(js_, "writable", true);
-      descriptor.setProperty(js_, "value", std::move(field));
-      define_property_.call(js_, object, key, descriptor);
-    } else {
-      object.setProperty(js_, key, std::move(field));
-    }
-  }
-
   Value packed(flexbuffers::Reference reference, size_t nesting) {
     if (reference.IsNull()) return Value::null();
     if (reference.IsBool()) return Value(reference.AsBool());
@@ -917,18 +893,19 @@ class ValueAbiReader {
       }
       const auto keys = map.Keys();
       const auto values = map.Values();
-      Object result(js_);
+      std::vector<std::pair<std::string, Value>> fields;
+      fields.reserve(map.size());
       const char *previous_key = nullptr;
       for (size_t index = 0; index < map.size(); ++index) {
         const char *key = keys[index].AsKey();
         if (previous_key != nullptr && std::strcmp(previous_key, key) >= 0) {
           throw JSError(js_, "Packed document object keys are invalid");
         }
-        define_field(result, key, std::strlen(key),
-                     packed(values[index], nesting + 1));
+        fields.emplace_back(key, packed(values[index], nesting + 1));
         previous_key = key;
       }
-      return Value(std::move(result));
+      return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                       .createObjectWithProperties(fields));
     }
     if (reference.IsAnyVector()) {
       const size_t count = reference.IsUntypedVector()
@@ -939,16 +916,18 @@ class ValueAbiReader {
       if (count > kValueAbiMaximumArrayLength) {
         throw JSError(js_, "Packed value array length is invalid");
       }
-      Array result(js_, count);
+      std::vector<Value> elements;
+      elements.reserve(count);
       for (size_t index = 0; index < count; ++index) {
         const auto element = reference.IsUntypedVector()
                                  ? reference.AsVector()[index]
                                  : reference.IsTypedVector()
                                        ? reference.AsTypedVector()[index]
                                        : reference.AsFixedTypedVector()[index];
-        result.setValueAtIndex(js_, index, packed(element, nesting + 1));
+        elements.push_back(packed(element, nesting + 1));
       }
-      return Value(std::move(result));
+      return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                       .createArrayWithValues(elements));
     }
     throw JSError(js_, "Packed document contains an unsupported value type");
   }
@@ -1000,11 +979,13 @@ class ValueAbiReader {
             count > static_cast<size_t>(end_ - cursor_)) {
           throw JSError(js_, "Typed value array length is invalid");
         }
-        Array result(js_, count);
+        std::vector<Value> elements;
+        elements.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
-          result.setValueAtIndex(js_, index, value(nesting + 1));
+          elements.push_back(value(nesting + 1));
         }
-        return Value(std::move(result));
+        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                         .createArrayWithValues(elements));
       }
       case 8: {
         if (nesting >= kValueAbiMaximumNesting) {
@@ -1015,14 +996,17 @@ class ValueAbiReader {
             count > static_cast<size_t>(end_ - cursor_) / 5) {
           throw JSError(js_, "Typed value object length is invalid");
         }
-        Object result(js_);
+        std::vector<std::pair<std::string, Value>> fields;
+        fields.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
           const auto [bytes, length] = slice();
           Value field = value(nesting + 1);
-          define_field(result, reinterpret_cast<const char *>(bytes), length,
-                       std::move(field));
+          fields.emplace_back(
+              std::string(reinterpret_cast<const char *>(bytes), length),
+              std::move(field));
         }
-        return Value(std::move(result));
+        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                         .createObjectWithProperties(fields));
       }
       case 9:
         if (commit_ts_placeholder_.isUndefined()) {
@@ -1046,14 +1030,16 @@ class ValueAbiReader {
             count > static_cast<size_t>(end_ - cursor_)) {
           throw JSError(js_, "Document collection length is invalid");
         }
-        Array result(js_, count);
+        std::vector<Value> elements;
+        elements.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
           if (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10)) {
             throw JSError(js_, "Document collection entry is invalid");
           }
-          result.setValueAtIndex(js_, index, value(0));
+          elements.push_back(value(0));
         }
-        return Value(std::move(result));
+        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                         .createArrayWithValues(elements));
       }
       default:
         throw JSError(js_, "Typed value frame contains an unsupported tag");
@@ -1065,14 +1051,12 @@ class ValueAbiReader {
   const uint8_t *end_;
   const Value &commit_ts_placeholder_;
   const Function &array_buffer_constructor_;
-  const Function &define_property_;
 };
 
 Value take_typed_host_value(Runtime &js,
                             int64_t consuming_value_handle,
                             const Value &commit_ts_placeholder,
-                            const Function &array_buffer_constructor,
-                            const Function &define_property) {
+                            const Function &array_buffer_constructor) {
   const int64_t payload_handle =
       convex_guest_value_encode_binary(consuming_value_handle);
   if (payload_handle <= 0) {
@@ -1097,8 +1081,7 @@ Value take_typed_host_value(Runtime &js,
                         bytes.data(),
                         bytes.size(),
                         commit_ts_placeholder,
-                        array_buffer_constructor,
-                        define_property)
+                        array_buffer_constructor)
       .decode();
 }
 
@@ -1940,6 +1923,47 @@ void retain_bridge_bootstrap_and_application_bindings(Runtime &js) {
       std::move(retained_error_constructors);
 }
 
+void install_intrinsic_snapshot_factory(Runtime &js) {
+  // Target-global setup wraps this constructor in a non-revocable Proxy with
+  // only frozen apply/construct traps. Its own descriptors and prototype are
+  // those of this target. Retain it before setup so validation stays native;
+  // global and prototype-constructor snapshots still protect facade identity.
+  auto native_date = std::make_shared<Object>(js.global().getPropertyAsObject(js, "Date"));
+  auto factory = Function::createFromHostFunction(
+      js, PropNameID::forAscii(js, "captureIntrinsicState"), 3,
+      [native_date](Runtime &js, const Value &, const Value *arguments, size_t count) -> Value {
+        if (count != 3) {
+          throw JSError(js, "Intrinsic snapshot arguments are invalid");
+        }
+        auto &hermes = static_cast<facebook::hermes::HermesRuntime &>(js);
+        auto objects = arguments[0].asObject(js).asArray(js);
+        auto global = arguments[1].asObject(js);
+        auto global_keys = arguments[2].asObject(js).asArray(js);
+        auto date_facade = global.getPropertyAsObject(js, "Date");
+        auto own_keys = js.global().getPropertyAsObject(js, "Reflect")
+                            .getPropertyAsFunction(js, "ownKeys");
+        auto validators = std::make_shared<std::vector<std::function<bool()>>>();
+        validators->reserve(objects.size(js) + 1);
+        for (size_t index = 0; index < objects.size(js); ++index) {
+          auto object = objects.getValueAtIndex(js, index).asObject(js);
+          const auto &target = Object::strictEquals(js, object, date_facade)
+              ? *native_date : object;
+          auto keys = own_keys.call(js, target).asObject(js).asArray(js);
+          validators->push_back(hermes.createOwnPropertyValidator(target, keys, false));
+        }
+        validators->push_back(hermes.createOwnPropertyValidator(global, global_keys, true));
+        return Value(Function::createFromHostFunction(
+            js, PropNameID::forAscii(js, "validateIntrinsicState"), 0,
+            [validators](Runtime &, const Value &, const Value *, size_t) -> Value {
+              for (const auto &validate : *validators) {
+                if (!validate()) return Value(false);
+              }
+              return Value(true);
+            }));
+      });
+  define_hidden_global(js, "__convexWasmCaptureIntrinsicState", Value(js, factory));
+}
+
 void validate_intrinsic_descriptor_state(Runtime &js) {
   if (intrinsic_descriptor_state_validator == nullptr) {
     throw JSError(js, "Intrinsic descriptor validator is unavailable");
@@ -2053,10 +2077,6 @@ void install_guest_bridge(Runtime &js) {
         });
   auto array_buffer_constructor = std::make_shared<Function>(
       js.global().getPropertyAsFunction(js, "ArrayBuffer"));
-  auto define_property = std::make_shared<Function>(
-      js.global()
-          .getPropertyAsObject(js, "Object")
-          .getPropertyAsFunction(js, "defineProperty"));
   auto object_constructor = js.global().getPropertyAsObject(js, "Object");
   auto value_intrinsics = std::make_shared<ValueAbiIntrinsics>(ValueAbiIntrinsics{
       object_constructor.getPropertyAsObject(js, "prototype"),
@@ -2065,7 +2085,7 @@ void install_guest_bridge(Runtime &js) {
       js,
       PropNameID::forAscii(js, "takeTypedCapabilityValue"),
       2,
-      [array_buffer_constructor, define_property](Runtime &js,
+      [array_buffer_constructor](Runtime &js,
                                                    const Value &,
                                                    const Value *arguments,
                                                    size_t count) -> Value {
@@ -2075,8 +2095,7 @@ void install_guest_bridge(Runtime &js) {
         return take_typed_host_value(js,
                                      exact_positive_handle(js, arguments[0]),
                                      arguments[1],
-                                     *array_buffer_constructor,
-                                     *define_property);
+                                     *array_buffer_constructor);
       });
   auto set_typed_result = Function::createFromHostFunction(
       js,
@@ -2561,6 +2580,7 @@ bool preparation_bindings_are_absent(Runtime &js) {
            kApplicationProfilePublisherBinding,
            kApplicationInitializerReporterBinding,
            kIntrinsicDescriptorStateValidatorBinding,
+           "__convexWasmCaptureIntrinsicState",
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
            kOfficialChunkBeginBinding,
            kOfficialChunkPublishBinding,
@@ -2817,6 +2837,7 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
       declared_application_unit_count = package_unit_count;
       js_error_phase = JSErrorPhase::ReserveCompileProfileOutput;
       reserve_compile_profile_output(js);
+      install_intrinsic_snapshot_factory(js);
       js_error_phase = JSErrorPhase::InitializeBridgeUnit;
       if (!_sh_initialize_units(runtime, 1,
                                 CONVEX_WASM_BRIDGE_EXPORTED_UNIT)) {

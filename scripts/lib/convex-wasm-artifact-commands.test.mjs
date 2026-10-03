@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import { buildArtifactCommands } from "./convex-wasm-artifact-commands.mjs";
+import { buildArtifactCommands } from "./convex-wasm-artifact-pipeline.mjs";
 import { convexWasmNativeCommandArguments } from "./convex-wasm-native-launch-scheduling.mjs";
 
 test("constructs argv-safe commands with the proven exception and AOT stages", () => {
@@ -77,6 +77,8 @@ test("constructs argv-safe commands with the proven exception and AOT stages", (
     exportedUnitName: "convex_wasm_capability_bridge",
   });
   assert.ok(capabilityCommands.staticHermes.args.includes("-typed"));
+  assert.ok(capabilityCommands.staticHermesApplication.args.includes("-fstatic-math-builtins"));
+  assert.ok(!capabilityCommands.staticHermesApplication.args.includes("-fstatic-builtins"));
   assert.ok(capabilityCommands.staticHermes.args.includes("-Xes6-block-scoping"));
   assert.deepEqual(
     capabilityCommands.staticHermesApplication.args.filter((arg) =>

@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": true,
   "type": "module",
   "bin": {
@@ -41,8 +41,8 @@
     "@babel/parser": "7.29.7",
     "domexception": "4.0.0",
     "esbuild": "0.27.0",
-    "whatwg-url": "14.2.0",
     "typescript": "6.0.3",
+    "whatwg-url": "14.2.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
@@ -78,7 +78,7 @@
     "test:runtime-policy": "node --test scripts/lib/convex-wasm-artifact-contract.test.mjs scripts/lib/convex-wasm-intrinsic-hardening.test.mjs scripts/lib/convex-wasm-runtime-api-blocker-reconciliation.test.mjs scripts/lib/convex-wasm-runtime-surface.test.mjs scripts/lib/convex-wasm-static-hermes-engine-globals.test.mjs",
     "test:artifact-material": "node --test scripts/lib/convex-wasm-artifact-material.test.mjs scripts/lib/convex-wasm-native-duplicate-work.test.mjs scripts/lib/convex-wasm-static-hermes-c-bundle.test.mjs scripts/lib/convex-wasm-static-hermes-member-archive.test.mjs",
     "test:module-graph": "node --test scripts/lib/convex-context-reuse-cohort-identity.test.mjs scripts/lib/convex-deployed-runtime-identity.test.mjs scripts/lib/convex-wasm-preactivation-runtime-authority.test.mjs scripts/lib/convex-wasm-compiler-topology-witness.test.mjs scripts/lib/convex-wasm-contract-reader.test.mjs scripts/lib/convex-wasm-module-graph-cohort-contract.test.mjs scripts/lib/convex-wasm-module-graph-common-partition.test.mjs scripts/lib/convex-wasm-module-graph-contract.test.mjs scripts/lib/convex-wasm-module-graph-deployment-binding.test.mjs scripts/lib/convex-wasm-module-graph-membership.test.mjs scripts/lib/convex-wasm-module-graph-package.test.mjs scripts/lib/convex-wasm-module-graph-selector-sources.test.mjs scripts/lib/convex-wasm-native-symbol-identity.test.mjs scripts/lib/convex-wasm-official-output-chunk-contract.test.mjs scripts/lib/convex-wasm-official-output-cohort-schedule.test.mjs scripts/lib/convex-wasm-module-graph-planning.test.mjs scripts/lib/convex-wasm-output-closure.test.mjs scripts/lib/convex-wasm-physical-shard-planner.test.mjs scripts/lib/convex-wasm-selector-source.test.mjs scripts/lib/convex-wasm-v8-exclusions.test.mjs",
-    "test:native-build": "node --test scripts/lib/convex-wasm-artifact-commands.test.mjs scripts/lib/convex-wasm-artifact-pipeline.test.mjs scripts/lib/convex-wasm-generated-c-build.test.mjs scripts/lib/convex-wasm-native-artifact-build.test.mjs scripts/lib/convex-wasm-native-command-runner.test.mjs scripts/lib/convex-wasm-native-object-build.test.mjs scripts/lib/convex-wasm-static-hermes-precompile-protocol.test.mjs scripts/lib/convex-wasm-static-hermes-stage.test.mjs scripts/run-convex-wasm-static-hermes-precompiler.test.mjs",
+    "test:native-build": "node --test scripts/lib/convex-wasm-native-values.test.mjs scripts/lib/convex-wasm-artifact-commands.test.mjs scripts/lib/convex-wasm-artifact-pipeline.test.mjs scripts/lib/convex-wasm-generated-c-build.test.mjs scripts/lib/convex-wasm-native-artifact-build.test.mjs scripts/lib/convex-wasm-native-command-runner.test.mjs scripts/lib/convex-wasm-native-object-build.test.mjs scripts/lib/convex-wasm-static-hermes-precompile-protocol.test.mjs scripts/lib/convex-wasm-static-hermes-stage.test.mjs scripts/run-convex-wasm-static-hermes-precompiler.test.mjs",
     "test:native-scheduling": "node --test scripts/lib/convex-wasm-native-launch-scheduling.test.mjs scripts/lib/convex-wasm-build-latency.test.mjs",
     "test:native-package-acquisition": "node --test scripts/lib/convex-wasm-native-package-acquisition.test.mjs scripts/lib/convex-wasm-native-release-selection.test.mjs",
     "test:lowering": "node --test scripts/lib/convex-wasm-lowering.test.mjs",
@@ -91,6 +91,6 @@
     "test:precompiler": "cargo test --locked --manifest-path scripts/convex-wasm-precompiler/Cargo.toml"
   },
   "devDependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/bbd948f40b815e2d277977e4ffe3e56f35e3d879/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/3e1bd0ecd992302c2e96e314913ed0956a02de5e/convex.tgz"
   }
 }

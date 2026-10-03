@@ -33,6 +33,7 @@ function parseArguments(argumentsList) {
     "--emcc",
     "--hermes-source",
     "--host-build",
+    "--inventory",
     "--output",
     "--runner",
     "--shermes",
@@ -48,7 +49,9 @@ function parseArguments(argumentsList) {
     values.set(option, value);
   }
   for (const option of supported) {
-    if (!values.has(option)) throw new Error(`missing required option ${option}`);
+    if (option !== "--inventory" && !values.has(option)) {
+      throw new Error(`missing required option ${option}`);
+    }
   }
   const buildRevision = values.get("--build-revision");
   if (!/^[a-f0-9]{40}$/u.test(buildRevision)) throw new Error("invalid build revision");
@@ -57,6 +60,7 @@ function parseArguments(argumentsList) {
     emccPath: resolve(values.get("--emcc")),
     hermesSourcePath: resolve(values.get("--hermes-source")),
     hostBuildPath: resolve(values.get("--host-build")),
+    inventoryPath: values.has("--inventory") ? resolve(values.get("--inventory")) : undefined,
     outputPath: resolve(values.get("--output")),
     runnerPath: resolve(values.get("--runner")),
     shermesPath: resolve(values.get("--shermes")),
@@ -333,8 +337,48 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const options = parseArguments(process.argv.slice(2));
   const report = await generateConvexWasmStaticHermesGlobalProbe(options);
+  const reportBytes = `${JSON.stringify(report, null, 2)}\n`;
+  let inventory;
+  if (options.inventoryPath !== undefined) {
+    inventory = JSON.parse(await fs.readFile(options.inventoryPath, "utf8"));
+    // Refresh build evidence without silently admitting a changed global surface.
+    if (
+      JSON.stringify(inventory.targetRuntimeProbe.globals) !==
+        JSON.stringify(report.observation.effectiveSecond.keys) ||
+      JSON.stringify(inventory.staticHermesTypedDeclarations.globals) !==
+        JSON.stringify(report.typedDeclarations.globals)
+    ) {
+      throw new Error("Static Hermes globals changed; update the inventory's semantic policy first");
+    }
+    inventory.sourceIdentity = {
+      buildRevision: report.build.buildRevision,
+      sourceRevision: report.build.sourceRevision,
+      observedCheckoutRevision: report.build.observedCheckoutRevision,
+      libhermesDeclarationSha256: report.build.sourceMaterials.libhermesDeclaration.sha256,
+      typedArraysDeclarationSha256: report.build.sourceMaterials.typedArraysDeclaration.sha256,
+      globalObjectSourceSha256: report.build.sourceMaterials.globalObject.sha256,
+      hostCmakeCacheSha256: report.build.cmake.host.identity.sha256,
+      hostShermesSha256: report.tools.shermes.sha256,
+      wasmCmakeCacheSha256: report.build.cmake.wasm.identity.sha256,
+      wasmLibhermesvmArchiveSha256: report.target.wasmLibhermesvmArchive.sha256,
+    };
+    inventory.targetRuntimeProbe.reportFileSha256 = sha256(reportBytes);
+    inventory.targetRuntimeProbe.reportSha256 = report.reportSha256;
+  }
   await fs.mkdir(dirname(options.outputPath), { mode: 0o700, recursive: true });
-  await fs.writeFile(options.outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  await fs.writeFile(options.outputPath, reportBytes, { mode: 0o600 });
+  if (inventory !== undefined) {
+    await fs.writeFile(options.inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
+    const scriptsRoot = dirname(fileURLToPath(import.meta.url));
+    if (
+      options.inventoryPath === resolve(scriptsRoot, "convex-wasm-static-hermes-engine-globals.json") &&
+      options.outputPath === resolve(scriptsRoot, "convex-wasm-static-hermes-global-probe-report.json")
+    ) {
+      run(process.execPath, [
+        resolve(scriptsRoot, "lib/convex-wasm-runtime-surface.mjs"), "--write-identity",
+      ]);
+    }
+  }
   process.stdout.write(
     `${JSON.stringify({ output: options.outputPath, reportSha256: report.reportSha256 })}\n`
   );

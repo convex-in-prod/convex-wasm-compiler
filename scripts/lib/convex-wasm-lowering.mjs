@@ -7689,7 +7689,7 @@ export function renderNativeDbGetCapabilityTarget({
   assertNativeCapabilityHelperDefinitions(capabilityRuntime);
   return [
     renderConvexWasmTargetRuntimeGlobalPrelude(),
-    renderConvexWasmIntrinsicHardeningPrelude(),
+    renderConvexWasmIntrinsicHardeningPrelude({ nativeDescriptorValidation: true }),
     "{",
     requestEnvelopePrelude,
     capabilityRuntimeHostImports,
@@ -7754,7 +7754,7 @@ export function renderNativeDbGetCapabilityTargetUnits({
 
   const bridgeJavascript = [
     renderConvexWasmTargetRuntimeGlobalPrelude(),
-    renderConvexWasmIntrinsicHardeningPrelude(),
+    renderConvexWasmIntrinsicHardeningPrelude({ nativeDescriptorValidation: true }),
     "{",
     requestEnvelopePrelude,
     capabilityRuntimeHostImports,

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 import ts from "typescript";
 
@@ -368,12 +369,26 @@ export const convexWasmTargetRuntimeSurfacePolicySha256 = createHash("sha256")
   .update(canonicalJson(convexWasmTargetRuntimeSurfacePolicy))
   .digest("hex");
 
-const runtimeSurfacePolicyIdentity = JSON.parse(
-  readFileSync(
-    new URL("../convex-wasm-runtime-surface-policy-identity.json", import.meta.url),
-    "utf8"
-  )
+const expectedRuntimeSurfacePolicyIdentity = {
+  inventorySha256: convexWasmStaticHermesGlobalInventorySha256,
+  kind: "convex-wasm-runtime-surface-policy-identity",
+  runtimeSurfacePolicySha256: convexWasmTargetRuntimeSurfacePolicySha256,
+};
+const runtimeSurfacePolicyIdentityPath = new URL(
+  "../convex-wasm-runtime-surface-policy-identity.json", import.meta.url
 );
+// Only an explicit maintenance invocation writes the derived identity. Imports
+// keep validating the recorded file, including during ordinary compilation.
+if (
+  process.argv.length === 3 && process.argv[2] === "--write-identity" &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  writeFileSync(
+    runtimeSurfacePolicyIdentityPath,
+    `${JSON.stringify(expectedRuntimeSurfacePolicyIdentity, null, 2)}\n`
+  );
+}
+const runtimeSurfacePolicyIdentity = JSON.parse(readFileSync(runtimeSurfacePolicyIdentityPath, "utf8"));
 if (
   runtimeSurfacePolicyIdentity.kind !== "convex-wasm-runtime-surface-policy-identity" ||
   runtimeSurfacePolicyIdentity.inventorySha256 !== convexWasmStaticHermesGlobalInventorySha256 ||
@@ -381,11 +396,7 @@ if (
     convexWasmTargetRuntimeSurfacePolicySha256
 ) {
   throw new Error(
-    `Convex Wasm runtime-surface policy identity is stale; expected ${JSON.stringify({
-      inventorySha256: convexWasmStaticHermesGlobalInventorySha256,
-      kind: "convex-wasm-runtime-surface-policy-identity",
-      runtimeSurfacePolicySha256: convexWasmTargetRuntimeSurfacePolicySha256,
-    })}.`
+    `Convex Wasm runtime-surface policy identity is stale; expected ${JSON.stringify(expectedRuntimeSurfacePolicyIdentity)}.`
   );
 }
 export const convexWasmTargetRuntimeSurfacePolicyIdentity = freezeJson(

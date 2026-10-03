@@ -34,7 +34,6 @@ import {
 } from "./convex-wasm-compile-profile.mjs";
 import {
   convexWasmIntrinsicHardeningPolicySha256,
-  convexWasmIntrinsicHardeningSourceSha256,
   convexWasmCapabilityRequestAbiVersion,
   convexWasmLoweringFormat,
   convexWasmOpaqueAbiVersion,
@@ -42,6 +41,9 @@ import {
   renderNativeDbGetCapabilityTargetUnits,
   renderOpaqueAbiHeader,
 } from "./convex-wasm-lowering.mjs";
+import {
+  convexWasmNativeIntrinsicHardeningSourceSha256 as convexWasmIntrinsicHardeningSourceSha256,
+} from "./convex-wasm-intrinsic-hardening.mjs";
 import { convexWasmTargetRuntimeSurfacePolicyIdentity } from "./convex-wasm-runtime-surface.mjs";
 import {
   requirePrivateCacheDirectory,

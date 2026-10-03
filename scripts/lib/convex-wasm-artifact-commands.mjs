@@ -19,12 +19,14 @@ function fail(message) {
   throw new Error(`Convex Wasm artifact commands: ${message}`);
 }
 
-function capabilityApplicationStaticHermesFlags(flags) {
+export function capabilityApplicationStaticHermesFlags(flags) {
   const applicationFlags = flags.filter((flag) => flag !== "-typed");
   if (applicationFlags.length !== flags.length - 1) {
     fail("capability application compilation requires exactly one -typed flag");
   }
-  return applicationFlags;
+  // The hardened application runtime retains native Math methods except random.
+  // Do not enable all static builtins: other globals have host replacements.
+  return [...new Set([...applicationFlags, "-fstatic-math-builtins"])];
 }
 
 export function buildArtifactCommands(config) {
@@ -189,7 +191,7 @@ export function buildArtifactCommands(config) {
   };
 }
 
-function runtimeMainSourceFileName(sourcePath) {
+export function runtimeMainSourceFileName(sourcePath) {
   const extension = extname(sourcePath).toLowerCase();
   if (extension === ".c") return "runtime_main.c";
   if (new Set([".cc", ".cpp", ".cxx"]).has(extension)) return "runtime_main.cpp";
