@@ -7790,6 +7790,7 @@ function __convexWasmCapabilityBootstrap(
     __convexSdkActivate,
     __convexCapabilityInvokeRegisteredWrapper,
     __convexReadGuestRequestTaggedJson,
+    __convexCommitTsPlaceholder,
   );
 }
 

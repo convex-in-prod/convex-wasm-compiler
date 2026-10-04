@@ -84,6 +84,7 @@ struct GuestBridge {
   std::shared_ptr<Function> start_typed_run_udf;
   std::shared_ptr<Function> start_typed_schedule;
   std::shared_ptr<Function> start_typed_query;
+  std::shared_ptr<Value> commit_ts_placeholder;
 };
 
 struct GuestInitializationErrorConstructors {
@@ -2184,12 +2185,12 @@ void install_guest_bridge(Runtime &js) {
   auto install = Function::createFromHostFunction(
       js,
       PropNameID::forAscii(js, "installCapabilityBridge"),
-      10,
+      11,
       [](Runtime &js,
          const Value &,
          const Value *arguments,
          size_t count) -> Value {
-        if (count != 10) {
+        if (count != 11 || !arguments[10].isObject()) {
           throw JSError(js, "Capability bootstrap returned an invalid bridge");
         }
         if (guest_bridge != nullptr) {
@@ -2207,6 +2208,8 @@ void install_guest_bridge(Runtime &js) {
             guest_function(js, arguments[8]),
             guest_function(js, arguments[9]),
         });
+        guest_bridge->commit_ts_placeholder =
+            std::make_shared<Value>(js, arguments[10]);
         return Value::undefined();
         });
   auto array_buffer_constructor = std::make_shared<Function>(
@@ -3253,7 +3256,11 @@ extern "C" int convex_wasm_udf_run(void) {
         js, String::createFromAscii(js, udf_kind));
     invocation_activated = true;
     js_error_phase = JSErrorPhase::ReadInvocationRequest;
-    auto commit_ts_placeholder = selected_commit_ts_placeholder(js, entry_slot);
+    // Official wrappers use the bridge's value sentinel; only legacy handlers
+    // publish a sentinel through the compile-profile exports.
+    auto commit_ts_placeholder = invocation_abi == kSelectedInvocationAbiOfficialWrapper
+        ? Value(js, *guest_bridge->commit_ts_placeholder)
+        : selected_commit_ts_placeholder(js, entry_slot);
     Value request;
     {
       const int32_t length = convex_guest_value_request_binary_v1();

@@ -537,7 +537,9 @@ function nativeCapabilityHarness({
       throw new Error("Query records require the native adapter fixture");
     }
   );
-  assert.equal(bridge.length, 10);
+  assert.equal(bridge.length, 11);
+  assert.equal(typeof bridge[10], "object");
+  assert.equal(bridge[10], commitTsPlaceholder);
   const [
     createContext,
     ,
@@ -3614,7 +3616,7 @@ test("renders the generic native capability target without operation-ID authorit
   );
   assert.match(
     code,
-    /install\(\s*__convexCapabilityCreateContext,\s*__convexCapabilityReadRequest,\s*__convexCapabilityInvoke,\s*__convexCapabilityDone,\s*__convexCapabilityCleanup,\s*__convexCapabilitySettle,\s*__convexCapabilityStatus,\s*__convexSdkActivate,\s*__convexCapabilityInvokeRegisteredWrapper,\s*__convexReadGuestRequestTaggedJson,\s*\);/u
+    /install\(\s*__convexCapabilityCreateContext,\s*__convexCapabilityReadRequest,\s*__convexCapabilityInvoke,\s*__convexCapabilityDone,\s*__convexCapabilityCleanup,\s*__convexCapabilitySettle,\s*__convexCapabilityStatus,\s*__convexSdkActivate,\s*__convexCapabilityInvokeRegisteredWrapper,\s*__convexReadGuestRequestTaggedJson,\s*__convexCommitTsPlaceholder,\s*\);/u
   );
   const cleanupStart = code.indexOf("function __convexCapabilityCleanup(): number {");
   const cleanupEnd = code.indexOf("function __convexCapabilitySettle(", cleanupStart);
@@ -8701,7 +8703,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /PropNameID::forAscii\(js, "installCapabilityBridge"\),\s*10,[\s\S]*?if \(count != 10\)/u
+    /PropNameID::forAscii\(js, "installCapabilityBridge"\),\s*11,[\s\S]*?if \(count != 11 \|\| !arguments\[10\]\.isObject\(\)\)/u
   );
   assert.match(source, /const int64_t capability_identity = convex_capability_current\(\)/u);
   assert.match(source, /\[capability_identity\]/u);
@@ -8712,7 +8714,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /auto commit_ts_placeholder =\s*selected_commit_ts_placeholder\(js, entry_slot\);[\s\S]*?auto context = invocation_context\(\s*js, capability_identity, udf_kind, commit_ts_placeholder\);/u
+    /auto commit_ts_placeholder = invocation_abi == kSelectedInvocationAbiOfficialWrapper\s*\? Value\(js, \*guest_bridge->commit_ts_placeholder\)\s*: selected_commit_ts_placeholder\(js, entry_slot\);[\s\S]*?auto context = invocation_context\(\s*js, capability_identity, udf_kind, commit_ts_placeholder\);/u
   );
   assert.match(
     source,
