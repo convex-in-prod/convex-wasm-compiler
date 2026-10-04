@@ -1120,7 +1120,9 @@ class ValueAbiReader {
         return packed(root, nesting);
       }
       case 11: {
-        if (nesting != 0) throw JSError(js_, "Document collection must be a top-level value");
+        if (nesting >= kValueAbiMaximumNesting) {
+          throw JSError(js_, "Typed value nesting exceeds the limit");
+        }
         const uint32_t count = u32();
         if (count > kValueAbiMaximumArrayLength ||
             count > static_cast<size_t>(end_ - cursor_)) {
@@ -1131,6 +1133,8 @@ class ValueAbiReader {
                            if (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10)) {
                              throw JSError(js_, "Document collection entry is invalid");
                            }
+                           // Page envelopes can contain collections. Each
+                           // document retains its independent nesting budget.
                            return value(0);
                          }));
       }
@@ -1159,7 +1163,7 @@ class ValueAbiReader {
       case 8:
       case 11: {
         const uint8_t tag = cursor_[-1];
-        if (nesting >= kValueAbiMaximumNesting || (tag == 11 && nesting != 0)) {
+        if (nesting >= kValueAbiMaximumNesting) {
           throw JSError(js_, "Typed value nesting exceeds the limit");
         }
         const uint32_t count = u32();

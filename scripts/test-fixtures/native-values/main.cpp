@@ -46,6 +46,61 @@ int main(int argc, char **argv) {
     evaluate("document.name = 'changed'; document.values.push('local')");
     js.instrumentation().collectGarbage("materialization");
   }
+  // Match the host's page envelope: a document collection inside an object,
+  // followed by cursor fields that must survive the reader's indexing pass.
+  for (uint32_t count : {0u, 2u}) {
+    std::vector<uint8_t> page{'C', 'V', 'A', '1', 8, 5, 0, 0, 0};
+    auto append_slice = [&](std::string_view text) {
+      for (size_t i = 0; i < 4; ++i) page.push_back(text.size() >> (8 * i));
+      page.insert(page.end(), text.begin(), text.end());
+    };
+    append_slice("continueCursor");
+    page.push_back(5);
+    append_slice("next");
+    append_slice("isDone");
+    page.push_back(count == 0 ? 2 : 1);
+    append_slice("page");
+    page.push_back(11);
+    for (size_t i = 0; i < 4; ++i) page.push_back(count >> (8 * i));
+    const size_t first_entry = page.size();
+    if (count != 0) {
+      page.insert(page.end(), frame.begin() + 4, frame.end());
+      // Collections may mix packed documents and ordinary object values.
+      page.insert(page.end(), {8, 1, 0, 0, 0});
+      append_slice("name");
+      page.push_back(5);
+      append_slice("pending");
+    }
+    append_slice("pageStatus");
+    page.push_back(0);
+    append_slice("splitCursor");
+    page.push_back(5);
+    append_slice("split");
+    for (int i = 0; i < 2; ++i) {
+      auto result = ValueAbiReader(js, page.data(), page.size(), pending, array_buffer).decode();
+      js.global().setProperty(js, "pageResult", result);
+      require(evaluate(
+          "pageResult.continueCursor === 'next' && "
+          "pageResult.pageStatus === null && pageResult.splitCursor === 'split' && "
+          "(pageResult.isDone ? pageResult.page.length === 0 : "
+          "pageResult.page.length === 2 && "
+          "pageResult.page[0].count === 9007199254740993n && "
+          "pageResult.page[0].__proto__ === 'own data' && "
+          "pageResult.page[1].name === 'pending')").getBool());
+      evaluate("pageResult.page.push('local')");
+      js.instrumentation().collectGarbage("page materialization");
+    }
+    if (count != 0) {
+      page[first_entry] = 0;
+      bool rejected_entry = false;
+      try {
+        ValueAbiReader(js, page.data(), page.size(), pending, array_buffer).decode();
+      } catch (const JSError &) {
+        rejected_entry = true;
+      }
+      require(rejected_entry);
+    }
+  }
   frame.pop_back();
   bool rejected = false;
   try {

@@ -566,12 +566,11 @@ cargo test --locked \
   --manifest-path scripts/convex-wasm-compiler/invariant-validation/Cargo.toml
 ```
 
-Release binaries are native executables. Build and test macOS binaries on the
-matching Apple Silicon or Intel macOS host; build and test Linux binaries on the
-matching Linux host.
+Release binaries are native executables. Build and test macOS binaries on an
+Apple Silicon host; build and test Linux binaries on an x86-64 Linux host.
 
 Tagged releases publish the installable JavaScript package and authenticated
-compiler and precompiler packages for all three supported hosts. The release
+compiler and precompiler packages for Linux x86-64 and macOS Apple Silicon. The release
 workflow installs and imports the packed JavaScript commands before publication.
 It keeps the native control manifests, package IDs, binaries, and host selection
 together as release assets. A downstream tool can select a release by tag and
