@@ -67,6 +67,10 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_request_release")
 void convex_wasm_graph_import_capability_request_release(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_current")
 int64_t convex_wasm_graph_import_capability_current(void);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_execution_observation_enabled")
+int32_t convex_wasm_graph_import_execution_observation_enabled(void);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_observe_gc")
+void convex_wasm_graph_import_observe_gc(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_observe_object_layouts")
 void convex_wasm_graph_import_observe_object_layouts(int64_t, int64_t, int64_t, int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_console_message")
@@ -155,6 +159,13 @@ void convex_capability_request_release(int64_t request) {
 }
 int64_t convex_capability_current(void) {
   return convex_wasm_graph_import_capability_current();
+}
+int32_t convex_execution_observation_enabled(void) {
+  return convex_wasm_graph_import_execution_observation_enabled();
+}
+void convex_observe_gc(int64_t collections, int64_t wall, int64_t cpu,
+                       int64_t allocated, int64_t before, int64_t after) {
+  convex_wasm_graph_import_observe_gc(collections, wall, cpu, allocated, before, after);
 }
 void convex_observe_object_layouts(int64_t hits, int64_t misses, int64_t evictions, int64_t fallbacks) {
   convex_wasm_graph_import_observe_object_layouts(hits, misses, evictions, fallbacks);

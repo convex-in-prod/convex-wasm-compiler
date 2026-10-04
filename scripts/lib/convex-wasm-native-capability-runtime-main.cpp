@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -978,16 +979,26 @@ class ValueAbiReader {
       }
       const auto keys = map.Keys();
       const auto values = map.Values();
+      // Layout lookup can request each key several times. Validate and size
+      // borrowed views once; recursive value decoding never owns these bytes.
+      std::array<std::string_view, 32> inline_keys;
+      std::vector<std::string_view> wide_keys;
+      std::string_view *key_views = inline_keys.data();
+      if (map.size() > inline_keys.size()) {
+        wide_keys.resize(map.size());
+        key_views = wide_keys.data();
+      }
+      for (size_t index = 0; index < map.size(); ++index) {
+        key_views[index] = std::string_view(keys[index].AsKey());
+        if (index != 0 && key_views[index - 1] >= key_views[index]) {
+          throw JSError(js_, "Packed document object keys are invalid");
+        }
+      }
       return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
                        .createObjectFromEntries(
                            map.size(),
                            [&](size_t index) -> std::string_view {
-                             const char *key = keys[index].AsKey();
-                             if (index != 0 &&
-                                 std::strcmp(keys[index - 1].AsKey(), key) >= 0) {
-                               throw JSError(js_, "Packed document object keys are invalid");
-                             }
-                             return key;
+                             return key_views[index];
                            },
                            [&](size_t index) {
                              return packed(values[index], nesting + 1);
@@ -3237,11 +3248,23 @@ extern "C" int convex_wasm_udf_run(void) {
 
   auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
   auto js_error_phase = JSErrorPhase::ReadCapabilityIdentity;
+  const bool observe_execution = convex_execution_observation_enabled() != 0;
+  SHHeapStatistics heap_before{};
+  if (observe_execution) _sh_get_heap_statistics(runtime, &heap_before);
   const auto layouts_before = static_cast<facebook::hermes::HermesRuntime &>(js).getObjectLayoutStatistics();
   bool layouts_reported = false;
   const auto report_layouts = [&]() {
     if (layouts_reported) return;
     layouts_reported = true;
+    if (observe_execution) {
+      SHHeapStatistics heap_after{};
+      _sh_get_heap_statistics(runtime, &heap_after);
+      convex_observe_gc(heap_after.collections - heap_before.collections,
+                        heap_after.gc_wall_nanos - heap_before.gc_wall_nanos,
+                        heap_after.gc_cpu_nanos - heap_before.gc_cpu_nanos,
+                        heap_after.allocated_bytes - heap_before.allocated_bytes,
+                        heap_before.heap_bytes, heap_after.heap_bytes);
+    }
     const auto after = static_cast<facebook::hermes::HermesRuntime &>(js).getObjectLayoutStatistics();
     convex_observe_object_layouts(after.hits - layouts_before.hits,
                                   after.misses - layouts_before.misses,

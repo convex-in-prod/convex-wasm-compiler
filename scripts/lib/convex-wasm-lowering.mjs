@@ -1361,6 +1361,11 @@ CONVEX_WASM_IMPORT("convex_async_operation_cancel_all")
 int convex_async_operation_cancel_all(void);
 CONVEX_WASM_IMPORT("convex_capability_current")
 long long convex_capability_current(void);
+CONVEX_WASM_IMPORT("convex_execution_observation_enabled")
+int32_t convex_execution_observation_enabled(void);
+CONVEX_WASM_IMPORT("convex_observe_gc")
+void convex_observe_gc(int64_t collections, int64_t wall_nanos, int64_t cpu_nanos,
+                      int64_t allocated_bytes, int64_t heap_before, int64_t heap_after);
 CONVEX_WASM_IMPORT("convex_observe_object_layouts")
 void convex_observe_object_layouts(int64_t hits, int64_t misses, int64_t evictions, int64_t fallbacks);
 CONVEX_WASM_IMPORT("convex_console_message")

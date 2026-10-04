@@ -390,9 +390,16 @@ The native guest receives invocation arguments through
 `convex_guest_value_request_binary_v1` and the existing request-copy import.
 These arguments use the same `CVA1` value representation as database results;
 the SDK's value invocation entry point receives the decoded object directly.
-The backend must advertise that import and `convex_observe_object_layouts`
+The backend must advertise that import, `convex_observe_object_layouts`,
+`convex_execution_observation_enabled`, and `convex_observe_gc`
 before compiling this runtime. Older modules keep their JSON input contract on
 a compatible backend. Compiler revisions alone do not select the wire format.
+
+When execution observation is enabled, the native adapter reports handler and
+cleanup allocation/collection counters, GC times, and heap occupancy without
+constructing JavaScript diagnostic objects. Preparation is outside this interval;
+a trap can omit the closing report. GC CPU requires the host's WASI thread CPU
+clock. The counters are diagnostic and confer no execution authority.
 
 An SDK supporting `asyncSyscallTyped`, `syscallTyped`, and `queryRecord` avoids
 the legacy request envelope and builds compact `CQR1` records as queries are

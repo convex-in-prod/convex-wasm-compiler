@@ -11,6 +11,8 @@ int main(int argc, char **argv) {
   if (argc != 4) throw std::runtime_error("Hardening and SDK source paths are required");
   auto hermes = facebook::hermes::makeHermesRuntime();
   auto &js = *hermes;
+  SHHeapStatistics heap_before{};
+  _sh_get_heap_statistics(hermes->getSHRuntime(), &heap_before);
   auto evaluate = [&](const std::string &source) {
     return js.evaluateJavaScript(
         std::make_shared<facebook::jsi::StringBuffer>(source), "native-values");
@@ -45,6 +47,57 @@ int main(int argc, char **argv) {
         "document.values[0] === 3.5 && document.values[1] === true").getBool());
     evaluate("document.name = 'changed'; document.values.push('local')");
     js.instrumentation().collectGarbage("materialization");
+  }
+  SHHeapStatistics heap_after{};
+  _sh_get_heap_statistics(hermes->getSHRuntime(), &heap_after);
+  require(heap_after.collections > heap_before.collections);
+  require(heap_after.allocated_bytes > heap_before.allocated_bytes);
+  require(heap_after.gc_wall_nanos >= heap_before.gc_wall_nanos);
+  require(heap_after.gc_cpu_nanos >= heap_before.gc_cpu_nanos);
+  // Cross the inline-key capacity and recurse while the parent views are live.
+  flexbuffers::Builder wide;
+  wide.Map([&] {
+    for (unsigned i = 0; i < 40; ++i) {
+      const std::string key = "field" + std::to_string(100 + i);
+      wide.Map(key.c_str(), [&] { wide.Double("value", i); });
+    }
+  });
+  wide.Finish();
+  std::vector<uint8_t> wide_frame{'C', 'V', 'A', '1', 10};
+  for (size_t i = 0; i < 4; ++i) {
+    wide_frame.push_back(wide.GetBuffer().size() >> (8 * i));
+  }
+  wide_frame.insert(wide_frame.end(), wide.GetBuffer().begin(), wide.GetBuffer().end());
+  for (int i = 0; i < 2; ++i) {
+    auto document = ValueAbiReader(js, wide_frame.data(), wide_frame.size(), pending, array_buffer).decode();
+    js.global().setProperty(js, "wideDocument", document);
+    require(evaluate(
+        "Object.keys(wideDocument).length === 40 && "
+        "Object.keys(wideDocument).every((key, i) => wideDocument[key].value === i)").getBool());
+    evaluate("wideDocument.field100.value = -1; delete wideDocument.field139");
+    js.instrumentation().collectGarbage("wide materialization");
+  }
+  // FlexBuffers structural verification does not establish our sorted-key
+  // contract. Reject duplicates and descending keys before layout lookup.
+  for (const char replacement : {'a', 'z'}) {
+    flexbuffers::Builder invalid;
+    invalid.Map([&] { invalid.Double("a", 1); invalid.Double("b", 2); });
+    invalid.Finish();
+    std::vector<uint8_t> invalid_frame{'C', 'V', 'A', '1', 10};
+    for (size_t i = 0; i < 4; ++i) {
+      invalid_frame.push_back(invalid.GetBuffer().size() >> (8 * i));
+    }
+    invalid_frame.insert(invalid_frame.end(), invalid.GetBuffer().begin(), invalid.GetBuffer().end());
+    const auto keys = flexbuffers::GetRoot(invalid_frame.data() + 9, invalid_frame.size() - 9).AsMap().Keys();
+    const char *key = keys[replacement == 'a' ? 1 : 0].AsKey();
+    invalid_frame[reinterpret_cast<const uint8_t *>(key) - invalid_frame.data()] = replacement;
+    bool rejected_keys = false;
+    try {
+      ValueAbiReader(js, invalid_frame.data(), invalid_frame.size(), pending, array_buffer).decode();
+    } catch (const JSError &) {
+      rejected_keys = true;
+    }
+    require(rejected_keys);
   }
   // Match the host's page envelope: a document collection inside an object,
   // followed by cursor fields that must survive the reader's indexing pass.

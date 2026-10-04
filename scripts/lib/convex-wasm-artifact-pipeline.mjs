@@ -964,6 +964,8 @@ const MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS = Object.freeze([
   ["convex", "convex_typed_value_abi_v1", [], ["i32"]],
   ["convex", "convex_performance_now", ["i64"], ["f64"]],
   ["convex", "convex_capability_sync_take", ["i64", "i64"], ["i64"]],
+  ["convex", "convex_execution_observation_enabled", [], ["i32"]],
+  ["convex", "convex_observe_gc", ["i64", "i64", "i64", "i64", "i64", "i64"], []],
   ["convex", "convex_observe_object_layouts", ["i64", "i64", "i64", "i64"], []],
   ["convex", "convex_console_message", ["i64", "i32", "i32", "i32"], ["i32"]],
   ["convex", "convex_crypto_get_random_values", ["i64", "i32", "i32"], []],

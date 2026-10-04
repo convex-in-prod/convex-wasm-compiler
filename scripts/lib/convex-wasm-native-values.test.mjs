@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,10 +12,11 @@ import { buildSync } from "esbuild";
 import { renderConvexWasmIntrinsicHardeningPrelude } from "./convex-wasm-intrinsic-hardening.mjs";
 import { renderOpaqueAbiHeader } from "./convex-wasm-lowering.mjs";
 import { renderConvexWasmTargetRuntimeGlobalPrelude } from "./convex-wasm-runtime-surface.mjs";
+import { staticHermesHostArchives } from "./convex-wasm-static-hermes-host-archives.mjs";
 
 // This executes the actual adapter with a built host Hermes runtime. Run under
 // the same native-build resource guard used for the Hermes build.
-test("native adapter materializes packed values and validates hardened intrinsics", (context) => {
+test("native adapter materializes packed values and validates hardened intrinsics", async (context) => {
   const source = process.env.CONVEX_HERMES_TEST_SOURCE_ROOT;
   const build = process.env.CONVEX_HERMES_TEST_BUILD_ROOT;
   if (source === undefined || build === undefined) {
@@ -42,15 +43,6 @@ test("native adapter materializes packed values and validates hardened intrinsic
     );
     return result.stdout;
   };
-  const archives = (directory) =>
-    readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-      const path = join(directory, entry.name);
-      return entry.isDirectory()
-        ? archives(path)
-        : entry.name.endsWith(".a")
-          ? [path]
-          : [];
-    });
   try {
     const sdkFixture = join(temporary, "sdk.js");
     buildSync({
@@ -108,14 +100,7 @@ test("native adapter materializes packed values and validates hardened intrinsic
       executable,
       "-Wl,--gc-sections",
       "-Wl,--start-group",
-      ...archives(join(build, "lib")),
-      join(build, "API/hermes/libhermesapi.a"),
-      join(build, "public/hermes/Public/libhermesPublic.a"),
-      join(build, "jsi/libjsi.a"),
-      join(build, "external/dtoa/libdtoa.a"),
-      join(build, "external/llvh/lib/Support/libLLVHSupport.a"),
-      join(build, "external/llvh/lib/Demangle/libLLVHDemangle.a"),
-      ...archives(join(build, "external/boost")),
+      ...(await staticHermesHostArchives(build)),
       "-Wl,--end-group",
       "-licui18n",
       "-licuuc",

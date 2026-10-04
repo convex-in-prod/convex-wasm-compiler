@@ -1,6 +1,6 @@
 {
   "build": {
-    "buildRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401",
+    "buildRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df",
     "cmake": {
       "host": {
         "flags": {
@@ -27,7 +27,7 @@
         }
       }
     },
-    "observedCheckoutRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401",
+    "observedCheckoutRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df",
     "sourceMaterials": {
       "globalObject": {
         "path": "lib/VM/JSLib/GlobalObject.cpp",
@@ -42,12 +42,12 @@
         "sha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352"
       }
     },
-    "sourceRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401"
+    "sourceRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df"
   },
   "harness": {
     "generatedC": {
-      "bytes": 3576,
-      "sha256": "5e60b96507109f8c6e1d087da0689c3cd961a8afed45cfae3df6d01cadbb1e28"
+      "bytes": 3827,
+      "sha256": "35ac6ef0a08293824c619b736033ecd4c4d012381f000afa182efd1d373ba748"
     },
     "generator": {
       "bytes": 14034,
@@ -527,12 +527,12 @@
       "sha256": "5db0ad61a43d90718e232fcfc08ab52fd2fa9e33bf349f34755ae5b788ffb456"
     },
     "wasm": {
-      "bytes": 4892899,
-      "sha256": "cd40979e05e93c526842a6cd505ce2ee0b838b0bcc17eb0d71158276a9814fc8"
+      "bytes": 4898212,
+      "sha256": "ffadb730cbf281b05be7d7b06456741f109d3120a8175ff50aa1a6e32e41ee67"
     },
     "wasmLibhermesvmArchive": {
-      "bytes": 12798280,
-      "sha256": "094fa03e1323572c0cbe504fe2c09586795b5f781487de0bb5c9a1f20886bc34"
+      "bytes": 12810390,
+      "sha256": "e644897afbfd36e195cdb326ef2385895d91b45361e0ee99728b13be1b82642a"
     }
   },
   "tools": {
@@ -546,7 +546,7 @@
     },
     "shermes": {
       "bytes": 4176016,
-      "sha256": "9c03af9f34e89de1ac359b58e2c5b8b4361441ca20be7edfcf5e3b192a2512c5"
+      "sha256": "f67d1026cf0f0b96f4bbe7e40c61bd653bd556b89d7d3f5bb054b5b543bead45"
     }
   },
   "typedDeclarations": {
@@ -617,5 +617,5 @@
     ],
     "kind": "libhermes-runtime-declarations-plus-typed-arrays-v1"
   },
-  "reportSha256": "9078697adeb36db1b1b44b7d38e6943ad9793dded6f0242b8930f1d63bf3f7e3"
+  "reportSha256": "dd44737bf0021d9a4e9b39f47753a4ed6f34353432941ee59df2334dfadaae0d"
 }
