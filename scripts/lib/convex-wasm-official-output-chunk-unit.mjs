@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, posix } from "node:path";
 
@@ -3409,6 +3409,19 @@ export function initializeConvexWasmOfficialOutputChunkUnits({
     artifact.entries.map(({ entrySlot }) => initializer.initializeEntrySlot(entrySlot))
   );
 }
+
+// Adapters with their own source-authority objects share these transformations.
+// Cache the implementation's bytes, not a package release number or a local copy.
+export const convexWasmModuleLinkage = Object.freeze({
+  identity: Object.freeze({
+    kind: "convex-wasm-module-linkage-v1",
+    sourceSha256: sha256(readFileSync(new URL(import.meta.url))),
+    parserVersion: babelParserVersion,
+  }),
+  immutableImportPlan,
+  snapshotImmutableImports,
+  lowerModuleExportForwarding,
+});
 
 export const convexWasmOfficialOutputChunkUnitTestHooks = Object.freeze({
   lowerModuleExportForwarding,

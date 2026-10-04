@@ -6,7 +6,7 @@ import { parse } from "@babel/parser";
 
 import {
   convexWasmOfficialOutputChunkModuleTransform,
-  convexWasmOfficialOutputChunkUnitTestHooks,
+  convexWasmModuleLinkage,
 } from "./convex-wasm-official-output-chunk-unit.mjs";
 
 async function loadModules(sources, entry, reads = new Map()) {
@@ -20,14 +20,14 @@ async function loadModules(sources, entry, reads = new Map()) {
   );
   for (const [name, original] of Object.entries(sources)) {
     const module = graph.get(name.slice(2));
-    const plan = convexWasmOfficialOutputChunkUnitTestHooks.immutableImportPlan(module, graph);
+    const plan = convexWasmModuleLinkage.immutableImportPlan(module, graph);
     const dependencies = parse(original, { sourceType: "module" })
       .program.body.filter((node) => node.type === "ImportDeclaration")
       .map((node) => ({
         start: node.source.start,
         executableSpecifier: node.source.value,
       }));
-    const source = convexWasmOfficialOutputChunkUnitTestHooks.snapshotImmutableImports(
+    const source = convexWasmModuleLinkage.snapshotImmutableImports(
       original,
       dependencies,
       plan,
@@ -35,7 +35,7 @@ async function loadModules(sources, entry, reads = new Map()) {
     );
 
     const transformed = await esbuild.transform(source, options);
-    const lowered = convexWasmOfficialOutputChunkUnitTestHooks.lowerModuleExportForwarding(
+    const lowered = convexWasmModuleLinkage.lowerModuleExportForwarding(
       transformed.code,
       source,
       name
@@ -169,7 +169,7 @@ test("immutable import proofs change when an export becomes writable", () => {
     source: "export let x = 1; export function update() { x++; }",
   };
   const plan = (target) =>
-    convexWasmOfficialOutputChunkUnitTestHooks.immutableImportPlan(
+    convexWasmModuleLinkage.immutableImportPlan(
       importer,
       new Map([
         ["entry.js", importer],

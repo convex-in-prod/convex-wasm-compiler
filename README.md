@@ -593,3 +593,12 @@ are named by behavior rather than by the order in which they were introduced.
 Exact source, toolchain, and artifact compatibility is authenticated by the
 recorded hashes and revisions. Filenames, Rust type names, cache directories,
 and protocol kinds do not carry historical `vN` suffixes.
+
+Embedding adapters that retain their own source-authentication objects can use
+`convexWasmModuleLinkage` from
+`scripts/lib/convex-wasm-official-output-chunk-unit.mjs` for immutable import
+planning, import snapshots and export forwarding removal. Include its `identity`
+in transform-cache inputs so an implementation change invalidates transformed
+code. This identity describes compiler source; it is not a backend compatibility
+version. Use the package implementation rather than retaining a separate copy
+of these transformations.
