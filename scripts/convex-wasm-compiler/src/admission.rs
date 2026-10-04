@@ -19,6 +19,8 @@ use super::{
 
 const STATIC_HERMES_GLOBAL_INVENTORY_SOURCE: &str =
     include_str!("../../convex-wasm-static-hermes-engine-globals.json");
+const STATIC_HERMES_GLOBAL_PROBE_SOURCE: &str =
+    include_str!("../../convex-wasm-static-hermes-global-probe-report.json");
 const STATIC_HERMES_GLOBAL_POLICY_IDENTITY_SOURCE: &str =
     include_str!("../../convex-wasm-runtime-surface-policy-identity.json");
 const APPLICATION_GLOBAL_THIS_BINDING: &str = "__convexWasmApplicationGlobalThis";
@@ -26,6 +28,26 @@ const APPLICATION_GLOBAL_THIS_BINDING: &str = "__convexWasmApplicationGlobalThis
 struct StaticHermesGlobalAccessPolicy {
     application_facade_admitted: BTreeSet<String>,
     compile_admitted: BTreeSet<String>,
+}
+
+pub(super) fn static_hermes_global_policy(inventory: &Value, probe: &Value) -> Value {
+    assert_eq!(
+        inventory["targetRuntimeProbe"]["globals"],
+        probe["observation"]["effectiveSecond"]["keys"],
+        "Static Hermes inventory globals disagree with the probe"
+    );
+    // Match the semantic projection used by the JavaScript policy producer.
+    // Build/report provenance remains authenticated separately.
+    serde_json::json!({
+        "kind": "convex-wasm-static-hermes-global-policy-v1",
+        "buildConfiguration": inventory["buildConfiguration"],
+        "registrationConditions": inventory["registrationConditions"],
+        "runtimeGlobals": probe["observation"]["effectiveSecond"],
+        "typedGlobals": inventory["staticHermesTypedDeclarations"]["globals"],
+        "reviewedAbsentGlobals": inventory["reviewedAbsentGlobals"],
+        "accessPolicy": inventory["accessPolicy"],
+        "semantics": inventory["semantics"],
+    })
 }
 
 pub(super) fn static_hermes_global_policy_identity()
@@ -105,9 +127,16 @@ fn static_hermes_global_access_policy() -> &'static StaticHermesGlobalAccessPoli
             access_policy["rawGlobalObjectFlow"], "rejected",
             "Static Hermes raw global object flow must remain rejected"
         );
-        let canonical_inventory = serde_json::to_vec(&inventory)
-            .expect("checked-in Static Hermes global inventory must serialize");
-        let inventory_sha256 = hex::encode(Sha256::digest(&canonical_inventory));
+        let probe: Value = serde_json::from_str(STATIC_HERMES_GLOBAL_PROBE_SOURCE)
+            .expect("checked-in Static Hermes global probe must be valid JSON");
+        assert_eq!(
+            inventory["targetRuntimeProbe"]["reportFileSha256"],
+            hex::encode(Sha256::digest(STATIC_HERMES_GLOBAL_PROBE_SOURCE.as_bytes())),
+            "checked-in Static Hermes global inventory does not authenticate its probe"
+        );
+        let canonical_policy = serde_json::to_vec(&static_hermes_global_policy(&inventory, &probe))
+            .expect("checked-in Static Hermes global policy must serialize");
+        let inventory_sha256 = hex::encode(Sha256::digest(&canonical_policy));
         assert_eq!(
             inventory_sha256,
             static_hermes_global_policy_identity().inventory_sha256,

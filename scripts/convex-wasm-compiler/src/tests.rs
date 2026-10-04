@@ -8147,6 +8147,27 @@ export const selected = query({
         ))
         .unwrap();
         assert_eq!(serialized["compiler"]["staticHermesGlobalPolicy"], expected);
+        let mut inventory: Value = serde_json::from_str(include_str!(
+            "../../convex-wasm-static-hermes-engine-globals.json"
+        ))
+        .unwrap();
+        let mut probe: Value = serde_json::from_str(include_str!(
+            "../../convex-wasm-static-hermes-global-probe-report.json"
+        ))
+        .unwrap();
+        let policy = super::admission::static_hermes_global_policy(&inventory, &probe);
+        inventory["sourceIdentity"]["buildRevision"] = Value::from("1".repeat(40));
+        inventory["targetRuntimeProbe"]["reportSha256"] = Value::from("2".repeat(64));
+        probe["reportSha256"] = Value::from("2".repeat(64));
+        assert_eq!(
+            super::admission::static_hermes_global_policy(&inventory, &probe),
+            policy
+        );
+        probe["observation"]["effectiveSecond"]["valueTypes"]["Object"] = Value::from("object");
+        assert_ne!(
+            super::admission::static_hermes_global_policy(&inventory, &probe),
+            policy
+        );
     }
 
     #[test]

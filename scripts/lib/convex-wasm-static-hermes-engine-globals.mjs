@@ -547,6 +547,21 @@ export const convexWasmStaticHermesGlobalInventory = freezeJson(
 export const convexWasmStaticHermesGlobalInventorySha256 = createHash("sha256")
   .update(canonicalConvexWasmStaticHermesGlobalInventoryJson(convexWasmStaticHermesGlobalInventory))
   .digest("hex");
+// Policy describes the authenticated surface, not which build observed it. Keep
+// the complete inventory digest above for provenance and evidence integrity.
+export const convexWasmStaticHermesGlobalPolicy = freezeJson({
+  kind: "convex-wasm-static-hermes-global-policy-v1",
+  buildConfiguration: convexWasmStaticHermesGlobalInventory.buildConfiguration,
+  registrationConditions: convexWasmStaticHermesGlobalInventory.registrationConditions,
+  runtimeGlobals: loadedGlobalProbeReport.observation.effectiveSecond,
+  typedGlobals: convexWasmStaticHermesGlobalInventory.staticHermesTypedDeclarations.globals,
+  reviewedAbsentGlobals: convexWasmStaticHermesGlobalInventory.reviewedAbsentGlobals,
+  accessPolicy: convexWasmStaticHermesGlobalInventory.accessPolicy,
+  semantics: convexWasmStaticHermesGlobalInventory.semantics,
+});
+export const convexWasmStaticHermesGlobalPolicySha256 = createHash("sha256")
+  .update(canonicalConvexWasmStaticHermesGlobalInventoryJson(convexWasmStaticHermesGlobalPolicy))
+  .digest("hex");
 export const convexWasmStaticHermesTargetRuntimeGlobals = Object.freeze([
   ...convexWasmStaticHermesGlobalInventory.targetRuntimeProbe.globals,
 ]);

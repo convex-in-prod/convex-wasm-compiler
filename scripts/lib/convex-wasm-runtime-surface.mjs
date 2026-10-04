@@ -10,8 +10,8 @@ import {
   convexWasmApplicationGlobalFacadeEngineGlobals,
   convexWasmRoutingEligibleStaticHermesGlobals,
   convexWasmSharedRuntimeSupportGlobals,
-  convexWasmStaticHermesGlobalInventory,
-  convexWasmStaticHermesGlobalInventorySha256,
+  convexWasmStaticHermesGlobalPolicy,
+  convexWasmStaticHermesGlobalPolicySha256,
   convexWasmStaticHermesGlobalSemantics,
 } from "./convex-wasm-static-hermes-engine-globals.mjs";
 import {
@@ -100,7 +100,7 @@ const routingEligibleAmbientGlobalSet = new Set(convexWasmRoutingEligibleStaticH
 const deterministicWebRuntimeSupportGlobals = Object.freeze(
   convexWasmSharedRuntimeSupportGlobals.filter(
     (name) =>
-      convexWasmStaticHermesGlobalInventory.semantics[name].class === "deterministic-web-like"
+      convexWasmStaticHermesGlobalPolicy.semantics[name].class === "deterministic-web-like"
   )
 );
 assertConvexWasmQueryMutationVisibleDeterministicGlobals(
@@ -145,10 +145,10 @@ function freezeJson(value) {
 
 export const convexWasmTargetRuntimeSurfacePolicy = freezeJson({
   ambientGlobals: implementedAmbientGlobals.map((name) => ({
-    implementation: convexWasmStaticHermesGlobalInventory.semantics[name].provider,
+    implementation: convexWasmStaticHermesGlobalPolicy.semantics[name].provider,
     name,
     routingEligible: routingEligibleAmbientGlobalSet.has(name),
-    semanticClass: convexWasmStaticHermesGlobalInventory.semantics[name].class,
+    semanticClass: convexWasmStaticHermesGlobalPolicy.semantics[name].class,
     state: "implemented",
   })),
   date: {
@@ -239,8 +239,8 @@ export const convexWasmTargetRuntimeSurfacePolicy = freezeJson({
     },
   },
   globalInventory: {
-    kind: convexWasmStaticHermesGlobalInventory.kind,
-    sha256: convexWasmStaticHermesGlobalInventorySha256,
+    kind: convexWasmStaticHermesGlobalPolicy.kind,
+    sha256: convexWasmStaticHermesGlobalPolicySha256,
   },
   intl: {
     dateTimeFormat: {
@@ -369,8 +369,10 @@ export const convexWasmTargetRuntimeSurfacePolicySha256 = createHash("sha256")
   .update(canonicalJson(convexWasmTargetRuntimeSurfacePolicy))
   .digest("hex");
 
+// The wire field retains its name; it identifies the semantic inventory
+// projection. Exact build provenance remains in the full inventory digest.
 const expectedRuntimeSurfacePolicyIdentity = {
-  inventorySha256: convexWasmStaticHermesGlobalInventorySha256,
+  inventorySha256: convexWasmStaticHermesGlobalPolicySha256,
   kind: "convex-wasm-runtime-surface-policy-identity",
   runtimeSurfacePolicySha256: convexWasmTargetRuntimeSurfacePolicySha256,
 };
@@ -391,7 +393,7 @@ if (
 const runtimeSurfacePolicyIdentity = JSON.parse(readFileSync(runtimeSurfacePolicyIdentityPath, "utf8"));
 if (
   runtimeSurfacePolicyIdentity.kind !== "convex-wasm-runtime-surface-policy-identity" ||
-  runtimeSurfacePolicyIdentity.inventorySha256 !== convexWasmStaticHermesGlobalInventorySha256 ||
+  runtimeSurfacePolicyIdentity.inventorySha256 !== convexWasmStaticHermesGlobalPolicySha256 ||
   runtimeSurfacePolicyIdentity.runtimeSurfacePolicySha256 !==
     convexWasmTargetRuntimeSurfacePolicySha256
 ) {
@@ -652,7 +654,7 @@ export function renderConvexWasmTargetRuntimeGlobalPrelude() {
   const typedBridgeDefinitions = convexWasmAdmittedStaticHermesGlobals
     .filter(
       (name) =>
-        !convexWasmStaticHermesGlobalInventory.staticHermesTypedDeclarations.globals.includes(name)
+        !convexWasmStaticHermesGlobalPolicy.typedGlobals.includes(name)
     )
     .map((name) => `const ${name}: any = __convexTargetGlobal.${name};`)
     .join("\n");

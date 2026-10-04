@@ -1,5 +1,5 @@
 {
-  "inventorySha256": "d4c0c99484c59ea3a340cbde4e75060d95c65c22bf386d0287bdae64f1c5d588",
+  "inventorySha256": "195b60f59b3c36a6937e4258abb27f8fd2f4c6e79f1756323b4323f21c47898c",
   "kind": "convex-wasm-runtime-surface-policy-identity",
-  "runtimeSurfacePolicySha256": "83cf2d1519626e927e33f883e94de662ead01e3e99d638cfcc6dd7aefffeee27"
+  "runtimeSurfacePolicySha256": "bb1955f780fcc7cdd01ef24d02eebaf6ba9277dc08b5e20d067f376def38e6cb"
 }

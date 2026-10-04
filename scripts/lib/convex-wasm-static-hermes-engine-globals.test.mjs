@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { gateRevisions } from "./convex-wasm-gate-pins.mjs";
 import {
   assertConvexWasmQueryMutationVisibleDeterministicGlobals,
   assertConvexWasmStaticHermesTargetRuntimeGlobals,
   assertConvexWasmStaticHermesTypedDeclarationGlobals,
+  canonicalConvexWasmStaticHermesGlobalInventoryJson,
   convexWasmAdmittedStaticHermesGlobals,
   convexWasmApplicationGlobalFacadeEngineGlobals,
   convexWasmQueryMutationVisibleDeterministicGlobals,
@@ -25,6 +31,101 @@ import {
   renderConvexWasmApplicationGlobalFacade,
   renderConvexWasmTargetRuntimeGlobalPrelude,
 } from "./convex-wasm-runtime-surface.mjs";
+
+test("provenance refresh preserves both policies and emitted hardening while evidence stays checked", (t) => {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const fixture = mkdtempSync(join(tmpdir(), "hermes-policy-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  for (const file of [
+    "scripts/lib/convex-wasm-static-hermes-engine-globals.mjs",
+    "scripts/lib/convex-wasm-runtime-surface.mjs",
+    "scripts/lib/convex-wasm-intrinsic-hardening.mjs",
+    "scripts/lib/convex-wasm-runtime-support.mjs",
+    "scripts/convex-wasm-static-hermes-engine-globals.json",
+    "scripts/convex-wasm-static-hermes-global-probe-report.json",
+    "scripts/convex-wasm-runtime-surface-policy-identity.json",
+    "scripts/generate-convex-wasm-static-hermes-global-probe.mjs",
+    "scripts/test-fixtures/convex-wasm-runtime-surface/static-hermes-global-probe.js",
+    "scripts/lib/convex-wasm-static-hermes-global-probe-runtime-main.cpp",
+  ]) {
+    mkdirSync(dirname(join(fixture, file)), { recursive: true });
+    copyFileSync(join(root, file), join(fixture, file));
+  }
+  symlinkSync(join(root, "scripts/vendor"), join(fixture, "scripts/vendor"));
+  symlinkSync(join(root, "node_modules"), join(fixture, "node_modules"));
+  const inspect = () => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "--eval", `
+    import * as globals from './scripts/lib/convex-wasm-static-hermes-engine-globals.mjs';
+    import * as surface from './scripts/lib/convex-wasm-runtime-surface.mjs';
+    import * as hardening from './scripts/lib/convex-wasm-intrinsic-hardening.mjs';
+    console.log(JSON.stringify({
+      inventory: globals.convexWasmStaticHermesGlobalInventorySha256,
+      identity: surface.convexWasmTargetRuntimeSurfacePolicyIdentity,
+      hardening: hardening.convexWasmIntrinsicHardeningPolicySha256,
+      legacySource: hardening.convexWasmIntrinsicHardeningSourceSha256,
+      nativeSource: hardening.convexWasmNativeIntrinsicHardeningSourceSha256,
+    }));
+  `], { cwd: fixture, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const before = inspect();
+  const inventoryPath = join(fixture, "scripts/convex-wasm-static-hermes-engine-globals.json");
+  const reportPath = join(fixture, "scripts/convex-wasm-static-hermes-global-probe-report.json");
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  const report = JSON.parse(readFileSync(reportPath, "utf8"));
+  for (const field of ["buildRevision", "sourceRevision", "observedCheckoutRevision"]) {
+    report.build[field] = inventory.sourceIdentity[field] = "1".repeat(40);
+  }
+  for (const [field, material] of [
+    ["libhermesDeclarationSha256", report.build.sourceMaterials.libhermesDeclaration],
+    ["typedArraysDeclarationSha256", report.build.sourceMaterials.typedArraysDeclaration],
+    ["globalObjectSourceSha256", report.build.sourceMaterials.globalObject],
+    ["hostCmakeCacheSha256", report.build.cmake.host.identity],
+    ["hostShermesSha256", report.tools.shermes],
+    ["wasmCmakeCacheSha256", report.build.cmake.wasm.identity],
+    ["wasmLibhermesvmArchiveSha256", report.target.wasmLibhermesvmArchive],
+  ]) {
+    material.sha256 = inventory.sourceIdentity[field] = "2".repeat(64);
+  }
+  const writeEvidence = () => {
+    const { reportSha256: _previous, ...payload } = report;
+    report.reportSha256 = createHash("sha256")
+      .update(canonicalConvexWasmStaticHermesGlobalInventoryJson(payload)).digest("hex");
+    const bytes = `${JSON.stringify(report, null, 2)}\n`;
+    inventory.targetRuntimeProbe.reportSha256 = report.reportSha256;
+    inventory.targetRuntimeProbe.reportFileSha256 = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(reportPath, bytes);
+    writeFileSync(inventoryPath, JSON.stringify(inventory));
+  };
+  writeEvidence();
+  const after = inspect();
+  assert.notEqual(after.inventory, before.inventory);
+  assert.deepEqual({ ...after, inventory: before.inventory }, before);
+
+  inventory.targetRuntimeProbe.reportFileSha256 = "0".repeat(64);
+  writeFileSync(inventoryPath, JSON.stringify(inventory));
+  assert.throws(inspect, /probe report is not bound by the inventory/u);
+  writeEvidence();
+
+  // A real surface change must invalidate the stored identity and both emitted
+  // validators, even if all build provenance stays the same.
+  inventory.targetRuntimeProbe.globals.push("zFixtureGlobal");
+  inventory.semantics.zFixtureGlobal = {
+    class: "deterministic-ecmascript",
+    provider: "engine-runtime-untyped+typed-bridge",
+    read: { state: "admitted" },
+  };
+  for (const snapshot of Object.values(report.observation)) {
+    snapshot.keys.push("zFixtureGlobal");
+    snapshot.valueTypes.zFixtureGlobal = "function";
+  }
+  writeEvidence();
+  assert.throws(inspect, /runtime-surface policy identity is stale/u);
+  execFileSync(process.execPath, ["scripts/lib/convex-wasm-runtime-surface.mjs", "--write-identity"], { cwd: fixture });
+  const changed = inspect();
+  assert.notEqual(changed.identity.inventorySha256, after.identity.inventorySha256);
+  assert.notEqual(changed.identity.runtimeSurfacePolicySha256, after.identity.runtimeSurfacePolicySha256);
+  for (const field of ["hardening", "legacySource", "nativeSource"]) {
+    assert.notEqual(changed[field], after[field], field);
+  }
+});
 
 test("admits ordinary pinned runtime globals from availability and access policy", () => {
   assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.length, 71);

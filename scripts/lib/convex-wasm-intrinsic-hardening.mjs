@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 import {
   convexWasmAdmittedStaticHermesGlobals,
-  convexWasmStaticHermesGlobalInventory,
-  convexWasmStaticHermesGlobalInventorySha256,
+  convexWasmStaticHermesGlobalPolicy,
+  convexWasmStaticHermesGlobalPolicySha256,
 } from "./convex-wasm-static-hermes-engine-globals.mjs";
 
 function canonicalValue(value) {
@@ -32,8 +32,8 @@ export const convexWasmIntrinsicDescriptorStateValidatorBinding =
 export const convexWasmIntrinsicHardeningPolicy = deepFreeze({
   discovery: {
     globalInventory: {
-      kind: convexWasmStaticHermesGlobalInventory.kind,
-      sha256: convexWasmStaticHermesGlobalInventorySha256,
+      kind: convexWasmStaticHermesGlobalPolicy.kind,
+      sha256: convexWasmStaticHermesGlobalPolicySha256,
     },
     globalRoots: [...convexWasmAdmittedStaticHermesGlobals],
     representativeRoots: [

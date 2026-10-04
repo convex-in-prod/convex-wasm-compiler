@@ -375,6 +375,17 @@ and `--inventory scripts/convex-wasm-static-hermes-engine-globals.json`.
 This refreshes the build evidence, inventory and derived runtime-policy identity
 together. A changed global surface requires an explicit semantic-policy update.
 
+Runtime-surface and intrinsic-hardening identities hash the semantic inventory:
+observed global names and value types, typed availability, feature configuration,
+registration conditions, access rules and semantic classifications. The existing
+`inventorySha256` policy field identifies this projection. Source revisions,
+CMake caches, tool/archive hashes and probe-report hashes remain in the separately
+validated full inventory; refreshing that provenance alone does not change policy
+identity or generated hardening code. Artifact and build-cache identities still
+authenticate their exact inputs. Equal policy identities describe the same
+declared surface, not proof that two engine implementations behave identically;
+host ABI/import and value-format compatibility remain separate contracts.
+
 The compiler and precompiler use their own pinned Rust toolchains and lockfiles.
 Install the repository-local JavaScript dependencies before checking the
 source-graph tooling. The lowering tests pin one public Convex SDK fixture;
