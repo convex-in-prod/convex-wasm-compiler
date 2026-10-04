@@ -77,6 +77,7 @@ struct GuestBridge {
   std::shared_ptr<Function> activate_sdk;
   std::shared_ptr<Function> invoke_registered_wrapper;
   std::shared_ptr<Function> read_tagged_request;
+  std::shared_ptr<Function> array_buffer_constructor;
   std::shared_ptr<Function> start_typed_get;
   std::shared_ptr<Function> start_typed_string;
   std::shared_ptr<Function> start_typed_write;
@@ -183,6 +184,9 @@ constexpr const char *kCommitTsPlaceholderExportName =
     "__convexWasmSdkCommitTsPlaceholder";
 constexpr size_t kGuestInitializationDiagnosticMaximumBytes = 640;
 constexpr size_t kValueAbiMaximumFrameBytes = 16 * 1024 * 1024;
+// Invocation admission uses Convex value size. Tags and lengths may expand
+// valid small values, so its transport bound includes that fixed overhead.
+constexpr size_t kInvocationMaximumFrameBytes = 4 * kValueAbiMaximumFrameBytes + 4;
 constexpr size_t kValueAbiMaximumNesting = 64;
 constexpr uint32_t kValueAbiMaximumArrayLength = 8192;
 constexpr uint32_t kValueAbiMaximumObjectFields = 1024;
@@ -546,9 +550,65 @@ class ValueAbiWriter {
   std::vector<Value> ancestors_;
 };
 
+struct QueryAbiRecord : facebook::jsi::NativeState {
+  uint8_t kind;
+  std::vector<uint8_t> bytes;
+  size_t expression_nodes;
+  size_t expression_depth;
+};
+
 class QueryAbiWriter {
  public:
   explicit QueryAbiWriter(Runtime &js) : js_(js) {}
+
+  Value record(const Value &kind_input, const Value &first, const Value &second) {
+    try {
+      if (!kind_input.isNumber()) invalid();
+      const double number = kind_input.getNumber();
+      if (number < 1 || number > 29 || std::floor(number) != number) invalid();
+      const auto kind = static_cast<uint8_t>(number);
+      if (kind <= 17) {
+        expression_nodes_ = 1;
+        expression_depth_ = 1;
+        byte(kind);
+        if (kind == 1) optional_value(first);
+        else if (kind == 2) string(first);
+        else if (kind <= 13) {
+          expression(first, 1);
+          expression(second, 1);
+        } else if (kind <= 15) expression(first, 1);
+        else {
+          const Array operands = array(first);
+          const size_t count = operands.size(js_);
+          if (count > 256) invalid();
+          u32(count);
+          for (size_t i = 0; i < count; ++i) expression(operands.getValueAtIndex(js_, i), 1);
+        }
+      } else if (kind >= 21 && kind <= 27) {
+        byte(kind <= 25 ? kind - 20 : kind - 25);
+        string(first);
+        if (kind == 26) string(second);
+        else optional_value(second);
+      } else if (kind == 28) {
+        byte(1);
+        expression(first, 0);
+      } else if (kind == 29) {
+        byte(2);
+        integer(first);
+      } else invalid();
+      auto record = std::make_shared<QueryAbiRecord>();
+      record->kind = kind;
+      record->bytes = std::move(bytes_);
+      record->expression_nodes = expression_nodes_;
+      record->expression_depth = expression_depth_;
+      Object result(js_);
+      result.setNativeState(js_, record);
+      result.setExternalMemoryPressure(js_, sizeof(QueryAbiRecord) + record->bytes.capacity());
+      return Value(std::move(result));
+    } catch (const ValueAbiEncodeError &error) {
+      throw JSError(js_, error.message);
+    }
+  }
 
   std::vector<uint8_t> encode(const Value &query_input,
                               const Value &terminal_input,
@@ -595,7 +655,9 @@ class QueryAbiWriter {
         if (count > 256) invalid();
         u32(count);
         for (size_t i = 0; i < count; ++i) {
-          const Object constraint = object(constraints.getValueAtIndex(js_, i));
+          const Value input = constraints.getValueAtIndex(js_, i);
+          if (append_record(input, 21, 25, 0)) continue;
+          const Object constraint = object(input);
           const std::string kind = string_value(constraint.getProperty(js_, "type"));
           if (kind == "Eq") byte(1);
           else if (kind == "Gt") byte(2);
@@ -612,7 +674,9 @@ class QueryAbiWriter {
         if (count == 0 || count > 256) invalid();
         u32(count);
         for (size_t i = 0; i < count; ++i) {
-          const Object filter = object(filters.getValueAtIndex(js_, i));
+          const Value input = filters.getValueAtIndex(js_, i);
+          if (append_record(input, i == 0 ? 26 : 27, i == 0 ? 26 : 27, 0)) continue;
+          const Object filter = object(input);
           const std::string kind = string_value(filter.getProperty(js_, "type"));
           if (i == 0 && kind == "Search") byte(1);
           else if (i > 0 && kind == "Eq") byte(2);
@@ -627,7 +691,9 @@ class QueryAbiWriter {
       if (count > 256) invalid();
       u32(count);
       for (size_t i = 0; i < count; ++i) {
-        const Object operator_object = object(operators.getValueAtIndex(js_, i));
+        const Value input = operators.getValueAtIndex(js_, i);
+        if (append_record(input, 28, 29, 0)) continue;
+        const Object operator_object = object(input);
         const Array keys = operator_object.getPropertyNames(js_);
         if (keys.size(js_) != 1) invalid();
         const std::string kind = string_value(keys.getValueAtIndex(js_, 0));
@@ -744,8 +810,25 @@ class QueryAbiWriter {
     append(buffer.data(js_), length);
   }
 
+  bool append_record(const Value &value, uint8_t minimum_kind,
+                     uint8_t maximum_kind, size_t depth) {
+    if (!value.isObject()) return false;
+    const Object object = value.asObject(js_);
+    if (!object.hasNativeState<QueryAbiRecord>(js_)) return false;
+    const auto record = object.getNativeState<QueryAbiRecord>(js_);
+    if (record->kind < minimum_kind || record->kind > maximum_kind ||
+        depth + record->expression_depth > 64 ||
+        expression_nodes_ + record->expression_nodes > 4096) invalid();
+    expression_nodes_ += record->expression_nodes;
+    expression_depth_ = std::max(expression_depth_, depth + record->expression_depth);
+    append(record->bytes.data(), record->bytes.size());
+    return true;
+  }
+
   void expression(const Value &value, size_t depth) {
+    if (append_record(value, 1, 17, depth)) return;
     if (depth >= 64 || ++expression_nodes_ > 4096) invalid();
+    expression_depth_ = std::max(expression_depth_, depth + 1);
     const Object node = object(value);
     const Array keys = node.getPropertyNames(js_);
     if (keys.size(js_) != 1) invalid();
@@ -794,6 +877,7 @@ class QueryAbiWriter {
   Runtime &js_;
   std::vector<uint8_t> bytes_;
   size_t expression_nodes_ = 0;
+  size_t expression_depth_ = 0;
 };
 
 class ValueAbiReader {
@@ -893,19 +977,20 @@ class ValueAbiReader {
       }
       const auto keys = map.Keys();
       const auto values = map.Values();
-      std::vector<std::pair<std::string, Value>> fields;
-      fields.reserve(map.size());
-      const char *previous_key = nullptr;
-      for (size_t index = 0; index < map.size(); ++index) {
-        const char *key = keys[index].AsKey();
-        if (previous_key != nullptr && std::strcmp(previous_key, key) >= 0) {
-          throw JSError(js_, "Packed document object keys are invalid");
-        }
-        fields.emplace_back(key, packed(values[index], nesting + 1));
-        previous_key = key;
-      }
       return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                       .createObjectWithProperties(fields));
+                       .createObjectFromEntries(
+                           map.size(),
+                           [&](size_t index) -> std::string_view {
+                             const char *key = keys[index].AsKey();
+                             if (index != 0 &&
+                                 std::strcmp(keys[index - 1].AsKey(), key) >= 0) {
+                               throw JSError(js_, "Packed document object keys are invalid");
+                             }
+                             return key;
+                           },
+                           [&](size_t index) {
+                             return packed(values[index], nesting + 1);
+                           }));
     }
     if (reference.IsAnyVector()) {
       const size_t count = reference.IsUntypedVector()
@@ -916,18 +1001,15 @@ class ValueAbiReader {
       if (count > kValueAbiMaximumArrayLength) {
         throw JSError(js_, "Packed value array length is invalid");
       }
-      std::vector<Value> elements;
-      elements.reserve(count);
-      for (size_t index = 0; index < count; ++index) {
-        const auto element = reference.IsUntypedVector()
-                                 ? reference.AsVector()[index]
-                                 : reference.IsTypedVector()
-                                       ? reference.AsTypedVector()[index]
-                                       : reference.AsFixedTypedVector()[index];
-        elements.push_back(packed(element, nesting + 1));
-      }
       return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                       .createArrayWithValues(elements));
+                       .createArrayFromValues(count, [&](size_t index) {
+                         const auto element = reference.IsUntypedVector()
+                                                  ? reference.AsVector()[index]
+                                                  : reference.IsTypedVector()
+                                                        ? reference.AsTypedVector()[index]
+                                                        : reference.AsFixedTypedVector()[index];
+                         return packed(element, nesting + 1);
+                       }));
     }
     throw JSError(js_, "Packed document contains an unsupported value type");
   }
@@ -979,13 +1061,10 @@ class ValueAbiReader {
             count > static_cast<size_t>(end_ - cursor_)) {
           throw JSError(js_, "Typed value array length is invalid");
         }
-        std::vector<Value> elements;
-        elements.reserve(count);
-        for (uint32_t index = 0; index < count; ++index) {
-          elements.push_back(value(nesting + 1));
-        }
         return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                         .createArrayWithValues(elements));
+                         .createArrayFromValues(count, [&](size_t) {
+                           return value(nesting + 1);
+                         }));
       }
       case 8: {
         if (nesting >= kValueAbiMaximumNesting) {
@@ -996,17 +1075,32 @@ class ValueAbiReader {
             count > static_cast<size_t>(end_ - cursor_) / 5) {
           throw JSError(js_, "Typed value object length is invalid");
         }
-        std::vector<std::pair<std::string, Value>> fields;
+        struct Field {
+          std::string_view key;
+          const uint8_t *value;
+        };
+        // CVA1 interleaves keys and values. Index borrowed spans before
+        // allocating the final layout; no keys or decoded values are copied.
+        std::vector<Field> fields;
         fields.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
           const auto [bytes, length] = slice();
-          Value field = value(nesting + 1);
-          fields.emplace_back(
-              std::string(reinterpret_cast<const char *>(bytes), length),
-              std::move(field));
+          fields.push_back({
+              std::string_view(reinterpret_cast<const char *>(bytes), length),
+              cursor_});
+          skip_value(nesting + 1);
         }
-        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                         .createObjectWithProperties(fields));
+        const uint8_t *after = cursor_;
+        auto result = static_cast<facebook::hermes::HermesRuntime &>(js_)
+                          .createObjectFromEntries(
+                              count,
+                              [&](size_t index) { return fields[index].key; },
+                              [&](size_t index) {
+                                cursor_ = fields[index].value;
+                                return value(nesting + 1);
+                              });
+        cursor_ = after;
+        return Value(std::move(result));
       }
       case 9:
         if (commit_ts_placeholder_.isUndefined()) {
@@ -1025,21 +1119,61 @@ class ValueAbiReader {
         return packed(root, nesting);
       }
       case 11: {
+        if (nesting != 0) throw JSError(js_, "Document collection must be a top-level value");
         const uint32_t count = u32();
         if (count > kValueAbiMaximumArrayLength ||
             count > static_cast<size_t>(end_ - cursor_)) {
           throw JSError(js_, "Document collection length is invalid");
         }
-        std::vector<Value> elements;
-        elements.reserve(count);
+        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
+                         .createArrayFromValues(count, [&](size_t) {
+                           if (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10)) {
+                             throw JSError(js_, "Document collection entry is invalid");
+                           }
+                           return value(0);
+                         }));
+      }
+      default:
+        throw JSError(js_, "Typed value frame contains an unsupported tag");
+    }
+  }
+
+  void skip_value(size_t nesting) {
+    switch (byte()) {
+      case 0:
+      case 1:
+      case 2:
+      case 9:
+        return;
+      case 3:
+      case 4:
+        take(8);
+        return;
+      case 5:
+      case 6:
+      case 10:
+        slice();
+        return;
+      case 7:
+      case 8:
+      case 11: {
+        const uint8_t tag = cursor_[-1];
+        if (nesting >= kValueAbiMaximumNesting || (tag == 11 && nesting != 0)) {
+          throw JSError(js_, "Typed value nesting exceeds the limit");
+        }
+        const uint32_t count = u32();
+        if (count > (tag == 8 ? kValueAbiMaximumObjectFields : kValueAbiMaximumArrayLength) ||
+            count > static_cast<size_t>(end_ - cursor_) / (tag == 8 ? 5 : 1)) {
+          throw JSError(js_, "Typed value container length is invalid");
+        }
         for (uint32_t index = 0; index < count; ++index) {
-          if (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10)) {
+          if (tag == 8) slice();
+          if (tag == 11 && (cursor_ == end_ || (*cursor_ != 8 && *cursor_ != 10))) {
             throw JSError(js_, "Document collection entry is invalid");
           }
-          elements.push_back(value(0));
+          skip_value(tag == 11 ? 0 : nesting + 1);
         }
-        return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                         .createArrayWithValues(elements));
+        return;
       }
       default:
         throw JSError(js_, "Typed value frame contains an unsupported tag");
@@ -2351,6 +2485,18 @@ void install_guest_bridge(Runtime &js) {
         std::memcpy(buffer.data(js), bytes.data(), bytes.size());
         return Value(std::move(buffer));
       });
+  auto create_query_record = Function::createFromHostFunction(
+      js,
+      PropNameID::forAscii(js, "createTypedQueryRecord"),
+      3,
+      [](Runtime &js, const Value &, const Value *arguments,
+         size_t count) -> Value {
+        if (count != 3) {
+          throw JSError(js, "Typed query record arguments are invalid");
+        }
+        return QueryAbiWriter(js).record(arguments[0], arguments[1],
+                                         arguments[2]);
+      });
   auto start_typed_query = Function::createFromHostFunction(
       js,
       PropNameID::forAscii(js, "startTypedCapabilityQuery"),
@@ -2375,10 +2521,11 @@ void install_guest_bridge(Runtime &js) {
   bridge_bootstrap->call(js, install, take_typed_value, set_typed_result,
                          start_typed_get, start_typed_string, start_typed_write,
                          start_typed_run_udf, start_typed_schedule,
-                         start_typed_query, capture_query_value);
+                         start_typed_query, capture_query_value, create_query_record);
   if (guest_bridge == nullptr) {
     throw JSError(js, "Capability bootstrap did not install its bridge");
   }
+  guest_bridge->array_buffer_constructor = array_buffer_constructor;
   guest_bridge->start_typed_get =
       std::make_shared<Function>(std::move(start_typed_get));
   guest_bridge->start_typed_string =
@@ -3083,6 +3230,17 @@ extern "C" int convex_wasm_udf_run(void) {
 
   auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
   auto js_error_phase = JSErrorPhase::ReadCapabilityIdentity;
+  const auto layouts_before = static_cast<facebook::hermes::HermesRuntime &>(js).getObjectLayoutStatistics();
+  bool layouts_reported = false;
+  const auto report_layouts = [&]() {
+    if (layouts_reported) return;
+    layouts_reported = true;
+    const auto after = static_cast<facebook::hermes::HermesRuntime &>(js).getObjectLayoutStatistics();
+    convex_observe_object_layouts(after.hits - layouts_before.hits,
+                                  after.misses - layouts_before.misses,
+                                  after.evictions - layouts_before.evictions,
+                                  after.fallbacks - layouts_before.fallbacks);
+  };
   bool invocation_activated = false;
   int32_t caught_status = 5;
   try {
@@ -3095,7 +3253,24 @@ extern "C" int convex_wasm_udf_run(void) {
         js, String::createFromAscii(js, udf_kind));
     invocation_activated = true;
     js_error_phase = JSErrorPhase::ReadInvocationRequest;
-    auto request = guest_bridge->read_request->call(js);
+    auto commit_ts_placeholder = selected_commit_ts_placeholder(js, entry_slot);
+    Value request;
+    {
+      const int32_t length = convex_guest_value_request_binary_v1();
+      if (length < 0 || static_cast<size_t>(length) > kInvocationMaximumFrameBytes) {
+        throw JSError(js, "Binary invocation argument length is invalid");
+      }
+      std::vector<uint8_t> bytes(static_cast<size_t>(length));
+      if (convex_guest_value_request_copy(
+              reinterpret_cast<char *>(bytes.data()), length) != length) {
+        throw JSError(js, "Binary invocation argument copy failed");
+      }
+      request = ValueAbiReader(js, bytes.data(), bytes.size(), commit_ts_placeholder,
+                               *guest_bridge->array_buffer_constructor).decode();
+      if (!request.isObject() || request.asObject(js).isArray(js)) {
+        throw JSError(js, "Binary invocation arguments must be an object");
+      }
+    }
     js_error_phase = JSErrorPhase::SelectHandler;
     auto selected_export =
         selected_application_export(js, entry_slot, export_name);
@@ -3109,8 +3284,6 @@ extern "C" int convex_wasm_udf_run(void) {
           js, static_cast<const Value *>(invocation_arguments), size_t{2});
     } else {
       js_error_phase = JSErrorPhase::CreateInvocationContext;
-      auto commit_ts_placeholder =
-          selected_commit_ts_placeholder(js, entry_slot);
       auto context = invocation_context(
           js, capability_identity, udf_kind, commit_ts_placeholder);
       Value invocation_arguments[] = {
@@ -3165,6 +3338,7 @@ extern "C" int convex_wasm_udf_run(void) {
         throw InvocationFailure{2};
       }
     }
+    report_layouts();
     js_error_phase = JSErrorPhase::CleanupInvocation;
     auto cleanup_result = guest_bridge->cleanup->call(js);
     js_error_phase = JSErrorPhase::ValidateCleanupResult;
@@ -3198,6 +3372,7 @@ extern "C" int convex_wasm_udf_run(void) {
   }
   if (invocation_activated && guest_bridge != nullptr) {
     try {
+      report_layouts();
       auto cleanup_result = guest_bridge->cleanup->call(js);
       const int32_t guest_abandoned = exact_i32(
           js,

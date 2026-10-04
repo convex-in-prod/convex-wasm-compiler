@@ -1,16 +1,16 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "15f5041d9040a25172458b12f072c17a0e001767",
-    "sourceRevision": "15f5041d9040a25172458b12f072c17a0e001767",
-    "observedCheckoutRevision": "15f5041d9040a25172458b12f072c17a0e001767",
+    "buildRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401",
+    "sourceRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401",
+    "observedCheckoutRevision": "cbdbce3a5a5932f90edaff5692a50f0b245c2401",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
-    "hostCmakeCacheSha256": "5dd90f62453e607d0d90a924a0cf4267836836fa515208dd3c89dd2cac8516e8",
-    "hostShermesSha256": "3b2f5df6098e5bd3591e70ddc482791913db050c264e4e5853305fb60341be90",
-    "wasmCmakeCacheSha256": "1924d1e834e4fd9e2e31df82be2380d332ccc90651677776cf1beb1bd4f9e18f",
-    "wasmLibhermesvmArchiveSha256": "f23deb9ac430d520eef6de8f83cafa243cfc6543b115265cbf9cfb59597f91a0"
+    "hostCmakeCacheSha256": "853432dc783fc202d26b2021810a1cface9c2f91bda9eeb0048b56c83d20e0a3",
+    "hostShermesSha256": "9c03af9f34e89de1ac359b58e2c5b8b4361441ca20be7edfcf5e3b192a2512c5",
+    "wasmCmakeCacheSha256": "f985b6b3eb0895c4a41d45c15f4620aa6ffe8cb227e96844284c3f8c542dd566",
+    "wasmLibhermesvmArchiveSha256": "094fa03e1323572c0cbe504fe2c09586795b5f781487de0bb5c9a1f20886bc34"
   },
   "buildConfiguration": {
     "coreExtensions": true,
@@ -73,8 +73,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "7260cf416e0cbd4e4b62ec7d3e251f60509e3fac050c9bda960754fe2984293f",
-    "reportSha256": "206ab33e1e3b178fac958ea53d499b6f7ae557c9514de0bd9477749ad22dcafa",
+    "reportFileSha256": "dd41eefde3257d10a52bd1adb7c26743455b3cbec8856cdf70fabbbcab2c6b1c",
+    "reportSha256": "9078697adeb36db1b1b44b7d38e6943ad9793dded6f0242b8930f1d63bf3f7e3",
     "globals": [
       "$SHBuiltin",
       "AggregateError",

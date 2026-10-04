@@ -4,8 +4,10 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
+import { buildSync } from "esbuild";
 
 import { renderConvexWasmIntrinsicHardeningPrelude } from "./convex-wasm-intrinsic-hardening.mjs";
 import { renderOpaqueAbiHeader } from "./convex-wasm-lowering.mjs";
@@ -23,6 +25,9 @@ test("native adapter materializes packed values and validates hardened intrinsic
     return;
   }
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const sdkRoot =
+    process.env.CONVEX_SDK_TEST_SOURCE_ROOT ??
+    dirname(createRequire(import.meta.url).resolve("convex/package.json"));
   const temporary = mkdtempSync(join(tmpdir(), "convex-native-values-"));
   const run = (command, args) => {
     const result = spawnSync(command, args, {
@@ -47,6 +52,15 @@ test("native adapter materializes packed values and validates hardened intrinsic
           : [];
     });
   try {
+    const sdkFixture = join(temporary, "sdk.js");
+    buildSync({
+      entryPoints: [join(root, "scripts/test-fixtures/native-values/sdk.js")],
+      alias: { "sdk-database": join(sdkRoot, "src/server/impl/database_impl.ts") },
+      bundle: true,
+      format: "iife",
+      target: "es2022",
+      outfile: sdkFixture,
+    });
     writeFileSync(
       join(temporary, "convex_wasm_opaque_abi_v3.h"),
       renderOpaqueAbiHeader(),
@@ -110,7 +124,13 @@ test("native adapter materializes packed values and validates hardened intrinsic
       "-lpthread",
     ]);
     assert.match(
-      run(executable, [join(temporary, "hardening.js")]),
+      run(executable, [
+        join(temporary, "hardening.js"),
+        sdkFixture,
+        process.env.CONVEX_SDK_TEST_SOURCE_ROOT === undefined
+          ? "legacy-allowed"
+          : "require-records",
+      ]),
       /native values and intrinsic validation passed/u,
     );
   } finally {
