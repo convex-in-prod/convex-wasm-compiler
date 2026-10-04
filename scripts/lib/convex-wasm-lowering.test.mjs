@@ -3,7 +3,9 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { buildSync } from "esbuild";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { version as convexSdkVersion } from "convex";
@@ -77,6 +79,68 @@ async function drainCapabilityMicrotasks() {
     await Promise.resolve();
   }
 }
+
+test("source SDK reads, writes and scheduling reach the typed runtime without envelopes", async () => {
+  const sdkRoot =
+    process.env.CONVEX_SDK_TEST_SOURCE_ROOT ??
+    dirname(createRequire(import.meta.url).resolve("convex/package.json"));
+  const compiled = buildSync({
+    stdin: {
+      contents: `
+      import { setupWriter } from "sdk-database";
+      import { setupMutationScheduler } from "sdk-scheduler";
+      globalThis.sdkOperations = { db: setupWriter(), scheduler: setupMutationScheduler() };
+    `,
+    },
+    alias: {
+      "sdk-database": join(sdkRoot, "src/server/impl/database_impl.ts"),
+      "sdk-scheduler": join(sdkRoot, "src/server/impl/scheduler_impl.ts"),
+    },
+    bundle: true,
+    format: "iife",
+    target: "es2022",
+    write: false,
+  }).outputFiles[0].text;
+  const harness = nativeCapabilityHarness({
+    sdkPackageVersion: JSON.parse(readFileSync(join(sdkRoot, "package.json"), "utf8")).version,
+  });
+  harness.guestValue(compiled);
+  harness.activateSdk("mutation");
+  const read = harness.guestValue('sdkOperations.db.get("documents", "id")');
+  assert.deepEqual(harness.directGetStarts.shift(), { id: "id", table: "documents", isSystem: 0 });
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(null));
+  assert.equal(await read, null);
+  const inserted = harness.guestValue('sdkOperations.db.insert("documents", {number: 1n})');
+  const insertion = harness.directWriteStarts.shift();
+  assert.equal(insertion.kind, 1);
+  assert.equal(insertion.table, "documents");
+  assert.equal(insertion.value.number, 1n);
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("new-id"));
+  assert.equal(await inserted, "new-id");
+  const patched = harness.guestValue(
+    'sdkOperations.db.patch("documents", "id", {removed: undefined})'
+  );
+  const patch = harness.directWriteStarts.shift();
+  assert.equal(patch.kind, 2);
+  assert.equal(patch.id, "id");
+  assert.deepEqual(Object.keys(patch.value), ["removed"]);
+  assert.equal(patch.value.removed, undefined);
+  harness.settle(harness.lastStartedOperationHandle(), 0, 0);
+  await patched;
+  const scheduled = harness.guestValue(
+    'sdkOperations.scheduler.runAt(1500, "tasks:write", {number: 2n})'
+  );
+  const schedule = harness.directScheduleStarts.shift();
+  assert.equal(schedule.timeMilliseconds, 1500);
+  assert.equal(schedule.address, "tasks:write");
+  assert.equal(schedule.args.number, 2n);
+  harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate("job-id"));
+  assert.equal(await scheduled, "job-id");
+  assert.equal(harness.requests.length, 0);
+  assert.equal(harness.requestPayloads.length, 0);
+  assert.equal(harness.outstandingHandles(), 0);
+  assert.equal(harness.cleanup(), 0);
+});
 
 function lowerConvexWasmExport(input) {
   return lowerConvexWasmExportProduction({
@@ -159,8 +223,13 @@ function guestNativeCodec(commitTsPlaceholder) {
   return codec;
 }
 
-function nativeCapabilityHarness({ now = 1_700_000_000_250, typedQueryArgs = false } = {}) {
-  const rendered = renderNativeDbGetCapabilityTarget({
+function nativeCapabilityHarness({
+  now = 1_700_000_000_250,
+  typedQueryArgs = false,
+  sdkPackageVersion = convexSdkVersion,
+} = {}) {
+  const rendered = renderNativeDbGetCapabilityTargetProduction({
+    sdkPackageVersion,
     argumentFields: [],
     compileProfileJavascript: "var __convexWasmCompileProfile = {};",
   });
@@ -463,6 +532,9 @@ function nativeCapabilityHarness({ now = 1_700_000_000_250, typedQueryArgs = fal
       new Uint8Array(buffer).set([67, 86, 65, 49, 0]);
       capturedQueryValues.push({ value: structuredClone(value), buffer });
       return buffer;
+    },
+    () => {
+      throw new Error("Query records require the native adapter fixture");
     }
   );
   assert.equal(bridge.length, 10);
@@ -8427,7 +8499,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
     validateIntrinsicDescriptorState
   );
   const activateSdk = source.indexOf("guest_bridge->activate_sdk->call(", runStart);
-  const readRequest = source.indexOf("guest_bridge->read_request->call(js)", activateSdk);
+  const readRequest = source.indexOf("convex_guest_value_request_binary_v1()", activateSdk);
   const invokeRegisteredWrapper = source.indexOf(
     "guest_bridge->invoke_registered_wrapper->call(",
     readRequest
@@ -8620,7 +8692,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /bridge_bootstrap->call\(js, install, take_typed_value, set_typed_result,\s*start_typed_get, start_typed_string, start_typed_write,\s*start_typed_run_udf, start_typed_schedule,\s*start_typed_query, capture_query_value\);[\s\S]*?if \(guest_bridge == nullptr\)[\s\S]*?bridge_bootstrap\.reset\(\);/u
+    /bridge_bootstrap->call\(js, install, take_typed_value, set_typed_result,\s*start_typed_get, start_typed_string, start_typed_write,\s*start_typed_run_udf, start_typed_schedule,\s*start_typed_query, capture_query_value, create_query_record\);[\s\S]*?if \(guest_bridge == nullptr\)[\s\S]*?bridge_bootstrap\.reset\(\);/u
   );
   assert.match(
     source,
@@ -8635,11 +8707,11 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /auto commit_ts_placeholder =\s*selected_commit_ts_placeholder\(js, entry_slot\);\s*auto context = invocation_context\(\s*js, capability_identity, udf_kind, commit_ts_placeholder\);/u
+    /auto commit_ts_placeholder =\s*selected_commit_ts_placeholder\(js, entry_slot\);[\s\S]*?auto context = invocation_context\(\s*js, capability_identity, udf_kind, commit_ts_placeholder\);/u
   );
   assert.match(
     source,
-    /if \(invocation_abi == kSelectedInvocationAbiOfficialWrapper\) \{[\s\S]*?guest_bridge->invoke_registered_wrapper->call\([\s\S]*?size_t\{2\}\);[\s\S]*?\} else \{[\s\S]*?selected_commit_ts_placeholder/u
+    /if \(invocation_abi == kSelectedInvocationAbiOfficialWrapper\) \{[\s\S]*?guest_bridge->invoke_registered_wrapper->call\([\s\S]*?size_t\{2\}\);[\s\S]*?\} else \{[\s\S]*?auto context = invocation_context/u
   );
   assert.doesNotMatch(source, /is_registered_wrapper|invocation_method/u);
   assert.match(source, /handler_udf_kind\(convex_wasm_selected_handler_udf_kind\(\)\)/u);
@@ -8685,7 +8757,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /if \(invocation_activated && guest_bridge != nullptr\) \{\s*try \{\s*auto cleanup_result = guest_bridge->cleanup->call\(js\);[\s\S]*?const int32_t host_abandoned = convex_async_operation_cancel_all\(\);/u
+    /if \(invocation_activated && guest_bridge != nullptr\) \{\s*try \{\s*report_layouts\(\);\s*auto cleanup_result = guest_bridge->cleanup->call\(js\);[\s\S]*?const int32_t host_abandoned = convex_async_operation_cancel_all\(\);/u
   );
   assert.match(
     source,
@@ -8753,7 +8825,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   const guestBridge = source.match(/struct GuestBridge \{([\s\S]*?)\n\};/u);
   assert.ok(guestBridge);
-  assert.equal(guestBridge[1].match(/std::shared_ptr<Function>/gu)?.length, 16);
+  assert.equal(guestBridge[1].match(/std::shared_ptr<Function>/gu)?.length, 17);
   assert.match(guestBridge[1], /std::shared_ptr<Function> activate_sdk;/u);
   assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_string;/u);
   assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_write;/u);
@@ -8762,7 +8834,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   assert.match(guestBridge[1], /std::shared_ptr<Function> start_typed_schedule;/u);
   assert.match(
     source,
-    /auto request = guest_bridge->read_request->call\(js\);[\s\S]*?if \(invocation_abi == kSelectedInvocationAbiOfficialWrapper\)/u
+    /request = ValueAbiReader\(js,[\s\S]*?if \(invocation_abi == kSelectedInvocationAbiOfficialWrapper\)/u
   );
   assert.doesNotMatch(guestBridge[1], /entry_selector|handler/u);
   assert.doesNotMatch(source, /guest_bridge->entry_selector/u);

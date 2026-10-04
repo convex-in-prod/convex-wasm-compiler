@@ -386,6 +386,32 @@ authenticate their exact inputs. Equal policy identities describe the same
 declared surface, not proof that two engine implementations behave identically;
 host ABI/import and value-format compatibility remain separate contracts.
 
+The native guest receives invocation arguments through
+`convex_guest_value_request_binary_v1` and the existing request-copy import.
+These arguments use the same `CVA1` value representation as database results;
+the SDK's value invocation entry point receives the decoded object directly.
+The backend must advertise that import and `convex_observe_object_layouts`
+before compiling this runtime. Older modules keep their JSON input contract on
+a compatible backend. Compiler revisions alone do not select the wire format.
+
+An SDK supporting `asyncSyscallTyped`, `syscallTyped`, and `queryRecord` avoids
+the legacy request envelope and builds compact `CQR1` records as queries are
+constructed. The numeric operation/tuple contract lives in the SDK's
+`ValueSyscall` definition and `renderNativeConvexSdkFacade` in
+[`convex-wasm-lowering.mjs`](scripts/lib/convex-wasm-lowering.mjs). Operation
+codes and tuple positions are stable; future incompatible changes need a new
+hook contract. Ordinary V8 and older SDK callers retain their supported
+adapters. New records retain the original literal snapshot timing, limits and
+host authorization. Composing records can copy child bytes; it does not claim
+zero-copy construction.
+
+For local source integration checks, `CONVEX_SDK_TEST_SOURCE_ROOT` selects an
+SDK checkout for the lowering and native-value fixtures. The native fixture
+also takes `CONVEX_HERMES_TEST_SOURCE_ROOT` and
+`CONVEX_HERMES_TEST_BUILD_ROOT`; it links the actual adapter and compares SDK
+query bytes through the host Hermes runtime. This does not replace a selected
+application build or deployment measurement.
+
 The compiler and precompiler use their own pinned Rust toolchains and lockfiles.
 Install the repository-local JavaScript dependencies before checking the
 source-graph tooling. The lowering tests pin one public Convex SDK fixture;

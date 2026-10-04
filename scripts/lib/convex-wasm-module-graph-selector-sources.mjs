@@ -67,6 +67,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_request_release")
 void convex_wasm_graph_import_capability_request_release(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_current")
 int64_t convex_wasm_graph_import_capability_current(void);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_observe_object_layouts")
+void convex_wasm_graph_import_observe_object_layouts(int64_t, int64_t, int64_t, int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_console_message")
 int32_t convex_wasm_graph_import_console_message(int64_t, int32_t, const char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_capability_sync_take")
@@ -114,6 +116,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_math_random")
 double convex_wasm_graph_import_math_random(int64_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_request_len")
 int32_t convex_wasm_graph_import_guest_value_request_len(void);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_request_binary_v1")
+int32_t convex_wasm_graph_import_guest_value_request_binary_v1(void);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_request_copy")
 int32_t convex_wasm_graph_import_guest_value_request_copy(char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_guest_value_encode")
@@ -151,6 +155,9 @@ void convex_capability_request_release(int64_t request) {
 }
 int64_t convex_capability_current(void) {
   return convex_wasm_graph_import_capability_current();
+}
+void convex_observe_object_layouts(int64_t hits, int64_t misses, int64_t evictions, int64_t fallbacks) {
+  convex_wasm_graph_import_observe_object_layouts(hits, misses, evictions, fallbacks);
 }
 int32_t convex_console_message(
     int64_t capability, int32_t level, const char *messages, int32_t length) {
@@ -246,6 +253,9 @@ double convex_math_random(int64_t capability) {
 }
 int32_t convex_guest_value_request_len(void) {
   return convex_wasm_graph_import_guest_value_request_len();
+}
+int32_t convex_guest_value_request_binary_v1(void) {
+  return convex_wasm_graph_import_guest_value_request_binary_v1();
 }
 int32_t convex_guest_value_request_copy(char *destination, int32_t capacity) {
   return convex_wasm_graph_import_guest_value_request_copy(destination, capacity);

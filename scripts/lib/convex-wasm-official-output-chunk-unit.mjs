@@ -430,11 +430,16 @@ async function transformChunkModule({
   sourcefile,
   transform,
 }) {
-  const transformSource = async () =>
-    await transform.call(esbuild, source, {
+  const transformSource = async () => {
+    const result = await transform.call(esbuild, source, {
       ...esbuildChunkModuleTransformOptions,
       sourcefile,
     });
+    return {
+      ...result,
+      code: lowerModuleExportForwarding(result.code, source, module.identity.path),
+    };
+  };
   if (persistentCache === undefined) {
     const result = await transformSource();
     const code = normalizeTransformedCode(result.code, "official-output chunk transformed code");
@@ -1080,6 +1085,241 @@ function sameModuleDependencyBindings(left, right) {
   );
 }
 
+const moduleBindingFacts = new WeakMap();
+const moduleImmutableImports = new WeakMap();
+
+function immutableImportPlan(module, modulesByPath) {
+  let plans = moduleImmutableImports.get(modulesByPath);
+  if (plans !== undefined) return plans.get(module.identity.path);
+  const facts = new Map();
+  for (const [path, candidate] of modulesByPath) {
+    let fact = moduleBindingFacts.get(candidate);
+    if (fact === undefined) {
+      const ast = parseChunkJavascript(
+        candidate.source,
+        path,
+        "immutable module bindings",
+        "module"
+      );
+      const declarations = new Map();
+      const writes = new Set();
+      const exports = new Map();
+      const dependencies = new Set();
+      let opaque = false;
+      const writtenPattern = (node) => {
+        if (node?.type === "Identifier") writes.add(node.name);
+        else if (node?.type === "AssignmentPattern") writtenPattern(node.left);
+        else if (node?.type === "RestElement") writtenPattern(node.argument);
+        else if (node?.type === "ArrayPattern") node.elements.forEach(writtenPattern);
+        else if (node?.type === "ObjectPattern")
+          node.properties.forEach((property) =>
+            writtenPattern(property.type === "RestElement" ? property.argument : property.value)
+          );
+      };
+      visitAst(ast.program, (node) => {
+        if (node.type === "Identifier") {
+          if (["eval", "module", "require"].includes(node.name)) opaque = true;
+        }
+        if (node.type === "AssignmentExpression") writtenPattern(node.left);
+        if (node.type === "UpdateExpression") writtenPattern(node.argument);
+        if (node.type === "ForInStatement" || node.type === "ForOfStatement")
+          writtenPattern(node.left);
+        if (node.type === "VariableDeclarator" && node.id.type === "Identifier") {
+          declarations.set(node.id.name, (declarations.get(node.id.name) ?? 0) + 1);
+        }
+        if (
+          (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") &&
+          node.id !== null
+        ) {
+          declarations.set(node.id.name, (declarations.get(node.id.name) ?? 0) + 1);
+        }
+        const dependency = sourceDependencyLiteral(node, path, true);
+        if (dependency === null) opaque = true;
+        else if (dependency !== undefined)
+          dependencies.add(resolveLiteralSpecifier(path, dependency.specifier));
+      });
+      const initialized = new Set();
+      for (const statement of ast.program.body) {
+        const declaration =
+          statement.type === "ExportNamedDeclaration" ||
+          statement.type === "ExportDefaultDeclaration"
+            ? statement.declaration
+            : statement;
+        if (declaration?.type === "VariableDeclaration") {
+          for (const item of declaration.declarations) {
+            if (item.id.type === "Identifier" && item.init !== null) initialized.add(item.id.name);
+          }
+        } else if (
+          (declaration?.type === "FunctionDeclaration" ||
+            declaration?.type === "ClassDeclaration") &&
+          declaration.id !== null
+        ) {
+          initialized.add(declaration.id.name);
+        }
+        if (statement.type === "ExportNamedDeclaration" && statement.source === null) {
+          if (declaration?.type === "VariableDeclaration") {
+            for (const item of declaration.declarations)
+              if (item.id.type === "Identifier") exports.set(item.id.name, item.id.name);
+          } else if (declaration?.id?.type === "Identifier")
+            exports.set(declaration.id.name, declaration.id.name);
+          for (const specifier of statement.specifiers) {
+            if (specifier.type === "ExportSpecifier")
+              exports.set(
+                specifier.exported.name ?? specifier.exported.value,
+                specifier.local.name
+              );
+          }
+        }
+        if (statement.type === "ExportDefaultDeclaration") {
+          // An expression default export captures its result during evaluation.
+          const namedDeclaration =
+            ["FunctionDeclaration", "ClassDeclaration"].includes(declaration.type) &&
+            declaration.id !== null;
+          exports.set("default", namedDeclaration ? declaration.id.name : null);
+        }
+      }
+      const immutable = new Set(
+        [...exports]
+          .filter(
+            ([, local]) =>
+              local === null ||
+              (initialized.has(local) && declarations.get(local) === 1 && !writes.has(local))
+          )
+          .map(([name]) => name)
+      );
+      fact = {
+        imports: ast.program.body
+          .filter((node) => node.type === "ImportDeclaration")
+          .map((node) => ({
+            start: node.source.start,
+            path: resolveLiteralSpecifier(path, node.source.value),
+            names: node.specifiers.flatMap((specifier) =>
+              specifier.type === "ImportSpecifier"
+                ? [specifier.imported.name ?? specifier.imported.value]
+                : specifier.type === "ImportDefaultSpecifier"
+                  ? ["default"]
+                  : []
+            ),
+          })),
+        dependencies,
+        immutable: opaque ? new Set() : immutable,
+        opaque,
+      };
+      moduleBindingFacts.set(candidate, fact);
+    }
+    facts.set(path, fact);
+  }
+  // A snapshot is unsafe anywhere in a cycle: another dependency could read a
+  // re-export before this module has initialized its local snapshot binding.
+  const cyclic = new Set();
+  const indices = new Map();
+  const low = new Map();
+  const stack = [];
+  const active = new Set();
+  let next = 0;
+  const visit = (path) => {
+    indices.set(path, next);
+    low.set(path, next++);
+    stack.push(path);
+    active.add(path);
+    for (const target of facts.get(path).dependencies) {
+      if (!facts.has(target))
+        fail(`chunk ${path} immutable binding dependency is outside its closure`);
+      if (!indices.has(target)) {
+        visit(target);
+        low.set(path, Math.min(low.get(path), low.get(target)));
+      } else if (active.has(target)) low.set(path, Math.min(low.get(path), indices.get(target)));
+    }
+    if (low.get(path) !== indices.get(path)) return;
+    const component = [];
+    let member;
+    do {
+      member = stack.pop();
+      active.delete(member);
+      component.push(member);
+    } while (member !== path);
+    if (component.length > 1 || facts.get(path).dependencies.has(path))
+      component.forEach((item) => cyclic.add(item));
+  };
+  for (const path of facts.keys()) if (!indices.has(path)) visit(path);
+  plans = new Map(
+    [...facts].map(([path, fact]) => [
+      path,
+      fact.opaque || cyclic.has(path)
+        ? []
+        : fact.imports.flatMap((imported) => {
+            const names = imported.names
+              .filter((name) => facts.get(imported.path).immutable.has(name))
+              .sort(compareStrings);
+            return names.length === 0 ? [] : [{ start: imported.start, names }];
+          }),
+    ])
+  );
+  moduleImmutableImports.set(modulesByPath, plans);
+  return plans.get(module.identity.path);
+}
+
+function snapshotImmutableImports(source, dependencies, immutableImports, modulePath) {
+  if (immutableImports.length === 0) return source;
+  const ast = parseChunkJavascript(source, modulePath, "immutable import snapshots", "module");
+  const names = new Set();
+  visitAst(ast.program, (node) => {
+    if (node.type === "Identifier") names.add(node.name);
+  });
+  const bySpecifier = new Map(
+    immutableImports.map((item) => {
+      const dependency = dependencies.find((candidate) => candidate.start === item.start);
+      if (dependency === undefined)
+        fail(`chunk ${modulePath} immutable import lost its dependency`);
+      return [dependency.executableSpecifier, new Set(item.names)];
+    })
+  );
+  const edits = [];
+  const snapshots = [];
+  let suffix = 0;
+  let importEnd = 0;
+  let sawBody = false;
+  for (const statement of ast.program.body) {
+    if (statement.type !== "ImportDeclaration") {
+      sawBody = true;
+      continue;
+    }
+    // Do not move user work across imports in unusual hand-written modules.
+    if (sawBody) return source;
+    importEnd = statement.end;
+    const immutable = bySpecifier.get(statement.source.value);
+    if (immutable === undefined) continue;
+    for (const specifier of statement.specifiers) {
+      const imported =
+        specifier.type === "ImportDefaultSpecifier"
+          ? "default"
+          : specifier.type === "ImportSpecifier"
+            ? (specifier.imported.name ?? specifier.imported.value)
+            : undefined;
+      if (!immutable.has(imported)) continue;
+      let temporary;
+      do {
+        temporary = `__convexImmutableImport${suffix++}`;
+      } while (names.has(temporary));
+      names.add(temporary);
+      edits.push({
+        start: specifier.start,
+        end: specifier.end,
+        text:
+          specifier.type === "ImportDefaultSpecifier"
+            ? temporary
+            : `${JSON.stringify(imported)} as ${temporary}`,
+      });
+      snapshots.push(`const ${specifier.local.name} = ${temporary};`);
+    }
+  }
+  if (snapshots.length === 0) return source;
+  edits.push({ start: importEnd, end: importEnd, text: `\n${snapshots.join("\n")}\n` });
+  for (const edit of edits.sort((left, right) => right.start - left.start))
+    source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+  return source;
+}
+
 function moduleSourcePreparationForSession({
   bindingPath,
   canonicalEntryPath,
@@ -1102,10 +1342,12 @@ function moduleSourcePreparationForSession({
     canonicalEntryPath,
     sourceMembershipSha256: module.identity.sourceMembershipSha256,
   });
+  const immutableImports = immutableImportPlan(module, modulesByPath);
   const cached = record?.moduleSourcePreparationsByModule
     .get(module)
     ?.find(
       (candidate) =>
+        canonicalJson(candidate.immutableImports) === canonicalJson(immutableImports) &&
         sameModuleDependencyBindings(candidate.dependencies, dependencies) &&
         canonicalJson(candidate.nativeSymbolLocator) === canonicalJson(nativeSymbolLocator)
     );
@@ -1114,6 +1356,7 @@ function moduleSourcePreparationForSession({
     return cached;
   }
   const preparation = {
+    immutableImports,
     dependencies: Object.freeze(dependencies.map((dependency) => Object.freeze({ ...dependency }))),
     nativeSymbolLocator,
     transformInputVariants: [],
@@ -1159,10 +1402,16 @@ function moduleTransformInputForSession({
     nativeSymbolLocatorsByPath,
     module
   );
-  const source = renderDependencyCanonicalSource(
+  const canonicalSource = renderDependencyCanonicalSource(
     module.source,
     dependencies,
     ({ executableSpecifier }) => executableSpecifier
+  );
+  const source = snapshotImmutableImports(
+    canonicalSource,
+    dependencies,
+    preparation.immutableImports,
+    module.identity.path
   );
   const sourceIdentity = Object.freeze({
     kind: "convex-wasm-official-output-canonical-transform-source-v1",
@@ -1238,6 +1487,7 @@ function chunkPreparationCacheIdentity({
     bindingPath,
     canonicalEntryPath,
     imports,
+    immutableImports: immutableImportPlan(module, modulesByPath),
     kind: convexWasmOfficialOutputChunkPreparationCacheIdentityKind,
     module: module.identity,
     parser: { name: "@babel/parser", version: babelParserVersion },
@@ -1256,7 +1506,7 @@ function authenticateChunkPreparationRecord({
 }) {
   const value = requireExactKeys(
     record,
-    new Set(["dependencies", "kind", "nativeSymbolLocator", "schemaVersion"]),
+    new Set(["dependencies", "immutableImports", "kind", "nativeSymbolLocator", "schemaVersion"]),
     `chunk ${module.identity.path} preparation cache record`
   );
   if (
@@ -1264,6 +1514,10 @@ function authenticateChunkPreparationRecord({
     value.schemaVersion !== 3
   ) {
     fail(`chunk ${module.identity.path} preparation cache record is unsupported`);
+  }
+  const immutableImports = immutableImportPlan(module, modulesByPath);
+  if (canonicalJson(value.immutableImports) !== canonicalJson(immutableImports)) {
+    fail(`chunk ${module.identity.path} immutable import proof changed`);
   }
   const dependencies = requireArray(
     value.dependencies,
@@ -1339,6 +1593,7 @@ function authenticateChunkPreparationRecord({
     fail(`chunk ${module.identity.path} preparation cache native symbol locator changed`);
   }
   return {
+    immutableImports,
     dependencies: Object.freeze(dependencies),
     nativeSymbolLocator,
     transformInputVariants: [],
@@ -1413,6 +1668,7 @@ async function admitPersistentChunkPreparation({
       });
       const source = `${canonicalJson({
         dependencies: builtPreparation.dependencies,
+        immutableImports: builtPreparation.immutableImports,
         kind: convexWasmOfficialOutputChunkPreparationCacheRecordKind,
         nativeSymbolLocator: builtPreparation.nativeSymbolLocator,
         schemaVersion: 3,
@@ -1517,6 +1773,201 @@ function transformedRequireSpecifiers(javascript, modulePath) {
     specifiers.add(node.arguments[0].value);
   });
   return [...specifiers].sort(compareStrings);
+}
+
+// Only the pinned transform's private ESM export table qualifies. Copy its
+// existing accessors instead of introducing another getter around each getter.
+// Generic CommonJS re-exports retain esbuild's forwarding/live-property logic.
+function lowerModuleExportForwarding(code, source, modulePath) {
+  const original = parseChunkJavascript(source, modulePath, "module linkage source", "module");
+  let hasModuleAccess = false;
+  visitAst(original.program, (node) => {
+    if (node.type === "Identifier" && (node.name === "module" || node.name === "eval")) {
+      hasModuleAccess = true;
+    }
+  });
+  if (hasModuleAccess) return code;
+  const ast = parseChunkJavascript(code, modulePath, "module linkage transform", "script");
+  const identifiers = new Set();
+  visitAst(ast.program, (node) => {
+    if (node.type === "Identifier") identifiers.add(node.name);
+  });
+  let suffix = 0;
+  const fresh = () => {
+    let name;
+    do {
+      name = `__convexModuleLocal${suffix++}`;
+    } while (identifiers.has(name));
+    identifiers.add(name);
+    return name;
+  };
+  const declarations = new Map();
+  for (const statement of ast.program.body) {
+    if (statement.type !== "VariableDeclaration") continue;
+    for (const declaration of statement.declarations) {
+      if (declaration.id.type === "Identifier") {
+        declarations.set(declaration.id.name, declaration.init);
+      }
+    }
+  }
+  const structure = (value) => {
+    if (Array.isArray(value)) return value.map(structure);
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(
+          ([key]) =>
+            ![
+              "start",
+              "end",
+              "loc",
+              "extra",
+              "leadingComments",
+              "trailingComments",
+              "innerComments",
+            ].includes(key)
+        )
+        .map(([key, nested]) => [key, structure(nested)])
+    );
+  };
+  const matches = (node, expression) =>
+    node !== undefined &&
+    canonicalJson(structure(node)) ===
+      canonicalJson(
+        structure(
+          parseChunkJavascript(`(${expression})`, modulePath, "module linkage pattern", "script")
+            .program.body[0].expression
+        )
+      );
+  const builtin = (expression) =>
+    [...declarations].find(([, value]) => {
+      const path = [];
+      while (
+        value?.type === "MemberExpression" &&
+        !value.computed &&
+        value.property.type === "Identifier"
+      ) {
+        path.unshift(value.property.name);
+        value = value.object;
+      }
+      if (value?.type !== "Identifier") return false;
+      path.unshift(value.name);
+      return path.join(".") === expression;
+    })?.[0];
+  const define = builtin("Object.defineProperty");
+  const descriptor = builtin("Object.getOwnPropertyDescriptor");
+  const names = builtin("Object.getOwnPropertyNames");
+  const hasOwn = builtin("Object.prototype.hasOwnProperty");
+  if ([define, descriptor, names, hasOwn].some((name) => name === undefined)) return code;
+
+  const edits = [];
+  for (const statement of ast.program.body) {
+    const assignment = statement.type === "ExpressionStatement" ? statement.expression : undefined;
+    if (
+      assignment?.type !== "AssignmentExpression" ||
+      assignment.operator !== "=" ||
+      !matches(assignment.left, "module.exports") ||
+      assignment.right.type !== "CallExpression" ||
+      assignment.right.callee.type !== "Identifier" ||
+      assignment.right.arguments.length !== 1 ||
+      assignment.right.arguments[0].type !== "Identifier"
+    )
+      continue;
+    const table = assignment.right.arguments[0].name;
+    const convert = declarations.get(assignment.right.callee.name);
+    if (
+      !matches(declarations.get(table), "{}") ||
+      convert?.type !== "ArrowFunctionExpression" ||
+      convert.params.length !== 1 ||
+      convert.params[0].type !== "Identifier" ||
+      convert.body.type !== "CallExpression" ||
+      convert.body.callee.type !== "Identifier"
+    )
+      continue;
+    const parameter = convert.params[0].name;
+    const copyName = convert.body.callee.name;
+    if (
+      !matches(
+        convert,
+        `(${parameter}) => ${copyName}(${define}({}, "__esModule", {value: !0}), ${parameter})`
+      )
+    )
+      continue;
+    const copy = declarations.get(copyName);
+    if (
+      copy?.type !== "ArrowFunctionExpression" ||
+      copy.params.length !== 4 ||
+      copy.params.some((param) => param.type !== "Identifier")
+    )
+      continue;
+    const [target, from, except, desc] = copy.params.map((param) => param.name);
+    const loop = copy.body.body?.[0]?.consequent;
+    const key = loop?.left?.declarations?.[0]?.id?.name;
+    if (
+      key === undefined ||
+      !matches(
+        copy,
+        `(${target}, ${from}, ${except}, ${desc}) => {
+      if (${from} && typeof ${from} == "object" || typeof ${from} == "function")
+        for (let ${key} of ${names}(${from}))
+          !${hasOwn}.call(${target}, ${key}) && ${key} !== ${except} &&
+          ${define}(${target}, ${key}, {get: () => ${from}[${key}], enumerable: !(${desc} = ${descriptor}(${from}, ${key})) || ${desc}.enumerable});
+      return ${target};
+    }`
+      )
+    )
+      continue;
+    const exportCall = ast.program.body
+      .map((node) => node.expression)
+      .find(
+        (node) =>
+          node?.type === "CallExpression" &&
+          node.callee.type === "Identifier" &&
+          node.arguments.length === 2 &&
+          node.arguments[0].type === "Identifier" &&
+          node.arguments[0].name === table &&
+          node.arguments[1].type === "ObjectExpression"
+      );
+    if (exportCall === undefined) continue;
+    const publish = declarations.get(exportCall.callee.name);
+    if (
+      publish?.type !== "ArrowFunctionExpression" ||
+      publish.params.length !== 2 ||
+      publish.params.some((param) => param.type !== "Identifier")
+    )
+      continue;
+    const [object, all] = publish.params.map((param) => param.name);
+    const field = publish.body.body?.[0]?.left?.declarations?.[0]?.id?.name;
+    if (
+      field === undefined ||
+      !matches(
+        publish,
+        `(${object}, ${all}) => {
+      for (var ${field} in ${all}) ${define}(${object}, ${field}, {get: ${all}[${field}], enumerable: !0});
+    }`
+      )
+    )
+      continue;
+    // Keep captured intrinsics, marker order and live export descriptors,
+    // including cyclic initialization. Locals must not shadow those intrinsics.
+    const result = fresh();
+    const property = fresh();
+    edits.push({
+      start: convert.start,
+      end: convert.end,
+      text: `(${parameter}) => {
+      var ${result} = ${define}({}, "__esModule", {value: true});
+      for (var ${property} of ${names}(${parameter})) {
+        if (${property} !== "__esModule") ${define}(${result}, ${property}, ${descriptor}(${parameter}, ${property}));
+      }
+      return ${result};
+    }`,
+    });
+  }
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    code = code.slice(0, edit.start) + edit.text + code.slice(edit.end);
+  }
+  return code;
 }
 
 function renderChunkJavascript(transformedJavascript) {
@@ -2960,6 +3411,9 @@ export function initializeConvexWasmOfficialOutputChunkUnits({
 }
 
 export const convexWasmOfficialOutputChunkUnitTestHooks = Object.freeze({
+  lowerModuleExportForwarding,
+  immutableImportPlan,
+  snapshotImmutableImports,
   parseModuleDependencies(source, allowComputed = false) {
     return parseModuleDependencyLiterals(
       { identity: { path: "_deps/fixture.js" }, source },
