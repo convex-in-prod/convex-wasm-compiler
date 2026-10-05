@@ -588,6 +588,31 @@ The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 1 GiB, matching the self-hosted runtime artifact contract.
 Its AOT and engine-identity output paths must not already exist.
 
+The precompiler also reuses authenticated Cranelift function results across
+processes and changed Wasm modules, with the same optimization settings. Records
+bind the precompiler executable, engine compatibility and Cranelift function key.
+Three bounded size classes retain at most 1 GiB of records, with four ways per set;
+oversized functions still compile normally. Atomic writes use one temporary file
+per active insertion shard, at most another 256 MiB. Cache misses, replacements,
+oversized results and rejected corrupt records are reported with hits and inserts
+on the `incremental-cache` output line. Unexpected filesystem failures fail the
+build before artifact publication.
+
+Ordinary builds keep these records in `incremental-functions` under their cache
+root. Standalone precompilation uses the platform user cache by default;
+`CONVEX_WASM_INCREMENTAL_CACHE_ROOT` selects an absolute private directory.
+The store requires private files owned by the current user. This bounded cache
+is disposable; whole-module AOT artifacts retain their existing authentication
+and retention contracts.
+
+Project builds also share a persistent transformation session across cohorts and
+fresh processes. Module summaries and transformed source retain their own content
+and implementation identities, so unrelated edits preserve reusable preparation
+work. Each successful project build writes `build-report.json` beside
+`artifact-report.json`, with preparation cache counters and the native pipeline's
+stage timings, cache results and scheduling report. These reports distinguish
+unchanged warm builds from builds that invalidate source or native artifacts.
+
 This is not an official Convex project.
 
 ## Versioning

@@ -5939,7 +5939,14 @@ async function boundedArtifactPhaseEnvironment({
     await requirePrivateCacheDirectory(cacheRoot, resolvedTemporaryDirectory);
   }
   return {
-    environment: { ...commandEnvironment, TMPDIR: resolvedTemporaryDirectory },
+    environment: {
+      ...commandEnvironment,
+      TMPDIR: resolvedTemporaryDirectory,
+      CONVEX_WASM_INCREMENTAL_CACHE_ROOT: join(
+        cacheLayout?.cacheRoot ?? cacheRoot,
+        "incremental-functions"
+      ),
+    },
     ownsTemporaryDirectory,
     temporaryDirectory: resolvedTemporaryDirectory,
   };
@@ -6086,8 +6093,29 @@ async function runBoundedCommand(
       { kind: "output-validation", reason: "timing-incomplete" }
     );
   }
+  let incrementalCache;
+  if (identityCommand.args[0] === "--package") {
+    const reports = result.stdout
+      .toString("utf8")
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("incremental-cache "));
+    if (reports.length > 1) fail("precompiler returned multiple incremental cache reports");
+    // Older compatible precompilers intentionally omit this operational report.
+    if (reports.length === 1) {
+      incrementalCache = JSON.parse(reports[0].slice("incremental-cache ".length));
+      requireExactPlainObject(
+        incrementalCache,
+        ["hits", "misses", "inserts", "evictions", "rejectedRecords", "oversizedValues"],
+        "precompiler incremental cache report"
+      );
+      if (Object.values(incrementalCache).some((value) => !Number.isSafeInteger(value) || value < 0)) {
+        fail("precompiler incremental cache counters must be nonnegative safe integers");
+      }
+    }
+  }
   return {
     command: { executable: identityCommand.executable, args: identityCommand.args },
+    ...(incrementalCache === undefined ? {} : { incrementalCache }),
     maxRssKiB: resourceUsage.maxRssKiB,
     systemCpuMilliseconds: resourceUsage.systemSeconds * 1_000,
     userCpuMilliseconds: resourceUsage.userSeconds * 1_000,
@@ -19671,6 +19699,12 @@ async function prepareModuleGraphDeploymentBaseSupportPreactivation({
                 },
                 retainedPrecompilerPath
               );
+        const { environment } = await boundedArtifactPhaseEnvironment({
+          cacheLayout: options.cacheLayout,
+          cacheRoot: options.cacheRoot,
+          commandEnvironment: commandConfig.environment,
+          temporaryDirectory,
+        });
         return await runBoundedCommand(
           executionCommand,
           phase,
@@ -19678,10 +19712,7 @@ async function prepareModuleGraphDeploymentBaseSupportPreactivation({
           timingPath,
           {
             ...commandConfig,
-            environment: {
-              ...commandConfig.environment,
-              TMPDIR: temporaryDirectory,
-            },
+            environment,
           },
           resourceGuard,
           undefined,
@@ -22197,6 +22228,12 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
       stage,
       async () => {
         const temporaryDirectory = await ensureNativeTemporaryDirectory();
+        const { environment } = await boundedArtifactPhaseEnvironment({
+          cacheLayout,
+          cacheRoot,
+          commandEnvironment: commandConfig.environment,
+          temporaryDirectory,
+        });
         return await runBoundedCommand(
           command,
           phase,
@@ -22204,7 +22241,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
           timingPath,
           {
             ...commandConfig,
-            environment: { ...commandConfig.environment, TMPDIR: temporaryDirectory },
+            environment,
           },
           resourceGuard,
           undefined,
@@ -25602,6 +25639,13 @@ function createArtifactPhaseRunner({
                 retainedPrecompiler.path
               )
             : command;
+        const { environment } = await boundedArtifactPhaseEnvironment({
+          cacheLayout: options.cacheLayout,
+          cacheRoot: options.cacheRoot,
+          commandEnvironment: commandConfig.environment,
+          temporaryDirectory:
+            await ensureArtifactMaterialSessionNativeTemporaryDirectory(materialSessionRecord),
+        });
         return await runBoundedCommand(
           executionCommand,
           phase,
@@ -25609,11 +25653,7 @@ function createArtifactPhaseRunner({
           timingPath,
           {
             ...commandConfig,
-            environment: {
-              ...commandConfig.environment,
-              TMPDIR:
-                await ensureArtifactMaterialSessionNativeTemporaryDirectory(materialSessionRecord),
-            },
+            environment,
           },
           phaseResourceGuard,
           boundary,

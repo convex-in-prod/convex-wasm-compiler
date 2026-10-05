@@ -27,7 +27,11 @@ import { createConvexWasmSourceEnvelope } from "../lib/convex-wasm-source-envelo
 
 const compilerRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-export async function buildSyntheticDeploymentApplication(context, { bindAnalysis = true } = {}) {
+export async function buildSyntheticDeploymentApplication(
+  context,
+  { bindAnalysis = true, entryCount = 1 } = {}
+) {
+  assert.ok(Number.isSafeInteger(entryCount) && entryCount >= 1);
   const applicationRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-deployment-graph-"));
   context.after(() => fs.rm(applicationRoot, { force: true, recursive: true }));
   await Promise.all([
@@ -85,6 +89,20 @@ export async function buildSyntheticDeploymentApplication(context, { bindAnalysi
     kind: "convex-generated-api-inventory-v1",
     snapshot: { inputSha256: "a".repeat(64) },
   };
+  const entrySource = await fs.readFile(join(applicationRoot, "functions", "read.ts"));
+  for (let index = 1; index < entryCount; index += 1) {
+    const modulePath = `read${index}`;
+    const entryPath = `functions/${modulePath}.ts`;
+    await fs.writeFile(join(applicationRoot, entryPath), entrySource);
+    inventory.functions.push({
+      entryPath,
+      exportName: "read",
+      modulePath,
+      udfKind: "query",
+      visibility: "public",
+    });
+  }
+  inventory.functions.sort((left, right) => left.entryPath < right.entryPath ? -1 : left.entryPath > right.entryPath ? 1 : 0);
   const graph = await buildConvexWasmDeploymentGraphSession({
     inventory,
     materialVerificationConcurrency: 2,
@@ -139,7 +157,7 @@ export async function buildSyntheticDeploymentApplication(context, { bindAnalysi
     categoryCounts: {},
     diagnosticCounts: {},
     diagnostics: [],
-    entries: ["functions/read.ts"],
+    entries: inventory.functions.map(({ entryPath }) => entryPath),
     generatedInventoryInputSha256: inventory.authority.snapshot.inputSha256,
     kind: "convex-context-reuse-analysis",
     metrics: {

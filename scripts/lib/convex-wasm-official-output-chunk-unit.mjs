@@ -4,6 +4,13 @@ import { createRequire } from "node:module";
 import { join, posix } from "node:path";
 
 import { parse as parseBabelAst } from "@babel/parser";
+import {
+  convexWasmFunctionSpecializationIdentity,
+  convexWasmModuleSummary,
+  prepareConvexWasmFunctionSpecialization,
+  planConvexWasmFunctionImports,
+  renderConvexWasmSpecializedModuleSource,
+} from "./convex-wasm-function-specialization.mjs";
 
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { ensureArtifactStage } from "./convex-wasm-artifact-pipeline.mjs";
@@ -41,16 +48,17 @@ export const convexWasmOfficialOutputChunkPreparationCacheStage =
   "official-output-chunk-preparation";
 export const convexWasmOfficialOutputChunkIdentityCacheStage = "official-output-chunk-identity";
 export const convexWasmOfficialOutputChunkPreparationCacheRecordKind =
-  "convex-wasm-official-output-chunk-preparation-cache-record-v3";
+  "convex-wasm-official-output-chunk-preparation-cache-record-v4";
 export const convexWasmOfficialOutputChunkIdentityCacheRecordKind =
   "convex-wasm-official-output-chunk-identity-cache-record-v4";
 const convexWasmOfficialOutputChunkPreparationCacheIdentityKind =
-  "convex-wasm-official-output-chunk-preparation-cache-identity-v3";
+  "convex-wasm-official-output-chunk-preparation-cache-identity-v4";
 const convexWasmOfficialOutputChunkIdentityCacheIdentityKind =
   "convex-wasm-official-output-chunk-identity-cache-identity-v4";
 const convexWasmOfficialOutputChunkPreparationCacheMaximumBytes = 4 * 1024 * 1024;
 const convexWasmOfficialOutputChunkIdentityCacheMaximumBytes = 4 * 1024 * 1024;
 const convexWasmOfficialOutputChunkTransformImplementationSourcePaths = Object.freeze([
+  "scripts/lib/convex-wasm-function-specialization.mjs",
   "scripts/lib/convex-wasm-native-symbol-identity.mjs",
   "scripts/lib/convex-wasm-official-output-chunk-contract.mjs",
   "scripts/lib/convex-wasm-official-output-chunk-unit.mjs",
@@ -196,6 +204,7 @@ function transformImplementationIdentity(producerIdentity) {
   });
   return Object.freeze({
     kind: convexWasmOfficialOutputChunkTransformImplementationIdentityKind,
+    functionSpecialization: convexWasmFunctionSpecializationIdentity,
     sources: Object.freeze(sources),
   });
 }
@@ -242,6 +251,7 @@ export function createConvexWasmOfficialOutputChunkTransformSession({ esbuild, p
     persistentPreparationCacheHits: 0,
     persistentPreparationCacheMisses: 0,
     persistentPreparationsByIdentity: new Map(),
+    functionSpecialization: { memoryHits: 0, cacheHits: 0, cacheMisses: 0 },
     preparationTail: Promise.resolve(),
     persistentCache: normalizedPersistentCache,
     transform: authenticatedEsbuild.transform,
@@ -254,6 +264,30 @@ export function createConvexWasmOfficialOutputChunkTransformSession({ esbuild, p
     transforms: new Map(),
   });
   return session;
+}
+
+export function convexWasmOfficialOutputChunkTransformSessionReport(session) {
+  const record = chunkTransformSessionRecords.get(session);
+  if (record === undefined || session?.kind !== convexWasmOfficialOutputChunkTransformSessionKind) {
+    fail("transform session report requires a live transform session");
+  }
+  return Object.freeze({
+    kind: "convex-wasm-official-output-chunk-transform-report-v1",
+    dependencyAnalysisCacheHits: record.dependencyAnalysisCacheHits,
+    dependencyAnalysisCacheMisses: record.dependencyAnalysisCacheMisses,
+    moduleSourcePreparationCacheHits: record.moduleSourcePreparationCacheHits,
+    moduleSourcePreparationCacheMisses: record.moduleSourcePreparationCacheMisses,
+    persistentIdentityCacheHits: record.persistentIdentityCacheHits,
+    persistentIdentityCacheMisses: record.persistentIdentityCacheMisses,
+    persistentPreparationCacheHits: record.persistentPreparationCacheHits,
+    persistentPreparationCacheMisses: record.persistentPreparationCacheMisses,
+    transformInputCacheHits: record.transformInputCacheHits,
+    transformInputCacheMisses: record.transformInputCacheMisses,
+    transformedModuleBaseCacheHits: record.transformedModuleBaseCacheHits,
+    transformedModuleBaseCacheMisses: record.transformedModuleBaseCacheMisses,
+    transformedJavascriptMaterializations: record.transformedJavascriptMaterializations,
+    functionSpecialization: Object.freeze({ ...record.functionSpecialization }),
+  });
 }
 
 export function createConvexWasmOfficialOutputPhysicalUnitReadinessObserver({ limit, onReady }) {
@@ -310,9 +344,9 @@ async function scheduleChunkTransformPreparation(record, prepare) {
   });
   await predecessor;
   try {
-    return prepare();
+    return await prepare();
   } finally {
-    // Cohort preparation performs synchronous parsing on the Node thread. Release the next
+    // Keep summary admission and parsing serialized across cohorts. Release the next
     // cohort in a new event-loop turn so transforms started by this cohort can make progress.
     setImmediate(release);
   }
@@ -1085,7 +1119,6 @@ function sameModuleDependencyBindings(left, right) {
   );
 }
 
-const moduleBindingFacts = new WeakMap();
 const moduleImmutableImports = new WeakMap();
 
 function immutableImportPlan(module, modulesByPath) {
@@ -1093,120 +1126,15 @@ function immutableImportPlan(module, modulesByPath) {
   if (plans !== undefined) return plans.get(module.identity.path);
   const facts = new Map();
   for (const [path, candidate] of modulesByPath) {
-    let fact = moduleBindingFacts.get(candidate);
-    if (fact === undefined) {
-      const ast = parseChunkJavascript(
-        candidate.source,
-        path,
-        "immutable module bindings",
-        "module"
-      );
-      const declarations = new Map();
-      const writes = new Set();
-      const exports = new Map();
-      const dependencies = new Set();
-      let opaque = false;
-      const writtenPattern = (node) => {
-        if (node?.type === "Identifier") writes.add(node.name);
-        else if (node?.type === "AssignmentPattern") writtenPattern(node.left);
-        else if (node?.type === "RestElement") writtenPattern(node.argument);
-        else if (node?.type === "ArrayPattern") node.elements.forEach(writtenPattern);
-        else if (node?.type === "ObjectPattern")
-          node.properties.forEach((property) =>
-            writtenPattern(property.type === "RestElement" ? property.argument : property.value)
-          );
-      };
-      visitAst(ast.program, (node) => {
-        if (node.type === "Identifier") {
-          if (["eval", "module", "require"].includes(node.name)) opaque = true;
-        }
-        if (node.type === "AssignmentExpression") writtenPattern(node.left);
-        if (node.type === "UpdateExpression") writtenPattern(node.argument);
-        if (node.type === "ForInStatement" || node.type === "ForOfStatement")
-          writtenPattern(node.left);
-        if (node.type === "VariableDeclarator" && node.id.type === "Identifier") {
-          declarations.set(node.id.name, (declarations.get(node.id.name) ?? 0) + 1);
-        }
-        if (
-          (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") &&
-          node.id !== null
-        ) {
-          declarations.set(node.id.name, (declarations.get(node.id.name) ?? 0) + 1);
-        }
-        const dependency = sourceDependencyLiteral(node, path, true);
-        if (dependency === null) opaque = true;
-        else if (dependency !== undefined)
-          dependencies.add(resolveLiteralSpecifier(path, dependency.specifier));
-      });
-      const initialized = new Set();
-      for (const statement of ast.program.body) {
-        const declaration =
-          statement.type === "ExportNamedDeclaration" ||
-          statement.type === "ExportDefaultDeclaration"
-            ? statement.declaration
-            : statement;
-        if (declaration?.type === "VariableDeclaration") {
-          for (const item of declaration.declarations) {
-            if (item.id.type === "Identifier" && item.init !== null) initialized.add(item.id.name);
-          }
-        } else if (
-          (declaration?.type === "FunctionDeclaration" ||
-            declaration?.type === "ClassDeclaration") &&
-          declaration.id !== null
-        ) {
-          initialized.add(declaration.id.name);
-        }
-        if (statement.type === "ExportNamedDeclaration" && statement.source === null) {
-          if (declaration?.type === "VariableDeclaration") {
-            for (const item of declaration.declarations)
-              if (item.id.type === "Identifier") exports.set(item.id.name, item.id.name);
-          } else if (declaration?.id?.type === "Identifier")
-            exports.set(declaration.id.name, declaration.id.name);
-          for (const specifier of statement.specifiers) {
-            if (specifier.type === "ExportSpecifier")
-              exports.set(
-                specifier.exported.name ?? specifier.exported.value,
-                specifier.local.name
-              );
-          }
-        }
-        if (statement.type === "ExportDefaultDeclaration") {
-          // An expression default export captures its result during evaluation.
-          const namedDeclaration =
-            ["FunctionDeclaration", "ClassDeclaration"].includes(declaration.type) &&
-            declaration.id !== null;
-          exports.set("default", namedDeclaration ? declaration.id.name : null);
-        }
-      }
-      const immutable = new Set(
-        [...exports]
-          .filter(
-            ([, local]) =>
-              local === null ||
-              (initialized.has(local) && declarations.get(local) === 1 && !writes.has(local))
-          )
-          .map(([name]) => name)
-      );
-      fact = {
-        imports: ast.program.body
-          .filter((node) => node.type === "ImportDeclaration")
-          .map((node) => ({
-            start: node.source.start,
-            path: resolveLiteralSpecifier(path, node.source.value),
-            names: node.specifiers.flatMap((specifier) =>
-              specifier.type === "ImportSpecifier"
-                ? [specifier.imported.name ?? specifier.imported.value]
-                : specifier.type === "ImportDefaultSpecifier"
-                  ? ["default"]
-                  : []
-            ),
-          })),
-        dependencies,
-        immutable: opaque ? new Set() : immutable,
-        opaque,
-      };
-      moduleBindingFacts.set(candidate, fact);
-    }
+    const bindingFacts = convexWasmModuleSummary(candidate).bindingFacts;
+    const fact = {
+      opaque: bindingFacts.opaque,
+      immutable: new Set(bindingFacts.immutable),
+      dependencies: new Set(bindingFacts.dependencies.map((specifier) => resolveLiteralSpecifier(path, specifier))),
+      imports: bindingFacts.imports.map(({ specifier, ...imported }) => ({
+        ...imported, path: resolveLiteralSpecifier(path, specifier),
+      })),
+    };
     facts.set(path, fact);
   }
   // A snapshot is unsafe anywhere in a cycle: another dependency could read a
@@ -1343,10 +1271,12 @@ function moduleSourcePreparationForSession({
     sourceMembershipSha256: module.identity.sourceMembershipSha256,
   });
   const immutableImports = immutableImportPlan(module, modulesByPath);
+  const functionImports = planConvexWasmFunctionImports(module, modulesByPath, immutableImports);
   const cached = record?.moduleSourcePreparationsByModule
     .get(module)
     ?.find(
       (candidate) =>
+        canonicalJson(candidate.functionImports) === canonicalJson(functionImports) &&
         canonicalJson(candidate.immutableImports) === canonicalJson(immutableImports) &&
         sameModuleDependencyBindings(candidate.dependencies, dependencies) &&
         canonicalJson(candidate.nativeSymbolLocator) === canonicalJson(nativeSymbolLocator)
@@ -1356,6 +1286,7 @@ function moduleSourcePreparationForSession({
     return cached;
   }
   const preparation = {
+    functionImports,
     immutableImports,
     dependencies: Object.freeze(dependencies.map((dependency) => Object.freeze({ ...dependency }))),
     nativeSymbolLocator,
@@ -1402,10 +1333,10 @@ function moduleTransformInputForSession({
     nativeSymbolLocatorsByPath,
     module
   );
-  const canonicalSource = renderDependencyCanonicalSource(
+  const canonicalSource = renderConvexWasmSpecializedModuleSource(
     module.source,
     dependencies,
-    ({ executableSpecifier }) => executableSpecifier
+    preparation.functionImports
   );
   const source = snapshotImmutableImports(
     canonicalSource,
@@ -1488,11 +1419,14 @@ function chunkPreparationCacheIdentity({
     canonicalEntryPath,
     imports,
     immutableImports: immutableImportPlan(module, modulesByPath),
+    functionImports: planConvexWasmFunctionImports(
+      module, modulesByPath, immutableImportPlan(module, modulesByPath)
+    ),
     kind: convexWasmOfficialOutputChunkPreparationCacheIdentityKind,
     module: module.identity,
     parser: { name: "@babel/parser", version: babelParserVersion },
     producerImplementation: persistentCache.transformImplementation,
-    schemaVersion: 3,
+    schemaVersion: 4,
   };
 }
 
@@ -1506,16 +1440,20 @@ function authenticateChunkPreparationRecord({
 }) {
   const value = requireExactKeys(
     record,
-    new Set(["dependencies", "immutableImports", "kind", "nativeSymbolLocator", "schemaVersion"]),
+    new Set(["dependencies", "functionImports", "immutableImports", "kind", "nativeSymbolLocator", "schemaVersion"]),
     `chunk ${module.identity.path} preparation cache record`
   );
   if (
     value.kind !== convexWasmOfficialOutputChunkPreparationCacheRecordKind ||
-    value.schemaVersion !== 3
+    value.schemaVersion !== 4
   ) {
     fail(`chunk ${module.identity.path} preparation cache record is unsupported`);
   }
   const immutableImports = immutableImportPlan(module, modulesByPath);
+  const functionImports = planConvexWasmFunctionImports(module, modulesByPath, immutableImports);
+  if (canonicalJson(value.functionImports) !== canonicalJson(functionImports)) {
+    fail(`chunk ${module.identity.path} function import proof changed`);
+  }
   if (canonicalJson(value.immutableImports) !== canonicalJson(immutableImports)) {
     fail(`chunk ${module.identity.path} immutable import proof changed`);
   }
@@ -1593,6 +1531,7 @@ function authenticateChunkPreparationRecord({
     fail(`chunk ${module.identity.path} preparation cache native symbol locator changed`);
   }
   return {
+    functionImports,
     immutableImports,
     dependencies: Object.freeze(dependencies),
     nativeSymbolLocator,
@@ -1669,9 +1608,10 @@ async function admitPersistentChunkPreparation({
       const source = `${canonicalJson({
         dependencies: builtPreparation.dependencies,
         immutableImports: builtPreparation.immutableImports,
+        functionImports: builtPreparation.functionImports,
         kind: convexWasmOfficialOutputChunkPreparationCacheRecordKind,
         nativeSymbolLocator: builtPreparation.nativeSymbolLocator,
-        schemaVersion: 3,
+        schemaVersion: 4,
       })}\n`;
       const outputPath = join(workPath, "preparation.json");
       await fs.writeFile(outputPath, source, { flag: "wx", mode: 0o600 });
@@ -1728,18 +1668,6 @@ async function admitPersistentChunkPreparation({
       convexWasmOfficialOutputChunkPreparationCacheStage
     ),
   });
-}
-
-function renderDependencyCanonicalSource(source, dependencies, specifier) {
-  let rendered = source;
-  for (const dependency of [...dependencies].sort((left, right) => right.start - left.start)) {
-    rendered = `${rendered.slice(0, dependency.start)}${JSON.stringify(
-      specifier(dependency)
-    )}${rendered.slice(dependency.end)}`;
-  }
-  // esbuild's external source-map trailer names the transport output. The separately
-  // authenticated module and source-map identities retain it, but executable material does not.
-  return rendered.replace(/(^|\n)\/\/# sourceMappingURL=[^\n]*\n?$/u, "$1");
 }
 
 function transformedRequireSpecifiers(javascript, modulePath) {
@@ -2856,8 +2784,15 @@ export async function buildConvexWasmOfficialOutputChunkUnits({
     firstRawTransformCacheMissSlot ??= slot;
   };
   const { esbuildVersion, merged, slotByPath, transformedPromises, transformedSettlement } =
-    await scheduleChunkTransformPreparation(transformSessionRecord, () => {
+    await scheduleChunkTransformPreparation(transformSessionRecord, async () => {
       const preparedMerged = mergeSelections(selections);
+      const functionSummaryReport = await prepareConvexWasmFunctionSpecialization(
+        preparedMerged.modules, transformSessionRecord?.persistentCache
+      );
+      if (transformSessionRecord !== undefined) {
+        for (const [key, count] of Object.entries(functionSummaryReport))
+          transformSessionRecord.functionSpecialization[key] += count;
+      }
       const preparedEsbuildVersion = transformSessionRecord?.esbuildVersion ?? esbuild.version;
       if (preparedEsbuildVersion !== preparedMerged.esbuildVersion) {
         fail("module transform esbuild version disagrees with the authenticated official output");
@@ -3414,13 +3349,17 @@ export function initializeConvexWasmOfficialOutputChunkUnits({
 // Cache the implementation's bytes, not a package release number or a local copy.
 export const convexWasmModuleLinkage = Object.freeze({
   identity: Object.freeze({
-    kind: "convex-wasm-module-linkage-v1",
+    kind: "convex-wasm-module-linkage-v2",
+    functionSpecialization: convexWasmFunctionSpecializationIdentity,
     sourceSha256: sha256(readFileSync(new URL(import.meta.url))),
     parserVersion: babelParserVersion,
   }),
   immutableImportPlan,
   snapshotImmutableImports,
   lowerModuleExportForwarding,
+  prepareConvexWasmFunctionSpecialization,
+  planConvexWasmFunctionImports,
+  renderConvexWasmSpecializedModuleSource,
 });
 
 export const convexWasmOfficialOutputChunkUnitTestHooks = Object.freeze({
@@ -3448,6 +3387,11 @@ export const convexWasmOfficialOutputChunkUnitTestHooks = Object.freeze({
       persistentPreparationCacheMisses: record.persistentPreparationCacheMisses,
       transformedJavascriptMaterializations: record.transformedJavascriptMaterializations,
     });
+  },
+  functionSpecializationReport(session) {
+    const record = chunkTransformSessionRecords.get(session);
+    if (record === undefined) fail("function specialization report requires a live session");
+    return Object.freeze({ ...record.functionSpecialization });
   },
   transformSessionReport(session) {
     const record = chunkTransformSessionRecords.get(session);

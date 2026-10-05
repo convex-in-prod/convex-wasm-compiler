@@ -31,6 +31,9 @@ import {
   createConvexWasmCapabilityRequestEnvelopeInput,
   createConvexWasmGuestNativeJsonCodecInput,
   convexWasmBuildResourceGuardKind,
+  convexWasmArtifactPipelineTestHooks,
+  drainConvexWasmModuleGraphBaseSupportPreactivation,
+  startConvexWasmModuleGraphBaseSupportPreactivation,
 } from "./convex-wasm-artifact-pipeline.mjs";
 import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { buildConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
@@ -40,6 +43,7 @@ import { writeFixturePrecompilerPackage } from "../test-fixtures/precompiler-pac
 import { buildSyntheticDeploymentApplication } from "../test-fixtures/deployment-application.mjs";
 import { buildConvexWasmOfficialOutputModuleGraphInputs } from "./convex-wasm-official-output-artifact-adapter.mjs";
 import { buildConvexWasmProjectPackage } from "./convex-wasm-project-package.mjs";
+import { stageConvexWasmCapabilityRuntimeHeader } from "./convex-wasm-capability-entry-artifact.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const require = createRequire(import.meta.url);
@@ -184,7 +188,7 @@ int main(int argc, char **argv) {
 const { join } = require("node:path");
 const args = process.argv.slice(2);
 const temporaryDirectoryStatus = lstatSync(process.env.TMPDIR);
-appendFileSync(join(process.env.HOME, "tool.log"), JSON.stringify({ tool: "convex-wasm-precompiler", args, cwd: process.cwd(), environment: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ARTIFACT_PIPELINE_TEST_UNRELATED: process.env.ARTIFACT_PIPELINE_TEST_UNRELATED }, temporaryDirectory: { isDirectory: temporaryDirectoryStatus.isDirectory(), isSymbolicLink: temporaryDirectoryStatus.isSymbolicLink(), mode: temporaryDirectoryStatus.mode & 0o7777 } }) + "\\n");
+appendFileSync(join(process.env.HOME, "tool.log"), JSON.stringify({ tool: "convex-wasm-precompiler", args, cwd: process.cwd(), environment: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, CONVEX_WASM_INCREMENTAL_CACHE_ROOT: process.env.CONVEX_WASM_INCREMENTAL_CACHE_ROOT, ARTIFACT_PIPELINE_TEST_UNRELATED: process.env.ARTIFACT_PIPELINE_TEST_UNRELATED }, temporaryDirectory: { isDirectory: temporaryDirectoryStatus.isDirectory(), isSymbolicLink: temporaryDirectoryStatus.isSymbolicLink(), mode: temporaryDirectoryStatus.mode & 0o7777 } }) + "\\n");
 const [output] = args;
 const option = (name) => {
   const index = args.indexOf(name);
@@ -214,6 +218,7 @@ writeFileSync(
     },
   }) + "\\n"
 );
+console.log('incremental-cache ' + JSON.stringify({hits: 2, misses: 1, inserts: 1, evictions: 0, rejectedRecords: 0, oversizedValues: 0}));
 `;
   const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
   const fakePrecompilerModule = `#!/bin/sh
@@ -1153,6 +1158,24 @@ test("public artifact pipeline constructs and reuses a complete package", async 
   };
   const first = await compileConvexWasmArtifact(fixture.options);
   assert.equal(launchedStaticHermesWithNode, true);
+  const aotTiming = first.buildReport.phases.find(({ stage }) => stage === "wasmtime-aot").timing;
+  assert.deepEqual(aotTiming.incrementalCache, {
+    hits: 2,
+    misses: 1,
+    inserts: 1,
+    evictions: 0,
+    rejectedRecords: 0,
+    oversizedValues: 0,
+  });
+  const precompilerRun = (await fs.readFile(fixture.toolLog, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .find(({ tool }) => tool === "convex-wasm-precompiler");
+  assert.equal(
+    precompilerRun.environment.CONVEX_WASM_INCREMENTAL_CACHE_ROOT,
+    join(fixture.options.cacheLayout.cacheRoot, "incremental-functions")
+  );
   const initialCommandCount = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
   const second = await compileConvexWasmArtifact(fixture.options);
   assert.equal(first.buildReport.package.cache, "miss");
@@ -1162,6 +1185,78 @@ test("public artifact pipeline constructs and reuses a complete package", async 
   assert.deepEqual(second.executionManifest, first.executionManifest);
   assert.equal(second.package.cacheKey, first.package.cacheKey);
   assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, initialCommandCount);
+});
+
+test("public artifact pipeline rejects malformed incremental cache counters", async (t) => {
+  for (const { name, report, error } of [
+    {
+      name: "negative counter",
+      report: { hits: -1, misses: 0, inserts: 0, evictions: 0, rejectedRecords: 0, oversizedValues: 0 },
+      error: /nonnegative safe integers/u,
+    },
+    {
+      name: "empty report",
+      report: {},
+      error: /incremental cache report must contain exactly/u,
+    },
+    {
+      name: "missing counter",
+      report: { hits: 0, misses: 0, inserts: 0, evictions: 0, rejectedRecords: 0 },
+      error: /incremental cache report must contain exactly/u,
+    },
+  ]) {
+    await t.test(name, async (t) => {
+      const fixture = await createFixture(t);
+      fixture.options.resourceGuard = {
+        kind: convexWasmBuildResourceGuardKind,
+        launchPolicy: { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 },
+        released: false,
+        runCommand: async (options) => {
+          const result = await runBoundedNativeCommand(options);
+          if (!result.stdout.toString("utf8").startsWith("incremental-cache ")) return result;
+          return {
+            ...result,
+            stdout: Buffer.from(`incremental-cache ${JSON.stringify(report)}\n`),
+          };
+        },
+        describeTermination: describeNativeCommandTermination,
+      };
+      await assert.rejects(compileConvexWasmArtifact(fixture.options), error);
+    });
+  }
+});
+
+test("deployment engine probe uses the persistent incremental cache outside temporary work", async (t) => {
+  const fixture = await createFixture(t, { moduleGraphWasm: true });
+  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  const precompilerRuns = [];
+  const resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy,
+    released: false,
+    runCommand: async (options) => {
+      if (options.arguments.includes("--engine-identity")) precompilerRuns.push(options);
+      return await runBoundedNativeCommand(options);
+    },
+    describeTermination: describeNativeCommandTermination,
+  };
+  const capabilityRuntimeHeaderDirectory = await stageConvexWasmCapabilityRuntimeHeader(fixture.options);
+  const token = startConvexWasmModuleGraphBaseSupportPreactivation({
+    artifactConfig: fixture.options,
+    capabilityRuntimeHeaderDirectory,
+    nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
+    resourceGuard,
+  });
+  try {
+    const settled = await convexWasmArtifactPipelineTestHooks.moduleGraphEngineProbePreactivationSettlement(token);
+    assert.equal(settled.status, "fulfilled", settled.reason?.message);
+  } finally {
+    await drainConvexWasmModuleGraphBaseSupportPreactivation(token);
+  }
+  assert.equal(precompilerRuns.length, 1);
+  assert.equal(precompilerRuns[0].environment.CONVEX_WASM_INCREMENTAL_CACHE_ROOT,
+    join(fixture.options.cacheLayout.cacheRoot, "incremental-functions"));
+  await assert.rejects(fs.stat(precompilerRuns[0].environment.TMPDIR), { code: "ENOENT" });
 });
 
 test("public artifact pipeline constructs a module-graph package with Core Wasm and AOT", async (t) => {
@@ -1293,17 +1388,30 @@ test("builds a module-graph package from a separate application's source graph",
 
 test("builds an authenticated project package from a separate application's staged source", async (t) => {
   const fixture = await createFixture(t, { moduleGraphWasm: true });
-  const application = await buildSyntheticDeploymentApplication(t, { bindAnalysis: false });
-  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  const application = await buildSyntheticDeploymentApplication(t, { bindAnalysis: false, entryCount: 9 });
+  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 2 };
+  let activeNativeCommands = 0;
+  let peakNativeCommands = 0;
+  const precompilerRuns = [];
   const resourceGuard = {
     kind: convexWasmBuildResourceGuardKind,
     launchPolicy,
     released: false,
-    runCommand: runBoundedNativeCommand,
+    runCommand: async (options) => {
+      if (options.arguments.includes("--engine-identity")) precompilerRuns.push(options);
+      if (options.command !== "/usr/bin/time") return await runBoundedNativeCommand(options);
+      activeNativeCommands += 1;
+      peakNativeCommands = Math.max(peakNativeCommands, activeNativeCommands);
+      try {
+        return await runBoundedNativeCommand(options);
+      } finally {
+        activeNativeCommands -= 1;
+      }
+    },
     describeTermination: describeNativeCommandTermination,
   };
   const built = await buildConvexWasmProjectPackage({
-    config: { projectRoot: application.applicationRoot, selectedExports: ["read:read"] },
+    config: { projectRoot: application.applicationRoot, selectedExports: application.inventory.functions.map(({ modulePath }) => `${modulePath}:read`) },
     inputs: {
       artifactConfig: fixture.options,
       buildDirectory: fixture.root,
@@ -1319,12 +1427,67 @@ test("builds an authenticated project package from a separate application's stag
     },
     resourceGuard,
   });
-  assert.equal(built.artifact.graphManifest.routing.cohortId, built.schedule.cohorts[0].cohortId);
-  const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
-    cacheLayout: fixture.options.cacheLayout,
+  assert.equal(built.schedule.cohorts.length, 2);
+  assert.equal(activeNativeCommands, 0);
+  assert.ok(peakNativeCommands > 0, "project build must execute native commands");
+  assert.ok(peakNativeCommands <= launchPolicy.jobs, `native concurrency ${peakNativeCommands} exceeds ${launchPolicy.jobs} jobs`);
+  const artifacts = built.artifact.artifacts;
+  assert.equal(artifacts.length, built.schedule.cohorts.length);
+  for (const [index, artifact] of artifacts.entries()) {
+    assert.equal(artifact.graphManifest.routing.cohortId, built.schedule.cohorts[index].cohortId);
+    const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
+      cacheLayout: fixture.options.cacheLayout,
+      cacheRoot: fixture.options.cacheRoot,
+      graphManifestSha256: artifact.graphManifest.graphManifestSha256,
+      packagePath: artifact.package.path,
+    });
+    assert.equal(verified.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256);
+  }
+  assert.ok(built.chunkPreparation.functionSpecialization.cacheMisses > 0);
+  assert.ok(built.chunkPreparation.persistentPreparationCacheMisses > 0);
+
+  assert.ok(precompilerRuns.length > 1, "project build must execute its engine probe and graph AOT");
+  for (const run of precompilerRuns) {
+    assert.equal(run.environment.CONVEX_WASM_INCREMENTAL_CACHE_ROOT,
+      join(fixture.options.cacheLayout.cacheRoot, "incremental-functions"));
+  }
+
+  // Fresh graph and module objects must use the on-disk summaries, independently
+  // of the first build's WeakMaps and transform-session memoization.
+  const secondApplication = await buildSyntheticDeploymentApplication(t, { bindAnalysis: false, entryCount: 9 });
+  const secondBuildDirectory = await fs.mkdtemp(join(fixture.root, "project-reuse-"));
+  const secondLayout = deriveConvexWasmCacheLayout({
+    repositoryRoot: secondApplication.applicationRoot,
+    buildId: "project-reuse",
     cacheRoot: fixture.options.cacheRoot,
-    graphManifestSha256: built.artifact.graphManifest.graphManifestSha256,
-    packagePath: built.artifact.package.path,
+    scope: "isolated-test",
   });
-  assert.equal(verified.graphManifest.graphManifestSha256, built.artifact.graphManifest.graphManifestSha256);
+  const repeated = await buildConvexWasmProjectPackage({
+    config: { projectRoot: secondApplication.applicationRoot, selectedExports: secondApplication.inventory.functions.map(({ modulePath }) => `${modulePath}:read`) },
+    inputs: {
+      artifactConfig: fixture.options,
+      buildDirectory: secondBuildDirectory,
+      cacheLayout: secondLayout,
+      cacheRoot: fixture.options.cacheRoot,
+      contextReuseAnalysis: secondApplication.analysis,
+      graphSession: secondApplication.pendingGraph,
+      inventory: secondApplication.inventory,
+      platformLimits: fixture.options.platformLimits,
+      producerIdentity: fixture.options.producerIdentity,
+      requestEnvelope: requestEnvelopeFixture(),
+      valueCodec: guestNativeValueCodecFixture(),
+    },
+    resourceGuard,
+  });
+  assert.ok(repeated.chunkPreparation.functionSpecialization.cacheHits > 0);
+  assert.equal(repeated.chunkPreparation.functionSpecialization.cacheMisses, 0);
+  assert.ok(repeated.chunkPreparation.persistentPreparationCacheHits > 0);
+  assert.equal(repeated.chunkPreparation.persistentPreparationCacheMisses, 0);
+  assert.deepEqual(
+    repeated.artifact.artifacts.map(({ graphManifest }) => graphManifest.moduleReferences.map(({ artifacts }) => artifacts)),
+    artifacts.map(({ graphManifest }) => graphManifest.moduleReferences.map(({ artifacts }) => artifacts))
+  );
+  assert.equal(activeNativeCommands, 0);
+  assert.ok(peakNativeCommands <= launchPolicy.jobs);
+  await repeated.artifact.verifyMaterials();
 });

@@ -7,12 +7,18 @@ import {
   bindPackagedPrecompilerToArtifactConfig,
   buildConvexWasmOfficialOutputModuleGraphArtifacts,
 } from "./convex-wasm-artifact-pipeline.mjs";
+import { createConvexWasmCapabilityArtifactCompilationSession } from "./convex-wasm-capability-entry-artifact.mjs";
+import { createConvexWasmNativePhaseScheduler } from "./convex-wasm-native-launch-scheduling.mjs";
 import { acquireConvexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import { createConvexWasmBuildWorkLease } from "./convex-wasm-cache-retention.mjs";
 import { bindConvexWasmContextReuseAnalysisGraphSession } from "./convex-wasm-deployment-graph.mjs";
 import { buildConvexWasmOfficialOutputModuleGraphInputs } from "./convex-wasm-official-output-artifact-adapter.mjs";
 import { buildConvexWasmOfficialOutputChunkApplicationUnit } from "./convex-wasm-official-output-chunk-application-unit.mjs";
-import { buildConvexWasmOfficialOutputChunkUnits } from "./convex-wasm-official-output-chunk-unit.mjs";
+import {
+  buildConvexWasmOfficialOutputChunkUnits,
+  createConvexWasmOfficialOutputChunkTransformSession,
+  convexWasmOfficialOutputChunkTransformSessionReport,
+} from "./convex-wasm-official-output-chunk-unit.mjs";
 import { createConvexWasmModuleGraphCohortContract } from "./convex-wasm-module-graph-cohort-contract.mjs";
 import {
   authenticateConvexWasmOfficialOutputCohortSchedule,
@@ -76,44 +82,78 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
     },
     {}
   );
+  const transformSession = createConvexWasmOfficialOutputChunkTransformSession({
+    esbuild,
+    persistentCache: {
+      cacheLayout: inputs.cacheLayout,
+      cacheRoot: inputs.cacheRoot,
+      producerIdentity: inputs.producerIdentity,
+    },
+  });
   const releaseLock = await acquireConvexWasmCacheLock();
   try {
     const lease = await createConvexWasmBuildWorkLease({ cacheLayout: inputs.cacheLayout });
     try {
-      const compilerOutputs = await scheduleConvexWasmOfficialOutputCohortBuildsFromAuthenticatedSchedule({
-        concurrency: resourceGuard.launchPolicy.jobs,
-        schedule,
-        build: async ({ cohort }) => {
-          const selections = cohort.entries.flatMap((entry) =>
-            entry.routes.map((route) =>
-              selectionSession.select({
-                entryPath: entry.entryPath,
-                exportName: route.exportName,
-              })
-            )
-          );
-          const chunkUnits = await buildConvexWasmOfficialOutputChunkUnits({ esbuild, selections });
-          const applicationUnit = buildConvexWasmOfficialOutputChunkApplicationUnit({ chunkUnits });
-          const contextReuseAnalysisIdentity = createConvexContextReuseCohortAnalysisIdentity({
-            analysisIdentity: graphSession.contextReuseAnalysisIdentity,
-            entryGraphs: cohort.entries.map(({ dependencyGraphSha256, entryPath }) => ({
-              dependencyGraphSha256,
-              entryPath,
-            })),
-            sharedAnalysisIdentity: graphSession.contextReuseAnalysisSharedIdentity,
-            thirdPartyMaterialFingerprints:
-              graphSession.contextReuseAnalysisThirdPartyMaterialFingerprints,
-          });
-          const prepared = await buildConvexWasmOfficialOutputModuleGraphInputs({
-            applicationUnit,
-            artifactConfig,
-            contextReuseAnalysisIdentity,
-            platformLimits: inputs.platformLimits,
-            sdkPackageVersion: packageSet.convex.version,
-          });
-          return prepared.compilerOutput;
-        },
+      const nativePhaseScheduler = createConvexWasmNativePhaseScheduler(resourceGuard.launchPolicy);
+      const compilationSession = createConvexWasmCapabilityArtifactCompilationSession({
+        launchPolicy: resourceGuard.launchPolicy,
+        nativePhaseScheduler,
       });
+      let materialSessionRequested = false;
+      let compilerOutputs;
+      try {
+        compilerOutputs = await scheduleConvexWasmOfficialOutputCohortBuildsFromAuthenticatedSchedule({
+          concurrency: resourceGuard.launchPolicy.jobs,
+          schedule,
+          build: async ({ cohort }) => {
+            const selections = cohort.entries.flatMap((entry) =>
+              entry.routes.map((route) =>
+                selectionSession.select({
+                  entryPath: entry.entryPath,
+                  exportName: route.exportName,
+                })
+              )
+            );
+            const chunkUnits = await buildConvexWasmOfficialOutputChunkUnits({
+              compactUnitAuthority: true,
+              esbuild,
+              selections,
+              transformSession,
+            });
+            const applicationUnit = buildConvexWasmOfficialOutputChunkApplicationUnit({ chunkUnits });
+            const contextReuseAnalysisIdentity = createConvexContextReuseCohortAnalysisIdentity({
+              analysisIdentity: graphSession.contextReuseAnalysisIdentity,
+              entryGraphs: cohort.entries.map(({ dependencyGraphSha256, entryPath }) => ({
+                dependencyGraphSha256,
+                entryPath,
+              })),
+              sharedAnalysisIdentity: graphSession.contextReuseAnalysisSharedIdentity,
+              thirdPartyMaterialFingerprints:
+                graphSession.contextReuseAnalysisThirdPartyMaterialFingerprints,
+            });
+            const prepared = await buildConvexWasmOfficialOutputModuleGraphInputs({
+              applicationUnit,
+              artifactConfig,
+              compiler: async (rawOptions, compilationOptions) => {
+                materialSessionRequested = true;
+                return await compilationSession.compileModuleGraphInputs(rawOptions, compilationOptions);
+              },
+              contextReuseAnalysisIdentity,
+              platformLimits: inputs.platformLimits,
+              sdkPackageVersion: packageSet.convex.version,
+            });
+            return prepared.compilerOutput;
+          },
+        });
+      } catch (error) {
+        // Cohort scheduling drains every admitted build before rejecting. Close
+        // native ownership while preserving the original compilation failure.
+        if (materialSessionRequested) {
+          await Promise.allSettled([compilationSession.finalize()]);
+        }
+        throw error;
+      }
+      const artifactMaterialSession = await compilationSession.finalize();
       if (compilerOutputs.length !== schedule.cohorts.length) {
         throw new Error("cohort compiler outputs do not match the authenticated schedule");
       }
@@ -134,6 +174,7 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
         },
         cohortSchedule: schedule,
         compilerOutputs,
+        nativePhaseScheduler,
         async verifyDeploymentMaterials() {
           await Promise.all([
             graphSession.verifyInputMaterials(),
@@ -146,6 +187,8 @@ export async function buildConvexWasmProjectPackage({ config, inputs, resourceGu
       await lease.complete();
       return {
         artifact,
+        artifactMaterialSession,
+        chunkPreparation: convexWasmOfficialOutputChunkTransformSessionReport(transformSession),
         cohortContracts,
         graphSession,
         schedule,

@@ -6,8 +6,12 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
+mod incremental_cache;
+
+use incremental_cache::IncrementalCache;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Precompiled, ProfilingStrategy};
@@ -198,9 +202,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         .wasm_exceptions(wasm_exceptions)
         .parallel_compilation(true)
         .profiler(ProfilingStrategy::PerfMap);
+    let compatibility = engine_compatibility_sha256(&Engine::new(&config)?);
+    let cache = Arc::new(IncrementalCache::open(
+        incremental_cache_root()?,
+        incremental_cache_namespace(&compatibility)?,
+    )?);
+    config.enable_incremental_compilation(cache.clone())?;
     let engine = Engine::new(&config)?;
     let wasm = read_bounded_file(&input, MAX_CORE_WASM_BYTES, "Core Wasm input")?;
     let precompiled = precompile_module_with_workers(&engine, &wasm, parallel_compilation_workers)?;
+    let cache_report = cache.report()?;
     if Engine::detect_precompiled(&precompiled) != Some(Precompiled::Module) {
         return Err("Wasmtime did not produce a precompiled core module".into());
     }
@@ -238,7 +249,53 @@ fn run() -> Result<(), Box<dyn Error>> {
         parallel_compilation_workers,
         output.display()
     );
+    println!(
+        "incremental-cache {}",
+        serde_json::to_string(&cache_report)?
+    );
     Ok(())
+}
+
+fn incremental_cache_root() -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(root) = std::env::var_os("CONVEX_WASM_INCREMENTAL_CACHE_ROOT") {
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            return Err("CONVEX_WASM_INCREMENTAL_CACHE_ROOT must be absolute".into());
+        }
+        return Ok(root);
+    }
+    let base = if let Some(cache_home) = std::env::var_os("XDG_CACHE_HOME") {
+        PathBuf::from(cache_home)
+    } else {
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required for the cache")?);
+        home.join(if cfg!(target_os = "macos") {
+            "Library/Caches"
+        } else {
+            ".cache"
+        })
+    };
+    if !base.is_absolute() {
+        return Err("incremental cache home must be absolute".into());
+    }
+    Ok(base.join("convex-wasm-compiler/incremental-functions"))
+}
+
+fn incremental_cache_namespace(compatibility: &str) -> Result<[u8; 32], Box<dyn Error>> {
+    let mut hash = Sha256::new();
+    hash.update(b"convex-wasm-incremental-functions\0");
+    hash.update(compatibility.as_bytes());
+    // Pin serialized compiler internals to the executable that produced them,
+    // including local source edits that retain the upstream version string.
+    let mut executable = File::open(std::env::current_exe()?)?;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = executable.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(hash.finalize().into())
 }
 
 fn ensure_distinct_new_outputs(
@@ -379,6 +436,83 @@ fn require_option(
 mod tests {
     use super::*;
     use wasmtime::Module;
+
+    #[test]
+    fn incremental_compilation_reuses_unchanged_functions_after_an_edit() {
+        let root = std::env::temp_dir().join(format!(
+            "convex-wasm-incremental-engine-{}",
+            std::process::id()
+        ));
+        let mut config = Config::new();
+        config
+            .consume_fuel(true)
+            .epoch_interruption(true)
+            .wasm_exceptions(true);
+        let uncached = Engine::new(&config).unwrap();
+        let mut wasm = b"\0asm\x01\0\0\0\x01\x05\x01\x60\x00\x01\x7f\x03\x03\x02\x00\x00\x07\x10\x02\x04left\x00\x00\x05right\x00\x01\x0a\x0b\x02\x04\x00\x41\x2a\x0b\x04\x00\x41\x03\x0b".to_vec();
+        let namespace =
+            incremental_cache_namespace(&engine_compatibility_sha256(&uncached)).unwrap();
+        let cache = Arc::new(IncrementalCache::open(root.clone(), namespace).unwrap());
+        config
+            .enable_incremental_compilation(cache.clone())
+            .unwrap();
+        let cold = Engine::new(&config).unwrap();
+        assert_eq!(
+            engine_compatibility_sha256(&cold),
+            engine_compatibility_sha256(&uncached)
+        );
+        let cold_bytes = precompile_module_with_workers(&cold, &wasm, 1).unwrap();
+        assert!(cache.report().unwrap().inserts >= 2);
+        drop(cold);
+        drop(cache);
+
+        let cache = Arc::new(IncrementalCache::open(root.clone(), namespace).unwrap());
+        config
+            .enable_incremental_compilation(cache.clone())
+            .unwrap();
+        let warm = Engine::new(&config).unwrap();
+        assert_eq!(
+            precompile_module_with_workers(&warm, &wasm, 1).unwrap(),
+            cold_bytes
+        );
+        let warm_report = cache.report().unwrap();
+        assert!(warm_report.hits >= 2);
+        assert_eq!(warm_report.misses, 0);
+        let edited_constant = wasm.len() - 2;
+        wasm[edited_constant] = 4;
+        let edited = precompile_module_with_workers(&warm, &wasm, 1).unwrap();
+        let edited_report = cache.report().unwrap();
+        assert!(edited_report.hits > warm_report.hits);
+        assert!(edited_report.misses > warm_report.misses);
+        assert_eq!(
+            edited,
+            precompile_module_with_workers(&uncached, &wasm, 1).unwrap()
+        );
+        // Only deserialize bytes compiled in this test, then verify the edited
+        // result as well as the function whose machine code was reused.
+        let module = unsafe { Module::deserialize(&warm, &edited) }.unwrap();
+        let mut store = wasmtime::Store::new(&warm, ());
+        store.set_fuel(1000).unwrap();
+        store.set_epoch_deadline(1);
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        assert_eq!(
+            instance
+                .get_typed_func::<(), i32>(&mut store, "left")
+                .unwrap()
+                .call(&mut store, ())
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            instance
+                .get_typed_func::<(), i32>(&mut store, "right")
+                .unwrap()
+                .call(&mut store, ())
+                .unwrap(),
+            4
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cross_target_compilation_does_not_require_local_executable_loading() {

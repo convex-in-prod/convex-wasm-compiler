@@ -1,15 +1,30 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import vm from "node:vm";
 import * as esbuild from "esbuild";
 import { parse } from "@babel/parser";
+import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
+import { buildConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
+import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
+import { authenticateConvexWasmOfficialOutputSelectionFixtures } from "../test-fixtures/official-output-selection.mjs";
+import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 
 import {
   convexWasmOfficialOutputChunkModuleTransform,
   convexWasmModuleLinkage,
+  buildConvexWasmOfficialOutputChunkUnits,
+  createConvexWasmOfficialOutputChunkTransformSession,
+  convexWasmOfficialOutputChunkUnitTestHooks,
+  initializeConvexWasmOfficialOutputChunkUnits,
+  materializeConvexWasmOfficialOutputCompactChunkUnitJavascript,
 } from "./convex-wasm-official-output-chunk-unit.mjs";
 
-async function loadModules(sources, entry, reads = new Map()) {
+async function loadModules(sources, entry, reads = new Map(), functionPlans = new Map()) {
   const { kind: _kind, ...options } = convexWasmOfficialOutputChunkModuleTransform;
   const code = new Map();
   const graph = new Map(
@@ -18,17 +33,25 @@ async function loadModules(sources, entry, reads = new Map()) {
       { identity: { path: path.slice(2) }, source },
     ])
   );
+  await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization([...graph.values()]);
   for (const [name, original] of Object.entries(sources)) {
     const module = graph.get(name.slice(2));
     const plan = convexWasmModuleLinkage.immutableImportPlan(module, graph);
+    const functions = convexWasmModuleLinkage.planConvexWasmFunctionImports(module, graph, plan);
+    functionPlans.set(name, functions);
     const dependencies = parse(original, { sourceType: "module" })
       .program.body.filter((node) => node.type === "ImportDeclaration")
       .map((node) => ({
         start: node.source.start,
+        end: node.source.end,
         executableSpecifier: node.source.value,
       }));
     const source = convexWasmModuleLinkage.snapshotImmutableImports(
-      original,
+      convexWasmModuleLinkage.renderConvexWasmSpecializedModuleSource(
+        original,
+        dependencies,
+        functions
+      ),
       dependencies,
       plan,
       name
@@ -181,4 +204,403 @@ test("immutable import proofs change when an export becomes writable", () => {
     [["x"]]
   );
   assert.deepEqual(plan(mutable), []);
+});
+
+test("direct imported calls expose bodies while callbacks and constructors keep identity", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js": `export function read(value) { return value.amount + value.limit; }
+      export { read as alias };`,
+      "./entry.js": `import { read, alias } from "./dep.js";
+      export function result() { return read({ amount: 3, limit: 5 }); }
+      export function same() { return read === alias; }
+      export function callback(accept) { return accept(read); }
+      export function construct(value) { return new read(value); }
+      export { read };`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.equal(entry.result(), 8);
+  assert.equal(entry.same(), true);
+  assert.equal(
+    entry.callback((fn) => fn),
+    entry.read
+  );
+  assert.equal(
+    Object.getPrototypeOf(entry.construct({ amount: 1, limit: 2 })),
+    entry.read.prototype
+  );
+  assert.equal(plans.get("./entry.js").calls.length, 1);
+  assert.equal(plans.get("./entry.js").bodies.length, 1);
+});
+
+test("closed bodies preserve local writes, parameter defaults and escaping nested closures", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js": `export const make = ({ value = 2 } = {}, add = (x) => x + 1) => {
+      let local = value; ({ value: local } = { value: add(local) });
+      for (local of [local + 1]) { value = local; }
+      return function next({ value: increment = 1 } = {}) { local += increment; return local; };
+    };`,
+      "./entry.js": `import { make } from "./dep.js";
+      export function result() { return make(); }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  const first = entry.result();
+  const second = entry.result();
+  assert.equal(first(), 5);
+  assert.equal(first({ value: 3 }), 8);
+  assert.equal(second(), 5);
+  assert.equal(plans.get("./entry.js").calls.length, 1);
+});
+
+test("unsafe captures, writes, invocation context and source-site identity retain ordinary calls", async () => {
+  const cases = [
+    `let value = 1; export function f() { return value; }`,
+    `let value = 1; export function f() { value = 2; }`,
+    `let value = 1; export function f() { ({ value } = { value: 2 }); }`,
+    `let value = 1; export function f() { [value] = [2]; }`,
+    `let value = 1; export function f() { for (value of [2]) {} }`,
+    `export function f() { absent = 2; }`,
+    `export function f() { return f; }`,
+    `export const f = function self() { return () => self; };`,
+    `export default function self() { return self; }`,
+    `export function f() { return this; }`,
+    `export function f() { return arguments; }`,
+    `export const f = () => arguments;`,
+    `export function f() { return new.target; }`,
+    `export function f() { return eval("1"); }`,
+    "export function f(tag) { return tag`constant`; }",
+    `export let f = () => 1; export function change() { f = () => 2; }`,
+  ];
+  for (const source of cases) {
+    const target = { identity: { path: "dep.js" }, source };
+    const importer = {
+      identity: { path: "entry.js" },
+      source: `${source.includes("export default") ? "import f" : "import { f }"} from "./dep.js"; export function result() { return f(); }`,
+    };
+    const graph = new Map([
+      ["dep.js", target],
+      ["entry.js", importer],
+    ]);
+    const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(
+      importer,
+      graph,
+      convexWasmModuleLinkage.immutableImportPlan(importer, graph)
+    );
+    assert.deepEqual(plan.calls, [], source);
+  }
+});
+
+test("imported call replacement respects shadowing, arguments and thrown values", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js": `export default ({ value }, accept) => { return accept(value); };`,
+      "./entry.js": `import read from "./dep.js";
+      export function result(log, fail) {
+        return read((log.push("argument"), { value: 7 }), (value) => {
+          log.push(value); if (fail) throw fail; return value;
+        });
+      }
+      export function shadow(read) { return read(); }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  const log = [];
+  assert.equal(entry.result(log), 7);
+  assert.deepEqual(log, ["argument", 7]);
+  const sentinel = {};
+  assert.throws(
+    () => entry.result(log, sentinel),
+    (error) => error === sentinel
+  );
+  assert.equal(
+    entry.shadow(() => 99),
+    99
+  );
+  assert.equal(plans.get("./entry.js").calls.length, 1);
+});
+
+test("copying closed bodies retains dependency initialization and cyclic calls", async () => {
+  await assert.rejects(
+    loadModules(
+      {
+        "./dep.js": `throw "initialization"; export function read() { return 7; }`,
+        "./entry.js": `import { read } from "./dep.js"; export const result = read();`,
+      },
+      "./entry.js"
+    ),
+    (error) => error === "initialization"
+  );
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./a.js": `import { early } from "./b.js"; export const read = () => 7;
+      export function result() { return early; }`,
+      "./b.js": `import { read } from "./a.js"; export let early;
+      try { read(); } catch (error) { early = error.name; }`,
+    },
+    "./a.js",
+    new Map(),
+    plans
+  );
+  assert.equal(entry.result(), "ReferenceError");
+  assert.equal(plans.get("./b.js").calls.length, 0);
+});
+
+test("body duplication stays bounded and reuses identical closed implementations", async () => {
+  const names = Array.from({ length: 40 }, (_, i) => `f${i}`);
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js":
+        names
+          .map((name, i) => `export function ${name}(value) { return value + ${i}; }`)
+          .join("\n") + `\nexport const identical = value => { return value + 0; };`,
+      "./entry.js": `import { ${names.join(", ")}, identical } from "./dep.js";
+      export function result() { return [${names.map((name) => `${name}(1)`).join(", ")}, identical(2)]; }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(Array.from(entry.result()), [...names.map((_, i) => i + 1), 2]);
+  const plan = plans.get("./entry.js");
+  assert.equal(plan.bodies.length, 32);
+  assert.equal(plan.calls.length, 33);
+  assert.equal(plan.rejectedBindings, 8);
+});
+
+test("source-local summaries reuse warm work and invalidate only incorporated body changes", async (t) => {
+  const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-function-summary-"));
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const cacheLayout = deriveConvexWasmCacheLayout({
+    buildId: "summary",
+    cacheRoot,
+    repositoryRoot: cacheRoot,
+    scope: "isolated-test",
+  });
+  const source = 'import { read } from "./dep.js"; export function result(v) { return read(v); }';
+  const graphFor = (extra, operation = "+") =>
+    new Map([
+      ["entry.js", { identity: { path: "entry.js" }, source }],
+      [
+        "dep.js",
+        {
+          identity: { path: "dep.js" },
+          source: `export function read(v) { return v.amount ${operation} v.limit; } export const extra = ${extra};`,
+        },
+      ],
+    ]);
+  const prepare = async (graph) => ({
+    report: await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization(
+      [...graph.values()],
+      { cacheRoot, cacheLayout }
+    ),
+    plan: convexWasmModuleLinkage.planConvexWasmFunctionImports(
+      graph.get("entry.js"),
+      graph,
+      convexWasmModuleLinkage.immutableImportPlan(graph.get("entry.js"), graph)
+    ),
+  });
+  const graph = graphFor(1);
+  const cold = await prepare(graph);
+  assert.deepEqual(cold.report, {
+    memoryHits: 0,
+    cacheHits: 0,
+    cacheMisses: 2,
+  });
+  const memory = await prepare(graph);
+  assert.deepEqual(memory.report, {
+    memoryHits: 2,
+    cacheHits: 0,
+    cacheMisses: 0,
+  });
+  const warm = await prepare(graphFor(1));
+  assert.deepEqual(warm.report, {
+    memoryHits: 0,
+    cacheHits: 2,
+    cacheMisses: 0,
+  });
+  assert.deepEqual(warm.plan, cold.plan);
+  const unrelated = await prepare(graphFor(2));
+  assert.deepEqual(unrelated.report, {
+    memoryHits: 0,
+    cacheHits: 1,
+    cacheMisses: 1,
+  });
+  assert.deepEqual(unrelated.plan, cold.plan);
+  const changed = await prepare(graphFor(2, "-"));
+  assert.deepEqual(changed.report, {
+    memoryHits: 0,
+    cacheHits: 1,
+    cacheMisses: 1,
+  });
+  assert.notDeepEqual(changed.plan.bodies, cold.plan.bodies);
+});
+
+test("chunk preparation binds imported bodies and reuses unaffected compact artifacts", async (t) => {
+  const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-linkage-pipeline-"));
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const producerIdentity = await buildConvexWasmProducerIdentity(repositoryRoot);
+  let transforms = 0;
+  const counting = {
+    version: esbuild.version,
+    async transform(...args) {
+      ++transforms;
+      return esbuild.transform(...args);
+    },
+  };
+  const build = async (buildId, extra, operation = "+", mutable = false) => {
+    const sources = {
+      "entry.js": 'import { read } from "./dep.js"; export function result(v) { return read(v); }',
+      "dep.js": `export ${mutable ? "let" : "const"} read = v => v.amount ${operation} v.limit;
+        export const extra = ${extra}; ${mutable ? "export function update() { read = () => 99; }" : ""}`,
+    };
+    const modules = Object.entries(sources).map(([path, source]) => {
+      const sources = [`fixture:///${path}`];
+      const sourceMap = JSON.stringify({ sources, version: 3 });
+      const byteHash = (value) => createHash("sha256").update(value).digest("hex");
+      return {
+        source,
+        sourceMap,
+        identity: {
+          path,
+          environment: "isolate",
+          sourceMembershipSha256: convexWasmOfficialOutputSourceMembershipIdentitySha256({
+            sources,
+          }),
+          sourceSha256: byteHash(source),
+          sourceSize: Buffer.byteLength(source),
+          sourceMap: {
+            sha256: byteHash(sourceMap),
+            size: Buffer.byteLength(sourceMap),
+            sourcesCount: 1,
+            sourcesContentCount: 0,
+          },
+          moduleSha256: byteHash(source + sourceMap),
+        },
+      };
+    });
+    const closure = {
+      entryModulePath: "entry.js",
+      kind: "fixture-closure-v1",
+      imports: [
+        {
+          external: false,
+          importerPath: "entry.js",
+          kind: "import-statement",
+          path: "dep.js",
+        },
+      ],
+      modules: modules.map(({ identity }) => identity),
+    };
+    const selections = authenticateConvexWasmOfficialOutputSelectionFixtures([
+      {
+        closure: {
+          identity: { ...closure, sha256: fingerprintJson(closure) },
+          modules,
+        },
+        manifestMembership: {
+          dependencyGraphSha256: "b".repeat(64),
+          inventoryKind: "fixture-inventory-v1",
+          sourceEnvelopeSha256: "a".repeat(64),
+        },
+        route: {
+          entryPath: "convex/entry.ts",
+          exportName: "result",
+          modulePath: "entry",
+          runtimeModulePath: "entry.js",
+          udfKind: "query",
+          visibility: "public",
+        },
+        toolchain: { esbuild: esbuild.version },
+      },
+    ]).selections;
+    const session = createConvexWasmOfficialOutputChunkTransformSession({
+      esbuild: counting,
+      persistentCache: {
+        cacheRoot,
+        producerIdentity,
+        cacheLayout: deriveConvexWasmCacheLayout({
+          buildId,
+          cacheRoot,
+          repositoryRoot,
+          scope: "isolated-test",
+        }),
+      },
+    });
+    const compact = await buildConvexWasmOfficialOutputChunkUnits({
+      esbuild: counting,
+      selections,
+      transformSession: session,
+      compactUnitAuthority: true,
+    });
+    const report = convexWasmOfficialOutputChunkUnitTestHooks.compactAuthorityReport(session);
+    const materialized = {
+      ...compact,
+      units: await Promise.all(
+        compact.units.map(async (unit) => ({
+          ...unit,
+          javascript: await materializeConvexWasmOfficialOutputCompactChunkUnitJavascript(unit),
+        }))
+      ),
+    };
+    const facade = Object.create(null);
+    Object.defineProperty(facade, "globalThis", { value: facade });
+    const context = vm.createContext({
+      __convexWasmApplicationGlobalThis: facade,
+    });
+    const entries = initializeConvexWasmOfficialOutputChunkUnits({
+      chunkUnits: materialized,
+      destroyStore(error) {
+        throw error;
+      },
+      executeChunk({ begin, javascript, publish, reportThrown, require }) {
+        Object.assign(context, {
+          __convexWasmOfficialChunkBegin: begin,
+          __convexWasmOfficialChunkPublish: publish,
+          __convexWasmOfficialChunkReportThrown: reportThrown,
+          __convexWasmOfficialChunkRequire: require,
+        });
+        vm.runInContext(javascript, context, { timeout: 1000 });
+      },
+    });
+    assert.equal(entries[0].namespace.result({ amount: 8, limit: 3 }), operation === "+" ? 11 : 5);
+    return {
+      report,
+      entry: compact.units.find(({ identity }) => identity.module.path === "entry.js"),
+      summary: convexWasmOfficialOutputChunkUnitTestHooks.functionSpecializationReport(session),
+    };
+  };
+  const first = await build("cold", 1);
+  assert.equal(transforms, 2);
+  assert.equal(first.report.persistentPreparationCacheMisses, 2);
+  assert.equal(first.summary.cacheMisses, 2);
+  const warm = await build("warm", 1);
+  assert.equal(transforms, 2);
+  assert.equal(warm.report.persistentIdentityCacheHits, 2);
+  assert.equal(warm.summary.cacheHits, 2);
+  const unrelated = await build("unrelated", 2);
+  assert.equal(transforms, 3);
+  assert.equal(unrelated.report.persistentIdentityCacheHits, 1);
+  assert.deepEqual(unrelated.entry.identity.javascript, first.entry.identity.javascript);
+  const bodyChanged = await build("body-changed", 2, "-");
+  assert.equal(transforms, 5);
+  assert.equal(bodyChanged.report.persistentPreparationCacheMisses, 2);
+  assert.notDeepEqual(bodyChanged.entry.identity.javascript, first.entry.identity.javascript);
+  const mutable = await build("mutable", 2, "-", true);
+  assert.equal(transforms, 7);
+  assert.notDeepEqual(mutable.entry.identity.javascript, bodyChanged.entry.identity.javascript);
 });

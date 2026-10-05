@@ -32,12 +32,14 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
     describeTermination: describeNativeCommandTermination,
   };
   try {
-    const built = await buildConvexWasmProjectPackage({ config, inputs, resourceGuard });
+    // Capture the complete source request before package construction retains
+    // optimization material, keeping the two bundlers' memory peaks apart.
     const startPush = await createConvexWasmProjectStartPush({
       buildDirectory: inputs.buildDirectory,
       projectRoot: config.projectRoot,
       signal,
     });
+    const built = await buildConvexWasmProjectPackage({ config, inputs, resourceGuard });
     const frozenRequest = inspectFrozenStartPushRequest({
       graphSession: built.graphSession,
       inventory: inputs.inventory,
@@ -71,6 +73,16 @@ export async function buildConvexWasmFromProjectConfig(config, { signal } = {}) 
       sourceEnvelope: built.sourceEnvelopePublication.file,
       startPush,
     };
+    await fs.writeFile(
+      resolve(inputs.buildDirectory, "build-report.json"),
+      `${canonicalJson({
+        kind: "convex-wasm-project-build-report-v1",
+        chunkPreparation: built.chunkPreparation,
+        materialSession: built.artifactMaterialSession,
+        native: built.artifact.buildReport,
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
     const reportPath = resolve(inputs.buildDirectory, "artifact-report.json");
     await fs.writeFile(reportPath, `${canonicalJson(report)}\n`, { flag: "wx", mode: 0o600 });
     return { report, reportPath };

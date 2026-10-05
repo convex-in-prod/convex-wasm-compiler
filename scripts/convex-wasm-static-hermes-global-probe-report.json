@@ -1,6 +1,6 @@
 {
   "build": {
-    "buildRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df",
+    "buildRevision": "7d59a363c5fd251e159ff8108d2ae8871aa49071",
     "cmake": {
       "host": {
         "flags": {
@@ -27,7 +27,7 @@
         }
       }
     },
-    "observedCheckoutRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df",
+    "observedCheckoutRevision": "7d59a363c5fd251e159ff8108d2ae8871aa49071",
     "sourceMaterials": {
       "globalObject": {
         "path": "lib/VM/JSLib/GlobalObject.cpp",
@@ -42,7 +42,7 @@
         "sha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352"
       }
     },
-    "sourceRevision": "413b40c7064ee76bdbef39de9d30f72e0e2666df"
+    "sourceRevision": "7d59a363c5fd251e159ff8108d2ae8871aa49071"
   },
   "harness": {
     "generatedC": {
@@ -527,12 +527,12 @@
       "sha256": "5db0ad61a43d90718e232fcfc08ab52fd2fa9e33bf349f34755ae5b788ffb456"
     },
     "wasm": {
-      "bytes": 4898212,
-      "sha256": "ffadb730cbf281b05be7d7b06456741f109d3120a8175ff50aa1a6e32e41ee67"
+      "bytes": 4927366,
+      "sha256": "878c4da5fc14feed9dcf60cbcc54bf54bba74d10e74499dc197ed171bb60f3ff"
     },
     "wasmLibhermesvmArchive": {
-      "bytes": 12810390,
-      "sha256": "e644897afbfd36e195cdb326ef2385895d91b45361e0ee99728b13be1b82642a"
+      "bytes": 12872232,
+      "sha256": "314710e0a852b12197eef5d9254d41d8b9198b74110af7dc8eb792985e9217e8"
     }
   },
   "tools": {
@@ -541,12 +541,12 @@
       "sha256": "498eba9b6aacffca1c358ba340fc7b37015d7867cb211c7f2d45784ee9310f03"
     },
     "runner": {
-      "bytes": 19565992,
-      "sha256": "b385a9af988fb4524640ead2b92ed9bac8461885cdd727d1a54ce21721dea3eb"
+      "bytes": 19569784,
+      "sha256": "acef78d54e1a2680f0b862eccf3dc96a82a7d4465c1b39b1943bd1b5fbe36637"
     },
     "shermes": {
-      "bytes": 4176016,
-      "sha256": "f67d1026cf0f0b96f4bbe7e40c61bd653bd556b89d7d3f5bb054b5b543bead45"
+      "bytes": 4192864,
+      "sha256": "0322eec3b02b802b1a6a2f246cf47fb0b8951ad288d6113d823295978d63ebc4"
     }
   },
   "typedDeclarations": {
@@ -617,5 +617,5 @@
     ],
     "kind": "libhermes-runtime-declarations-plus-typed-arrays-v1"
   },
-  "reportSha256": "dd44737bf0021d9a4e9b39f47753a4ed6f34353432941ee59df2334dfadaae0d"
+  "reportSha256": "1a4c7c0052bdb4c4dffdd6632b881e5fb3431f05afabea50af8582c6f72bd2a5"
 }

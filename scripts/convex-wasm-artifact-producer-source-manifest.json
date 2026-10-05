@@ -119,6 +119,7 @@
     "scripts/lib/convex-wasm-deployment-artifact-semantics.mjs",
     "scripts/lib/convex-wasm-deployment-graph.mjs",
     "scripts/lib/convex-wasm-frozen-graph-authority.mjs",
+    "scripts/lib/convex-wasm-function-specialization.mjs",
     "scripts/lib/convex-wasm-gate-pins.mjs",
     "scripts/lib/convex-wasm-generated-c-build.mjs",
     "scripts/lib/convex-wasm-git-blob-material.mjs",
