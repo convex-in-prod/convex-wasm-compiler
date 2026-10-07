@@ -3166,6 +3166,92 @@ test("automatic maintenance sweeps old immutable artifacts above its high waterm
   await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
 });
 
+test("automatic maintenance shares its interval across calls while explicit sweeps remain immediate", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("automatic-interval");
+  const options = maintenanceOptions(value, {
+    apply: true,
+    automaticImmutableSweep: true,
+    immutableHighWatermarkAllocatedBytes: 1,
+    nowMs: 2_000_000_000,
+  });
+  const writeCandidate = async (name) => {
+    const artifact = await writeGenericArtifact({
+      cacheLayout,
+      extension: "wasm",
+      identity: { fixture: name },
+      metadata: { fixture: name },
+      payload: name,
+      stage: "automatic-interval-candidate",
+    });
+    await ageGenericArtifact(cacheLayout, artifact);
+    return join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key);
+  };
+  const first = await writeCandidate("first");
+  await maintainConvexWasmCache(options);
+  await assert.rejects(fs.lstat(first), { code: "ENOENT" });
+  const second = await writeCandidate("second");
+  const deferred = await maintainConvexWasmCache({ ...options, nowMs: options.nowMs + 1 });
+  assert.equal(deferred.kind, "convex-wasm-cache-maintenance-deferred-v1");
+  await fs.lstat(second);
+  await maintainConvexWasmCache({ ...options, nowMs: deferred.nextDueAtMs });
+  await assert.rejects(fs.lstat(second), { code: "ENOENT" });
+  const third = await writeCandidate("third");
+  await maintainConvexWasmCache({
+    ...options,
+    nowMs: deferred.nextDueAtMs + 1,
+    automaticImmutableSweep: false,
+    immutableSweep: true,
+  });
+  await assert.rejects(fs.lstat(third), { code: "ENOENT" });
+});
+
+test("host lock ownership covers leases, immutable planning and sweeping", async (t) => {
+  const value = await fixture(t);
+  let held = false;
+  const cacheLock = {
+    acquire() {
+      assert.equal(held, false);
+      held = true;
+      return () => { held = false; };
+    },
+    inheritedAuthorityEnvironment() { return held ? { hostLock: "held" } : {}; },
+    requireAuthority() {
+      if (!held) throw new Error("host lock is not held");
+    },
+  };
+  const cacheLayout = value.layout("host-lock");
+  await assert.rejects(createConvexWasmBuildWorkLease({ cacheLayout, cacheLock }), /host lock/u);
+  const release = cacheLock.acquire();
+  const lease = await createConvexWasmBuildWorkLease({ cacheLayout, cacheLock });
+  await assert.rejects(
+    maintainConvexWasmCache(maintenanceOptions(value, { apply: true, cacheLock })),
+    /not inherit build authority/u
+  );
+  release();
+  await assert.rejects(lease.complete(), /host lock/u);
+  const finish = cacheLock.acquire();
+  await lease.complete();
+  finish();
+  const artifact = await writeGenericArtifact({
+    cacheLayout,
+    extension: "wasm",
+    metadata: { fixture: "host-lock" },
+    payload: "expired candidate",
+    stage: "host-lock-candidate",
+  });
+  await ageGenericArtifact(cacheLayout, artifact);
+  const report = await maintainConvexWasmCache(maintenanceOptions(value, {
+    apply: true,
+    cacheLock,
+    immutableSweep: true,
+    immutableHighWatermarkAllocatedBytes: 1,
+    nowMs: 2_000_000_000,
+  }));
+  assert.equal(held, false);
+  assert.deepEqual(report.immutable.sweep.removed.map(({ key }) => key), [artifact.key]);
+});
+
 test("immutable sweep uses remaining byte budget after an oversized candidate", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("bounded-sweep");

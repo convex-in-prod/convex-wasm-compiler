@@ -10,6 +10,7 @@ use std::{
 };
 
 mod incremental_cache;
+mod incremental_cache_trace;
 
 use incremental_cache::IncrementalCache;
 use serde::Serialize;
@@ -24,7 +25,8 @@ const USAGE: &str = "usage: convex-wasm-precompiler INPUT.wasm OUTPUT.cwasm \
     --profiling-strategy perf-map \
     --target-triple TARGET_TRIPLE \
     --target-cpu baseline \
-    --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS";
+    --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS \
+    [--incremental-cache-trace ABSOLUTE_NEW_JSONL]";
 const MAX_CORE_WASM_BYTES: usize = 320 * 1024 * 1024;
 const MAX_AOT_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -188,11 +190,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     require_option(&mut arguments, "--parallel-compilation-workers")?;
     let parallel_compilation_workers = required_parallel_compilation_workers(arguments.next())?;
+    let trace_path = match arguments.next() {
+        None => None,
+        Some(option) if option == "--incremental-cache-trace" => Some(PathBuf::from(
+            arguments
+                .next()
+                .ok_or("incremental-cache-trace requires an output path")?,
+        )),
+        Some(_) => return Err(USAGE.into()),
+    };
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
 
-    ensure_distinct_new_outputs(&output, &engine_identity_path)?;
+    ensure_distinct_new_outputs(&output, &engine_identity_path, trace_path.as_deref())?;
 
     let mut config = Config::new();
     config
@@ -206,12 +217,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let cache = Arc::new(IncrementalCache::open(
         incremental_cache_root()?,
         incremental_cache_namespace(&compatibility)?,
+        trace_path.as_deref(),
     )?);
     config.enable_incremental_compilation(cache.clone())?;
     let engine = Engine::new(&config)?;
     let wasm = read_bounded_file(&input, MAX_CORE_WASM_BYTES, "Core Wasm input")?;
     let precompiled = precompile_module_with_workers(&engine, &wasm, parallel_compilation_workers)?;
     let cache_report = cache.report()?;
+    cache.finish_trace(&cache_report)?;
     if Engine::detect_precompiled(&precompiled) != Some(Precompiled::Module) {
         return Err("Wasmtime did not produce a precompiled core module".into());
     }
@@ -301,6 +314,7 @@ fn incremental_cache_namespace(compatibility: &str) -> Result<[u8; 32], Box<dyn 
 fn ensure_distinct_new_outputs(
     output: &Path,
     engine_identity: &Path,
+    trace: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let normalize = |path: &Path| -> Result<PathBuf, Box<dyn Error>> {
         let parent = path
@@ -312,10 +326,17 @@ fn ensure_distinct_new_outputs(
     };
     let output = normalize(output)?;
     let engine_identity = normalize(engine_identity)?;
-    if output == engine_identity {
-        return Err("AOT and engine identity outputs must be distinct".into());
+    let trace = trace.map(normalize).transpose()?;
+    let paths: Vec<_> = [&output, &engine_identity]
+        .into_iter()
+        .chain(trace.as_ref())
+        .collect();
+    for (index, path) in paths.iter().enumerate() {
+        if paths[..index].contains(path) {
+            return Err("AOT, engine identity and trace outputs must be distinct".into());
+        }
     }
-    for path in [&output, &engine_identity] {
+    for path in paths {
         match fs::symlink_metadata(path) {
             Ok(_) => return Err(format!("output already exists: {}", path.display()).into()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -435,6 +456,7 @@ fn require_option(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
     use wasmtime::Module;
 
     #[test]
@@ -443,6 +465,8 @@ mod tests {
             "convex-wasm-incremental-engine-{}",
             std::process::id()
         ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let root = root.canonicalize().unwrap();
         let mut config = Config::new();
         config
             .consume_fuel(true)
@@ -452,7 +476,9 @@ mod tests {
         let mut wasm = b"\0asm\x01\0\0\0\x01\x05\x01\x60\x00\x01\x7f\x03\x03\x02\x00\x00\x07\x10\x02\x04left\x00\x00\x05right\x00\x01\x0a\x0b\x02\x04\x00\x41\x2a\x0b\x04\x00\x41\x03\x0b".to_vec();
         let namespace =
             incremental_cache_namespace(&engine_compatibility_sha256(&uncached)).unwrap();
-        let cache = Arc::new(IncrementalCache::open(root.clone(), namespace).unwrap());
+        let trace_path = root.join("cold.jsonl");
+        let cache =
+            Arc::new(IncrementalCache::open(root.clone(), namespace, Some(&trace_path)).unwrap());
         config
             .enable_incremental_compilation(cache.clone())
             .unwrap();
@@ -463,10 +489,26 @@ mod tests {
         );
         let cold_bytes = precompile_module_with_workers(&cold, &wasm, 1).unwrap();
         assert!(cache.report().unwrap().inserts >= 2);
+        cache.finish_trace(&cache.report().unwrap()).unwrap();
+        let events: Vec<serde_json::Value> = fs::read_to_string(&trace_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let inserts: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "insert")
+            .collect();
+        assert!(inserts.len() >= 2);
+        assert!(
+            inserts
+                .iter()
+                .all(|event| event["compileInterval"]["kind"] == "matched")
+        );
         drop(cold);
         drop(cache);
 
-        let cache = Arc::new(IncrementalCache::open(root.clone(), namespace).unwrap());
+        let cache = Arc::new(IncrementalCache::open(root.clone(), namespace, None).unwrap());
         config
             .enable_incremental_compilation(cache.clone())
             .unwrap();
@@ -568,10 +610,15 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let output = root.join("artifact.cwasm");
         let identity = root.join("engine.json");
-        ensure_distinct_new_outputs(&output, &identity).unwrap();
-        assert!(ensure_distinct_new_outputs(&output, &root.join("./artifact.cwasm")).is_err());
+        ensure_distinct_new_outputs(&output, &identity, None).unwrap();
+        ensure_distinct_new_outputs(&output, &identity, Some(&root.join("trace.jsonl"))).unwrap();
+        assert!(ensure_distinct_new_outputs(&output, &identity, Some(&output)).is_err());
+        assert!(ensure_distinct_new_outputs(&output, &identity, Some(&identity)).is_err());
+        assert!(
+            ensure_distinct_new_outputs(&output, &root.join("./artifact.cwasm"), None).is_err()
+        );
         fs::write(&identity, b"existing").unwrap();
-        assert!(ensure_distinct_new_outputs(&output, &identity).is_err());
+        assert!(ensure_distinct_new_outputs(&output, &identity, None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

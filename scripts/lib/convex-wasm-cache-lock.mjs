@@ -20,6 +20,12 @@ const DEFAULT_LOCK_DATABASE_DIRECTORY = "/var/tmp";
 const LINUX_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 const SUPPORTED_PLATFORMS = new Set(["darwin", "linux"]);
 
+export const convexWasmCacheLock = Object.freeze({
+  acquire: acquireConvexWasmCacheLock,
+  inheritedAuthorityEnvironment: inheritedConvexWasmCacheLockAuthorityEnvironment,
+  requireAuthority: requireConvexWasmCacheLockAuthority,
+});
+
 function delay(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }

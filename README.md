@@ -555,6 +555,13 @@ must acquire `acquireConvexWasmCacheLock`, create a work lease with
 `createConvexWasmBuildWorkLease`, and hold the lock through the build and the
 lease's `complete` or `fail` transition. The library builders do not acquire
 the lock for the caller. `verify:source-to-aot` acquires it around its own build.
+Hosts that serialize compilation with a broader lock can pass a `cacheLock`
+object to the lease, successful-use, maintenance, and immutable-GC functions.
+It supplies `acquire({ environment })`, `requireAuthority(environment)`, and
+`inheritedAuthorityEnvironment(environment)`; acquisition returns the release
+function. Use the same lock for every operation on that cache. The compiler
+retains the generic retention and authentication implementation while the host
+owns its lock and resource policy.
 
 ```sh
 npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler"
@@ -565,7 +572,11 @@ npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler" --apply -
 high watermark. Supply `--immutable-high-watermark-bytes` or
 `CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES` for either sweep mode; choose the value
 for the adopting host. The command uses the default cache root when `--cache-root`
-is omitted.
+is omitted. Successful automatic maintenance records its policy and start time
+in the private cache. Further automatic calls using that policy defer their
+occupancy scans and sweeps for 15 minutes. Explicit sweeps, policy changes and
+clock rollback bypass that interval; failed maintenance does not advance it.
+The interval does not replace build-time disk admission or live disk limits.
 
 ```sh
 npm ci
@@ -606,12 +617,45 @@ Its AOT and engine-identity output paths must not already exist.
 The precompiler also reuses authenticated Cranelift function results across
 processes and changed Wasm modules, with the same optimization settings. Records
 bind the precompiler executable, engine compatibility and Cranelift function key.
-Three bounded size classes retain at most 1 GiB of records, with four ways per set;
-oversized functions still compile normally. Atomic writes use one temporary file
+Thirteen bounded size classes retain at most 2 GiB of records, with sixteen ways
+per set and records up to 16 MiB. Repeated insertion of the same function replaces
+its existing slot. The fixed `size-classes-v2` directory is shared across source
+and compiler revisions; it does not create a directory for every namespace.
+The preceding layout's slots remain separate and bounded at 1 GiB, allowing
+older and newer executables to share the root safely. An operator can remove
+those legacy slots once no older executable uses the cache.
+Oversized functions still compile normally. Atomic writes use one temporary file
 per active insertion shard, at most another 256 MiB. Cache misses, replacements,
 oversized results and rejected corrupt records are reported with hits and inserts
 on the `incremental-cache` output line. Unexpected filesystem failures fail the
 build before artifact publication.
+
+For compilation-cache diagnosis, append
+`--incremental-cache-trace /absolute/private/directory/new-trace.jsonl` to a
+standalone precompiler command. The optional trace records hashed stencil keys,
+lookup hit/miss and duration, result sizes, selected tiers, displaced record
+sizes (including their headers), and oversized results. Matching lookup/insert
+pairs on the same worker also report elapsed and thread CPU nanoseconds between
+those callbacks. This interval includes stencil compilation and serialization;
+it excludes Wasm translation before lookup and final linking. An insertion
+without a matching lookup has an explicit `unmatched` interval. Lookup hits
+mean authenticated bytes were found, not necessarily that Cranelift accepted
+their serialized form; a later insertion records that distinction.
+
+The trace must be a new file in an existing private owned directory. It is
+limited to 64 MiB, ends with a `complete` event containing the ordinary counters,
+and is synchronized before AOT publication. Trace errors fail the build; a file
+without the completion event is incomplete evidence. Tracing is disabled unless
+requested and does not change optimization settings or cache identities.
+Compare repeated compilations with the same precompiler binary: rebuilding it
+changes its authenticated cache namespace even for diagnostic-only source edits.
+`analyzeIncrementalCacheTrace` in
+`scripts/lib/convex-wasm-incremental-cache-trace.mjs` accepts the trace as a
+buffer, checks its completion counters against its events, and reports size
+buckets, miss versus post-hit compilation cost, and the 20 most expensive
+insertions. It retains the trace digest, namespace and recorded tier layout.
+Displaced sizes are observations of the replaced files, not authenticated
+compiler-result sizes; rejected-record counts remain separate.
 
 Ordinary builds keep these records in `incremental-functions` under their cache
 root. Standalone precompilation uses the platform user cache by default;

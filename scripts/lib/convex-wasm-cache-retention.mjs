@@ -2,11 +2,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-import {
-  acquireConvexWasmCacheLock,
-  inheritedConvexWasmCacheLockAuthorityEnvironment,
-  requireConvexWasmCacheLockAuthority,
-} from "./convex-wasm-cache-lock.mjs";
+import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import {
   defaultConvexWasmCacheRoot,
   deriveConvexWasmCacheLayout,
@@ -26,6 +22,7 @@ import {
   planConvexWasmImmutableGc,
   sweepConvexWasmImmutableGc,
 } from "./convex-wasm-cache-retention-immutable.mjs";
+import { readAutomaticCacheMaintenanceSchedule } from "./convex-wasm-cache-maintenance-schedule.mjs";
 
 export const convexWasmBuildWorkRecordName = "build-work.json";
 export const defaultConvexWasmWorkQuiescentMilliseconds = 24 * 60 * 60 * 1_000;
@@ -428,10 +425,11 @@ async function readBuildWorkRecord(cacheRoot, buildRoot, buildId) {
 
 export async function createConvexWasmBuildWorkLease({
   cacheLayout: layout,
+  cacheLock = convexWasmCacheLock,
   environment = process.env,
   nowMs = Date.now(),
 }) {
-  requireConvexWasmCacheLockAuthority(environment);
+  cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(layout);
   const buildId = buildIdFromLayout(cacheLayout);
   const failedRecoveryMilliseconds = millisecondsFromEnvironment(
@@ -474,7 +472,7 @@ export async function createConvexWasmBuildWorkLease({
     buildId,
     buildRoot: cacheLayout.work.buildRoot,
     async complete(completedAtMs = Date.now()) {
-      requireConvexWasmCacheLockAuthority(environment);
+      cacheLock.requireAuthority(environment);
       if (state.status !== "active") {
         fail(`cannot complete build work in ${state.status} state`);
       }
@@ -487,7 +485,7 @@ export async function createConvexWasmBuildWorkLease({
       await fs.rm(cacheLayout.work.buildRoot, { recursive: true });
     },
     async fail(failedAtMs = Date.now()) {
-      requireConvexWasmCacheLockAuthority(environment);
+      cacheLock.requireAuthority(environment);
       // Publication may have succeeded before removal of its completed work root failed. Preserve
       // that completed state so maintenance can remove it after the normal recovery interval.
       if (state.status === "completed") return;
@@ -633,11 +631,12 @@ function successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs }) {
 export async function recordConvexWasmSuccessfulCacheUse({
   buildId,
   cacheLayout: layout,
+  cacheLock = convexWasmCacheLock,
   deployment,
   environment = process.env,
   recordedAtMs = Date.now(),
 }) {
-  requireConvexWasmCacheLockAuthority(environment);
+  cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(layout);
   const snapshot = successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs });
   const root = convexWasmRecentSuccessSnapshotRoot(cacheLayout.cacheRoot);
@@ -1032,6 +1031,7 @@ export async function maintainConvexWasmCache({
   apply = false,
   automaticImmutableSweep = false,
   cacheRoot = defaultConvexWasmCacheRoot(),
+  cacheLock = convexWasmCacheLock,
   completedRetentionMilliseconds = defaultConvexWasmCompletedRetentionMilliseconds,
   environment = process.env,
   failedRecoveryMilliseconds = defaultConvexWasmFailedRecoveryMilliseconds,
@@ -1092,15 +1092,37 @@ export async function maintainConvexWasmCache({
   ) {
     fail("immutable sweeping requires an explicit high watermark");
   }
-  if (Object.keys(inheritedConvexWasmCacheLockAuthorityEnvironment(environment)).length !== 0) {
+  if (Object.keys(cacheLock.inheritedAuthorityEnvironment(environment)).length !== 0) {
     fail("maintenance must acquire the top-level cache lock, not inherit build authority");
   }
-  const releaseLock = await acquireConvexWasmCacheLock({ environment });
+  const releaseLock = await cacheLock.acquire({ environment });
   try {
-    requireConvexWasmCacheLockAuthority(environment);
+    cacheLock.requireAuthority(environment);
     // The heavy lock can wait behind a build. Date automatic maintenance after that wait so newly
     // completed work records are not mistaken for future records and excluded from cleanup.
     const normalizedNowMs = suppliedNowMs ?? Date.now();
+    const automaticSchedule = automaticImmutableSweep && !immutableSweep
+      ? await readAutomaticCacheMaintenanceSchedule({
+          cacheRoot: normalizedCacheRoot,
+          nowMs: normalizedNowMs,
+          policy: {
+            abandonedRecoveryMilliseconds,
+            completedRetentionMilliseconds,
+            failedRecoveryMilliseconds,
+            immutableHighWatermarkAllocatedBytes: normalizedImmutableHighWatermarkAllocatedBytes,
+            includeImmutableOccupancy,
+            quiescentMilliseconds,
+          },
+        })
+      : undefined;
+    if (automaticSchedule?.status === "deferred") {
+      return {
+        kind: "convex-wasm-cache-maintenance-deferred-v1",
+        cacheRoot: normalizedCacheRoot,
+        nowMs: normalizedNowMs,
+        ...automaticSchedule,
+      };
+    }
     const cacheExists = await pathExists(normalizedCacheRoot);
     if (cacheExists) await requirePrivateCacheDirectory(normalizedCacheRoot, normalizedCacheRoot);
     const cacheLayout = deriveConvexWasmCacheLayout({
@@ -1140,6 +1162,7 @@ export async function maintainConvexWasmCache({
     const immutableSweepRequested = immutableSweep || automaticImmutableSweepTriggered;
     const immutableGcOptions = {
       cacheLayout,
+      cacheLock,
       environment,
       ...(normalizedImmutableHighWatermarkAllocatedBytes === undefined
         ? {}
@@ -1172,7 +1195,7 @@ export async function maintainConvexWasmCache({
         exists: await pathExists(root.path),
       }))
     );
-    return {
+    const report = {
       cacheRoot: normalizedCacheRoot,
       immutable: {
         ...(automaticImmutableSweep
@@ -1227,6 +1250,8 @@ export async function maintainConvexWasmCache({
         summary: workSummary(roots),
       },
     };
+    if (automaticSchedule?.status === "due") await automaticSchedule.complete();
+    return report;
   } finally {
     releaseLock();
   }

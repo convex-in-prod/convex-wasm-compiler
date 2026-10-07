@@ -131,6 +131,10 @@ export function parseArguments(argumentsList) {
 export async function main(argumentsList) {
   const options = parseArguments(argumentsList);
   const report = await maintainConvexWasmCache(options);
+  if (report.kind === "convex-wasm-cache-maintenance-deferred-v1") {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return;
+  }
   if (options.automaticImmutableSweep) {
     process.stdout.write(
       `${JSON.stringify({

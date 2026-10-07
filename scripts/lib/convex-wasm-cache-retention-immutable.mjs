@@ -9,7 +9,7 @@ import {
   requireSha256,
 } from "./convex-wasm-artifact-contract.mjs";
 import { decodeUtf8, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
-import { requireConvexWasmCacheLockAuthority } from "./convex-wasm-cache-lock.mjs";
+import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import { validateArtifactCacheEntry } from "./convex-wasm-artifact-cache-entry.mjs";
 import {
   authenticateStaticHermesCBundle,
@@ -2922,6 +2922,7 @@ async function reauthenticateEvictionCandidate(cacheLayout, candidate) {
 
 export async function planConvexWasmImmutableGc({
   cacheLayout: rawCacheLayout,
+  cacheLock = convexWasmCacheLock,
   environment = process.env,
   highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
   maxEstimatedReclaimBytes = defaultConvexWasmImmutableMaxEstimatedReclaimBytes,
@@ -2930,7 +2931,7 @@ export async function planConvexWasmImmutableGc({
   nowMs = Date.now(),
   recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
 } = {}) {
-  requireConvexWasmCacheLockAuthority(environment);
+  cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
   requireLimit(nowMs, "GC planning time", false);
   requireLimit(maxEstimatedReclaimBytes, "maximum estimated reclaim bytes");
@@ -3356,6 +3357,7 @@ export async function planConvexWasmImmutableGc({
 
 export async function sweepConvexWasmImmutableGc({
   cacheLayout: rawCacheLayout,
+  cacheLock = convexWasmCacheLock,
   environment = process.env,
   highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
   maxEstimatedReclaimBytes = defaultConvexWasmImmutableMaxEstimatedReclaimBytes,
@@ -3364,11 +3366,12 @@ export async function sweepConvexWasmImmutableGc({
   nowMs = Date.now(),
   recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
 } = {}) {
-  requireConvexWasmCacheLockAuthority(environment);
+  cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
   const recovered = await removeQuarantinedImmutableGcCandidates(cacheLayout);
   const plan = await planConvexWasmImmutableGc({
     cacheLayout,
+    cacheLock,
     environment,
     highWatermarkAllocatedBytes,
     maxEstimatedReclaimBytes,

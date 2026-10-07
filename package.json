@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.22",
+  "version": "0.2.23",
   "private": true,
   "type": "module",
   "bin": {
@@ -84,8 +84,8 @@
     "test:native-package-acquisition": "node --test scripts/lib/convex-wasm-native-package-acquisition.test.mjs scripts/lib/convex-wasm-native-release-selection.test.mjs",
     "test:lowering": "node --test scripts/lib/convex-wasm-lowering.test.mjs",
     "test:source-preparation": "node --test scripts/lib/convex-context-reuse-application-admission.test.mjs scripts/lib/convex-wasm-application-package-set.test.mjs scripts/lib/convex-wasm-compile-profile.test.mjs scripts/lib/convex-wasm-deployment-graph.test.mjs scripts/lib/convex-wasm-git-blob-material.test.mjs scripts/lib/convex-wasm-git-source-snapshot.test.mjs scripts/lib/convex-wasm-project-build-inputs.test.mjs scripts/lib/convex-wasm-registration-source-analysis.test.mjs scripts/lib/convex-wasm-source-envelope.test.mjs scripts/lib/convex-wasm-source-graph.test.mjs scripts/lib/convex-wasm-source-graph-snapshot.test.mjs scripts/lib/convex-wasm-source-graph-snapshot-cache.test.mjs",
-    "test:cache-layout": "node --test scripts/lib/convex-wasm-artifact-cache-entry.test.mjs scripts/lib/convex-wasm-artifact-stage.test.mjs scripts/lib/convex-wasm-cache-layout.test.mjs scripts/lib/convex-wasm-private-cache.test.mjs scripts/lib/convex-wasm-private-evidence.test.mjs scripts/lib/convex-wasm-runtime-header-snapshot-cache.test.mjs",
-    "test:cache-retention": "node --test scripts/lib/convex-wasm-cache-lock.test.mjs scripts/lib/convex-wasm-cache-retention.test.mjs scripts/maintain-convex-wasm-cache.test.mjs",
+    "test:cache-layout": "node --test scripts/lib/convex-wasm-incremental-cache-trace.test.mjs scripts/lib/convex-wasm-artifact-cache-entry.test.mjs scripts/lib/convex-wasm-artifact-stage.test.mjs scripts/lib/convex-wasm-cache-layout.test.mjs scripts/lib/convex-wasm-private-cache.test.mjs scripts/lib/convex-wasm-private-evidence.test.mjs scripts/lib/convex-wasm-runtime-header-snapshot-cache.test.mjs",
+    "test:cache-retention": "node --test scripts/lib/convex-wasm-cache-maintenance-schedule.test.mjs scripts/lib/convex-wasm-cache-lock.test.mjs scripts/lib/convex-wasm-cache-retention.test.mjs scripts/maintain-convex-wasm-cache.test.mjs",
     "test:producer-identity": "node --test scripts/lib/convex-wasm-producer-identity.test.mjs",
     "test:compiler": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/Cargo.toml",
     "test:invariants": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/invariant-validation/Cargo.toml",
