@@ -35,6 +35,8 @@ import {
   adoptConvexWasmModuleGraphBaseSupportPreactivation,
   drainConvexWasmModuleGraphBaseSupportPreactivation,
   startConvexWasmModuleGraphBaseSupportPreactivation,
+  projectConvexWasmOfficialOutputModuleGraphCohortPlanning,
+  rehydrateConvexWasmOfficialOutputModuleGraphCohortPlanning,
 } from "./convex-wasm-artifact-pipeline.mjs";
 import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { buildConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
@@ -1397,26 +1399,27 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     describeTermination: describeNativeCommandTermination,
   };
   const options = await moduleGraphMaterialSessionInputFixture(fixture, "convex/sampleRoute.ts");
+  options.runtime.mainSourcePath = join(repositoryRoot, "scripts/lib/convex-wasm-native-capability-runtime-main.cpp");
   const nativePhaseScheduler = createConvexWasmNativePhaseScheduler(launchPolicy);
   const session = await createConvexWasmCapabilityArtifactMaterialSession(options, {
     launchPolicy,
     nativePhaseScheduler,
   });
-  const compilerOutput = await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(session, [options]);
+  const compilerOutput = await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(session, [options], { packageReceiptTopologyOnly: true });
   await finalizeConvexWasmArtifactMaterialSession(session);
   const compilerCalls = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
   const repeatedSession = await createConvexWasmCapabilityArtifactMaterialSession(options, {
     launchPolicy, nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
   });
   try {
-    await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(repeatedSession, [options]);
+    await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(repeatedSession, [options], { packageReceiptTopologyOnly: true });
   } finally {
     await finalizeConvexWasmArtifactMaterialSession(repeatedSession);
   }
   assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, compilerCalls);
   const entries = scheduledCohortEntriesForCompilerOutput(compilerOutput);
   const cohort = { cohortId: fingerprintJson({ entries }), entries };
-  const artifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts({
+  const packageOptions = {
     artifactConfig: {
       cacheLayout: fixture.options.cacheLayout,
       cacheRoot: fixture.options.cacheRoot,
@@ -1430,7 +1433,8 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     compilerOutputs: [compilerOutput],
     nativePhaseScheduler,
     async verifyDeploymentMaterials() {},
-  });
+  };
+  const artifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts(packageOptions);
   assert.equal(artifact.buildReport.package.cache, "miss");
   assert.ok(artifact.package.path);
   await artifact.verifyMaterials();
@@ -1444,6 +1448,23 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     verified.graphManifest.graphManifestSha256,
     artifact.graphManifest.graphManifestSha256
   );
+  // The raw config omits the implicit native ABI headers. A retained plan must
+  // recover the same complete material set as fresh compilation.
+  const planning = JSON.parse(JSON.stringify(projectConvexWasmOfficialOutputModuleGraphCohortPlanning(compilerOutput)));
+  const restored = rehydrateConvexWasmOfficialOutputModuleGraphCohortPlanning({
+    artifactConfig: { ...options, runtime: { ...options.runtime, includeDirectories: [] } },
+    cacheLayout: fixture.options.cacheLayout,
+    cacheRoot: fixture.options.cacheRoot,
+    capabilityRuntimeHeaderDirectory: options.runtime.includeDirectories[0],
+    planning,
+  });
+  const restoredArtifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts({
+    ...packageOptions,
+    compilerOutputs: [restored],
+  });
+  await restoredArtifact.verifyMaterials();
+  assert.equal(restoredArtifact.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256);
+  assert.equal(restoredArtifact.buildReport.package.cache, "hit");
 });
 
 test("builds a module-graph package from a separate application's source graph", async (t) => {

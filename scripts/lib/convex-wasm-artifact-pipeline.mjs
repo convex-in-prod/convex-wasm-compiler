@@ -12729,19 +12729,22 @@ function rehydrateModuleGraphCompilerPhysicalInputs(
     delete options.generatedJavaScript;
   }
   {
+    const includeDirectories = [
+      capabilityRuntimeHeaderDirectory,
+      ...artifactConfig.runtime.includeDirectories.map((path, index) =>
+        resolve(requireString(path, `current artifact config runtime.includeDirectories[${index}]`))
+      ),
+    ];
+    // Rebinding must retain the headers added by cold capability-runtime normalization.
+    if (!includeDirectories.includes(FLATBUFFERS_INCLUDE_DIRECTORY)) {
+      includeDirectories.push(FLATBUFFERS_INCLUDE_DIRECTORY);
+    }
     options.runtime = {
       ...existingOptions.runtime,
       archives: artifactConfig.runtime.archives.map((path, index) =>
         resolve(requireString(path, `current artifact config runtime.archives[${index}]`))
       ),
-      includeDirectories: [
-        capabilityRuntimeHeaderDirectory,
-        ...artifactConfig.runtime.includeDirectories.map((path, index) =>
-          resolve(
-            requireString(path, `current artifact config runtime.includeDirectories[${index}]`)
-          )
-        ),
-      ],
+      includeDirectories,
       mainSourcePath: CAPABILITY_RUNTIME_MAIN_PATH,
       materialInputs: normalizeMaterialInputs(
         artifactConfig.runtime.materialInputs,
