@@ -604,3 +604,181 @@ test("chunk preparation binds imported bodies and reuses unaffected compact arti
   assert.equal(transforms, 7);
   assert.notDeepEqual(mutable.entry.identity.javascript, bodyChanged.entry.identity.javascript);
 });
+
+test("immutable helper chains preserve early calls, defaults, shadowing and export identity", async () => {
+  const plans = new Map();
+  const reads = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js": `function positive(value) { return value > 0 ? value : 0; }
+      function read(value) { return positive(value.left) + positive(value.right); }
+      export function total(value = { left: 2, right: 3 }, scale = read(value)) {
+        return scale * 2;
+      }
+      export { read };`,
+      "./entry.js": `import { total, read } from "./dep.js";
+      const positive = () => 1000;
+      export const early = total();
+      export function result(value) { return total(value); }
+      export function identity() { return read; }
+      export { read };
+      export function collision() { return positive(); }`,
+    },
+    "./entry.js",
+    reads,
+    plans
+  );
+  assert.equal(entry.early, 10);
+  assert.equal(entry.result({ left: -7, right: 11 }), 22);
+  assert.equal(entry.collision(), 1000);
+  assert.equal(entry.identity(), entry.read);
+  const plan = plans.get("./entry.js");
+  assert.equal(plan.calls.length, 2);
+  assert.equal(plan.bodies[0].helpers.length, 2);
+  // Helper factories must retain immutable import snapshots.
+  assert.equal(reads.get("./dep.js:total"), 1);
+});
+
+test("helper closure proofs reject state, identity, recursion and global shadowing", async () => {
+  const cases = [
+    `let amount = 1; function read() { return amount; } export function f() { return read(); }`,
+    `function read() { return 1; } export function f() { return read; }`,
+    `function read() { return 1; } export function f() { return read.name; }`,
+    `function read() { return 1; } export function f() { return new read(); }`,
+    `function read() { return 1; } export function f() { return read(); } read = () => 2;`,
+    `function read() { return f(); } export function f() { return read(); }`,
+    `function read() { return arguments; } export function f() { return read(); }`,
+    `function read() { return this; } export function f() { return read(); }`,
+    `function read() { return module; } export function f() { return read(); }`,
+    `export function f(value) { return Number(value); }`,
+  ];
+  for (const source of cases) {
+    const target = { identity: { path: "dep.js" }, source };
+    const importer = {
+      identity: { path: "entry.js" },
+      source: `import { f } from "./dep.js"; const Number = () => 99;
+       export function result(value) { return f(value); }`,
+    };
+    const graph = new Map([
+      ["dep.js", target],
+      ["entry.js", importer],
+    ]);
+    const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(
+      importer,
+      graph,
+      convexWasmModuleLinkage.immutableImportPlan(importer, graph)
+    );
+    assert.deepEqual(plan.calls, [], source);
+  }
+});
+
+test("global reads in closed helpers retain exceptions and avoid importer bindings", async () => {
+  const source = `function read(value) {
+    if (!Number.isFinite(value.left)) throw new Error("invalid value");
+    return value.left + value.right;
+  }
+  export function total(value) { return read(value); }`;
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js": source,
+      "./entry.js": `import { total } from "./dep.js";
+      export function result(value) { return total(value); }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.equal(entry.result({ left: 3, right: 5 }), 8);
+  assert.throws(() => entry.result({ left: NaN, right: 5 }), { message: "invalid value" });
+  assert.equal(plans.get("./entry.js").bodies[0].helpers.length, 1);
+  const shadowed = new Map();
+  const other = await loadModules(
+    {
+      "./dep.js": source,
+      "./entry.js": `import { total } from "./dep.js";
+      const Error = () => 0; export function result(value) { return total(value); }`,
+    },
+    "./entry.js",
+    new Map(),
+    shadowed
+  );
+  assert.throws(() => other.result({ left: NaN, right: 5 }), { message: "invalid value" });
+  assert.deepEqual(shadowed.get("./entry.js").calls, []);
+});
+
+test("helper bodies participate in persistent proofs and imported-consumer invalidation", async (t) => {
+  const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-helper-summary-"));
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const cacheLayout = deriveConvexWasmCacheLayout({
+    buildId: "helpers",
+    cacheRoot,
+    repositoryRoot: cacheRoot,
+    scope: "isolated-test",
+  });
+  const prepare = async (operator, extra) => {
+    const importer = {
+      identity: { path: "entry.js" },
+      source: `import { total } from "./dep.js"; export function result(v) { return total(v); }`,
+    };
+    const target = {
+      identity: { path: "dep.js" },
+      source: `function read(v) { return v.left ${operator} v.right; }
+       export function total(v) { return read(v); } export const unused = ${extra};`,
+    };
+    const graph = new Map([
+      ["entry.js", importer],
+      ["dep.js", target],
+    ]);
+    const report = await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization(
+      [...graph.values()],
+      { cacheRoot, cacheLayout }
+    );
+    const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(
+      importer,
+      graph,
+      convexWasmModuleLinkage.immutableImportPlan(importer, graph)
+    );
+    return { report, plan };
+  };
+  const cold = await prepare("+", 1);
+  const warm = await prepare("+", 1);
+  assert.equal(warm.report.cacheHits, 2);
+  assert.deepEqual(warm.plan, cold.plan);
+  const unrelated = await prepare("+", 2);
+  assert.equal(unrelated.report.cacheHits, 1);
+  assert.deepEqual(unrelated.plan, cold.plan);
+  const edited = await prepare("-", 2);
+  assert.equal(edited.report.cacheHits, 1);
+  assert.notDeepEqual(edited.plan.bodies, cold.plan.bodies);
+});
+
+test("bounded imports prioritize fresh object fields and charge helper bodies", async () => {
+  const names = Array.from({ length: 40 }, (_, i) => `f${i}`);
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./dep.js":
+        names
+          .map((name, i) => `export function ${name}(value) { return value + ${i}; }`)
+          .join("\n") +
+        `\nfunction read(value) { return value.left + value.right; }
+          export function total(value) { return read(value); }`,
+      "./entry.js": `import { ${names.join(", ")}, total } from "./dep.js";
+        export function result() { return [${names.map((name) => `${name}(1)`).join(", ")},
+          total({ left: 3, right: 5 })]; }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(Array.from(entry.result()), [...names.map((_, i) => i + 1), 8]);
+  const plan = plans.get("./entry.js");
+  assert.equal(plan.bodies[0].helpers.length, 1);
+  assert.equal(plan.bodies.length, 31);
+  assert.equal(
+    plan.bodies.reduce((count, body) => count + 1 + body.helpers.length, 0),
+    32
+  );
+  assert.equal(plan.rejectedBindings, 10);
+});

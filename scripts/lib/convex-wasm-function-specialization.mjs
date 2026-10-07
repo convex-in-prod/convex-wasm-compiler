@@ -18,7 +18,7 @@ const maximumBodyBytes = 4096;
 const maximumImportedBodies = 32;
 const maximumImportedBytes = 32 * 1024;
 const summaryStage = "official-output-function-summary";
-const summaryKind = "convex-wasm-function-summary-v1";
+const summaryKind = "convex-wasm-function-summary-v2";
 
 function hash(source) {
   return createHash("sha256").update(source).digest("hex");
@@ -60,10 +60,26 @@ const rangeSchema = z
   .object({ start: z.int().nonnegative(), end: z.int().positive() })
   .strict()
   .refine(({ start, end }) => end > start);
+const helperSchema = z
+  .object({
+    name: z.string(),
+    parameters: z.string(),
+    body: z.string(),
+    nodes: z.int().positive().max(maximumBodyNodes),
+    fieldReads: z.int().nonnegative(),
+    bytes: z.int().positive().max(maximumBodyBytes),
+  })
+  .strict()
+  .refine(
+    ({ parameters, body, bytes }) =>
+      bytes === Buffer.byteLength(parameters) + Buffer.byteLength(body)
+  );
 const bodySchema = z
   .object({
     parameters: z.string(),
     body: z.string(),
+    helpers: z.array(helperSchema).max(maximumImportedBodies - 1),
+    globals: z.array(z.string()),
     nodes: z.int().positive().max(maximumBodyNodes),
     fieldReads: z.int().nonnegative(),
     bytes: z.int().positive().max(maximumBodyBytes),
@@ -71,14 +87,18 @@ const bodySchema = z
   })
   .strict()
   .refine(
-    ({ parameters, body, bytes, sha256 }) =>
-      bytes === Buffer.byteLength(parameters) + Buffer.byteLength(body) &&
-      sha256 === hash(canonicalJson({ parameters, body }))
+    ({ parameters, body, helpers, globals, bytes, sha256 }) =>
+      bytes ===
+        Buffer.byteLength(parameters) +
+          Buffer.byteLength(body) +
+          helpers.reduce((sum, helper) => sum + helper.bytes, 0) &&
+      sha256 === hash(canonicalJson({ parameters, body, helpers, globals }))
   );
 const summarySchema = z
   .object({
     kind: z.literal(summaryKind),
     names: z.array(z.string()),
+    bindings: z.array(z.string()),
     bindingFacts: z
       .object({
         opaque: z.boolean(),
@@ -106,6 +126,7 @@ const summarySchema = z
               .object({
                 imported: z.string(),
                 local: z.string(),
+                freshObjectFields: z.int().nonnegative(),
                 calls: z.array(rangeSchema),
               })
               .strict()
@@ -184,6 +205,7 @@ function analyzeModule(source) {
     },
   });
 
+  const analyzing = new Set();
   const bodyFor = (binding, anonymousDefault) => {
     const declaration = binding?.path;
     const fn =
@@ -197,11 +219,15 @@ function analyzeModule(source) {
     )
       return undefined;
     if (analyzedBodies.has(fn.node)) return analyzedBodies.get(fn.node);
-    // A copied body may only see its own parameters/locals. Even a read-only
-    // module binding can capture mutable state or an initialization-time value.
+    // Recursive dependency groups remain ordinary calls. Bound the analysis
+    // before traversing source, independently of the emitted-body budget.
+    if (analyzing.has(fn.node) || analyzing.size >= 8) return undefined;
+    analyzing.add(fn.node);
     let eligible = true;
     let nodes = 1;
     let fieldReads = 0;
+    const globals = new Set();
+    const dependencies = new Map();
     fn.traverse({
       enter(path) {
         ++nodes;
@@ -211,8 +237,6 @@ function analyzeModule(source) {
         }
       },
       "ThisExpression|Super|MetaProperty|ImportExpression|TaggedTemplateExpression"(path) {
-        // Tagged template objects belong to one original source site. Copies
-        // across importers would expose distinct identities to the tag.
         eligible = false;
         path.stop();
       },
@@ -230,41 +254,98 @@ function analyzeModule(source) {
           return;
         const referenced = path.scope.getBinding(path.node.name);
         const node = referenced?.path.node;
-        // Binding positions include writes and destructuring targets, which
-        // ReferencedIdentifier alone does not visit. The root function's own
-        // binding must also stay hidden, including a named expression's name.
+        if ((binding !== undefined && referenced === binding) || node === fn.node) {
+          eligible = false;
+          path.stop();
+          return;
+        }
+        if (node !== undefined && node.start >= fn.node.start && node.end <= fn.node.end) return;
+        if (node === undefined) {
+          // Preserve dynamic global reads, including replaced constructors.
+          // The importer must not shadow them. Wrapper-local names and implicit
+          // arguments cannot be transported as realm-global references.
+          if (
+            !path.isReferencedIdentifier() ||
+            path.isBindingIdentifier() ||
+            ["arguments", "eval", "module", "require", "exports", "globalThis"].includes(
+              path.node.name
+            ) ||
+            path.node.name.startsWith("__convex")
+          ) {
+            eligible = false;
+            path.stop();
+          } else globals.add(path.node.name);
+          return;
+        }
+        const call = path.parentPath;
         if (
-          referenced === binding ||
-          node === fn.node ||
-          node === undefined ||
-          node.start < fn.node.start ||
-          node.end > fn.node.end
+          referenced.scope !== program.scope ||
+          !referenced.path.isFunctionDeclaration() ||
+          !referenced.constant ||
+          declarations.get(path.node.name) !== 1 ||
+          writes.has(path.node.name) ||
+          !call.isCallExpression() ||
+          call.node.optional ||
+          call.node.callee !== path.node
         ) {
           eligible = false;
           path.stop();
+          return;
         }
+        dependencies.set(path.node.name, referenced);
       },
       "MemberExpression|OptionalMemberExpression"() {
         ++fieldReads;
       },
     });
+    const helpers = new Map();
+    if (eligible) {
+      for (const [name, dependency] of dependencies) {
+        const closed = bodyFor(dependency);
+        if (closed === undefined) {
+          eligible = false;
+          break;
+        }
+        closed.helpers.forEach((helper) => helpers.set(helper.name, helper));
+        helpers.set(name, {
+          name,
+          parameters: closed.parameters,
+          body: closed.body,
+          nodes: closed.nodes - closed.helpers.reduce((sum, helper) => sum + helper.nodes, 0),
+          fieldReads:
+            closed.fieldReads - closed.helpers.reduce((sum, helper) => sum + helper.fieldReads, 0),
+          bytes: Buffer.byteLength(closed.parameters) + Buffer.byteLength(closed.body),
+        });
+        closed.globals.forEach((name) => globals.add(name));
+      }
+    }
     let body;
     if (eligible) {
       const parameters = fn.node.params.map((p) => source.slice(p.start, p.end)).join(", ");
       const originalBody = source.slice(fn.node.body.start, fn.node.body.end);
       const text =
         fn.node.body.type === "BlockStatement" ? originalBody : `{ return (${originalBody}); }`;
-      const bytes = Buffer.byteLength(parameters) + Buffer.byteLength(text);
-      if (bytes <= maximumBodyBytes)
-        body = {
-          parameters,
-          body: text,
-          nodes,
-          fieldReads,
-          bytes,
-          sha256: hash(canonicalJson({ parameters, body: text })),
-        };
+      const helperList = [...helpers.values()].sort((a, b) => a.name.localeCompare(b.name, "en"));
+      const bytes =
+        Buffer.byteLength(parameters) +
+        Buffer.byteLength(text) +
+        helperList.reduce((sum, helper) => sum + helper.bytes, 0);
+      nodes += helperList.reduce((sum, helper) => sum + helper.nodes, 0);
+      fieldReads += helperList.reduce((sum, helper) => sum + helper.fieldReads, 0);
+      const material = {
+        parameters,
+        body: text,
+        helpers: helperList,
+        globals: [...globals].sort(),
+      };
+      if (
+        bytes <= maximumBodyBytes &&
+        nodes <= maximumBodyNodes &&
+        helpers.size < maximumImportedBodies
+      )
+        body = { ...material, nodes, fieldReads, bytes, sha256: hash(canonicalJson(material)) };
     }
+    analyzing.delete(fn.node);
     analyzedBodies.set(fn.node, body);
     return body;
   };
@@ -315,21 +396,26 @@ function analyzeModule(source) {
         const local = specifier.node.local.name;
         const binding = program.scope.getBinding(local);
         if (!binding.constant) continue;
+        let freshObjectFields = 0;
         const calls = binding.referencePaths.flatMap((reference) => {
           const call = reference.parentPath;
           // Values used as callbacks, constructors, tagged templates or method
           // receivers retain the original closure and its observable identity.
-          return call.isCallExpression() &&
-            !call.node.optional &&
-            call.node.callee === reference.node
-            ? [{ start: reference.node.start, end: reference.node.end }]
-            : [];
+          if (!call.isCallExpression() || call.node.optional || call.node.callee !== reference.node)
+            return [];
+          for (const argument of call.node.arguments)
+            if (argument.type === "ObjectExpression")
+              freshObjectFields += argument.properties.filter(
+                (property) => property.type === "ObjectProperty" && !property.computed
+              ).length;
+          return [{ start: reference.node.start, end: reference.node.end }];
         });
         bindings.push({
           imported: specifier.isImportDefaultSpecifier()
             ? "default"
             : (specifier.node.imported.name ?? specifier.node.imported.value),
           local,
+          freshObjectFields,
           calls,
         });
       }
@@ -375,6 +461,7 @@ function analyzeModule(source) {
   return {
     kind: summaryKind,
     names: [...names].sort(),
+    bindings: Object.keys(program.scope.bindings).sort(),
     exports,
     imports,
     bindingFacts: {
@@ -463,7 +550,10 @@ export function planConvexWasmFunctionImports(module, modulesByPath, immutableIm
   const bodies = new Map();
   const calls = [];
   let bytes = 0;
+  let bodyCount = 0;
+  const bindings = new Set(summary.bindings);
   let rejectedBindings = 0;
+  const candidates = [];
   for (const imported of summary.imports) {
     const immutable = allowed.get(imported.start);
     if (immutable === undefined) continue;
@@ -478,28 +568,44 @@ export function planConvexWasmFunctionImports(module, modulesByPath, immutableIm
     for (const binding of imported.bindings) {
       if (!immutable.has(binding.imported) || binding.calls.length === 0) continue;
       const body = exports.get(binding.imported);
-      if (body === undefined) {
+      if (body === undefined || body.globals.some((name) => bindings.has(name))) {
         ++rejectedBindings;
         continue;
       }
-      let selected = bodies.get(body.sha256);
-      if (selected === undefined) {
-        if (bodies.size >= maximumImportedBodies || bytes + body.bytes > maximumImportedBytes) {
-          ++rejectedBindings;
-          continue;
-        }
-        let suffix = bodies.size;
-        let name;
-        do {
-          name = `__convexImportedBody${suffix++}`;
-        } while (names.has(name));
-        names.add(name);
-        selected = { ...body, name };
-        bodies.set(body.sha256, selected);
-        bytes += body.bytes;
-      }
-      for (const call of binding.calls) calls.push({ ...call, name: selected.name });
+      candidates.push({
+        binding,
+        body,
+        freshFields: Math.min(binding.freshObjectFields, body.fieldReads * binding.calls.length),
+        readDensity: (body.fieldReads * binding.calls.length) / body.nodes,
+      });
     }
+  }
+  // Import order is unrelated to removable work. Prefer fresh argument fields,
+  // then repeatedly exposed field reads within the same bounded code budget.
+  // These are profitability hints; Hermes still proves inlining and escape.
+  candidates.sort((a, b) => b.freshFields - a.freshFields || b.readDensity - a.readDensity);
+  for (const { binding, body } of candidates) {
+    let selected = bodies.get(body.sha256);
+    if (selected === undefined) {
+      if (
+        bodyCount + 1 + body.helpers.length > maximumImportedBodies ||
+        bytes + body.bytes > maximumImportedBytes
+      ) {
+        ++rejectedBindings;
+        continue;
+      }
+      let suffix = bodies.size;
+      let name;
+      do {
+        name = `__convexImportedBody${suffix++}`;
+      } while (names.has(name));
+      names.add(name);
+      selected = { ...body, name };
+      bodies.set(body.sha256, selected);
+      bytes += body.bytes;
+      bodyCount += 1 + body.helpers.length;
+    }
+    for (const call of binding.calls) calls.push({ ...call, name: selected.name });
   }
   return { bodies: [...bodies.values()], calls, rejectedBindings };
 }
@@ -523,11 +629,26 @@ export function renderConvexWasmSpecializedModuleSource(source, dependencies, pl
   // Transport source-map trailers are not executable material. Original source
   // and map identities remain independently authenticated by the caller.
   source = source.replace(/(^|\n)\/\/# sourceMappingURL=[^\n]*\n?$/u, "$1");
-  if (plan.bodies.length > 0)
-    source +=
-      "\n" +
-      plan.bodies
-        .map(({ name, parameters, body }) => `function ${name}(${parameters}) ${body}\n`)
-        .join("");
+  const factories = [];
+  for (const { name, parameters, body, helpers } of plan.bodies) {
+    if (helpers.length === 0) {
+      source += `\nfunction ${name}(${parameters}) ${body}\n`;
+    } else {
+      // A private lexical scope preserves helper references without capturing
+      // importer locals or exposing new exports. Initialization creates only
+      // functions; dependencies still evaluate through the original imports.
+      // Place it before executable importer statements, including early calls.
+      factories.push(`const ${name} = (() => {\n${helpers
+        .map((helper) => `function ${helper.name}(${helper.parameters}) ${helper.body}\n`)
+        .join("")}
+return function(${parameters}) ${body};\n})();\n`);
+    }
+  }
+  if (factories.length > 0) {
+    const ast = parse(source, { plugins: ["importAttributes"], sourceType: "module" });
+    const firstBody = ast.program.body.find((statement) => statement.type !== "ImportDeclaration");
+    const start = firstBody === undefined ? source.length : firstBody.start;
+    source = source.slice(0, start) + factories.join("") + source.slice(start);
+  }
   return source;
 }
