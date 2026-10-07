@@ -32,6 +32,7 @@ import {
   createConvexWasmGuestNativeJsonCodecInput,
   convexWasmBuildResourceGuardKind,
   convexWasmArtifactPipelineTestHooks,
+  adoptConvexWasmModuleGraphBaseSupportPreactivation,
   drainConvexWasmModuleGraphBaseSupportPreactivation,
   startConvexWasmModuleGraphBaseSupportPreactivation,
 } from "./convex-wasm-artifact-pipeline.mjs";
@@ -1257,6 +1258,43 @@ test("deployment engine probe uses the persistent incremental cache outside temp
   assert.equal(precompilerRuns[0].environment.CONVEX_WASM_INCREMENTAL_CACHE_ROOT,
     join(fixture.options.cacheLayout.cacheRoot, "incremental-functions"));
   await assert.rejects(fs.stat(precompilerRuns[0].environment.TMPDIR), { code: "ENOENT" });
+});
+
+test("deployment support preactivation adopts the ordinary capability header identity", async (t) => {
+  const fixture = await createFixture(t, { moduleGraphWasm: true });
+  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  const resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy,
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  fixture.options.resourceGuard = resourceGuard;
+  const capabilityRuntimeHeaderDirectory = await stageConvexWasmCapabilityRuntimeHeader(fixture.options);
+  const nativePhaseScheduler = createConvexWasmNativePhaseScheduler(launchPolicy);
+  const token = startConvexWasmModuleGraphBaseSupportPreactivation({
+    artifactConfig: fixture.options,
+    capabilityRuntimeHeaderDirectory,
+    nativePhaseScheduler,
+    resourceGuard,
+  });
+  const input = await moduleGraphMaterialSessionInputFixture(fixture, "convex/preactivatedRoute.ts");
+  let session;
+  try {
+    session = await createConvexWasmCapabilityArtifactMaterialSession({
+      ...input,
+      runtime: {
+        ...input.runtime,
+        includeDirectories: [capabilityRuntimeHeaderDirectory, ...input.runtime.includeDirectories],
+        mainSourcePath: join(repositoryRoot, "scripts/lib/convex-wasm-native-capability-runtime-main.cpp"),
+      },
+    }, { launchPolicy, nativePhaseScheduler });
+    assert.equal(await adoptConvexWasmModuleGraphBaseSupportPreactivation(session, token), true);
+  } finally {
+    if (session !== undefined) await finalizeConvexWasmArtifactMaterialSession(session);
+    await drainConvexWasmModuleGraphBaseSupportPreactivation(token);
+  }
 });
 
 test("public artifact pipeline constructs a module-graph package with Core Wasm and AOT", async (t) => {

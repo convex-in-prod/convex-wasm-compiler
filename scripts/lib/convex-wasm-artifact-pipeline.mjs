@@ -19456,6 +19456,18 @@ function normalizeModuleGraphDeploymentBaseSupportOptions(
     artifactConfig.toolchain.emscripten.llvmRevision,
     "module graph base support toolchain.emscripten.llvmRevision"
   );
+  const includeDirectories = [
+    resolve(capabilityRuntimeHeaderDirectory),
+    ...requireStringArray(
+      artifactConfig.runtime.includeDirectories,
+      "module graph base support runtime.includeDirectories"
+    ).map((path) => resolve(path)),
+  ];
+  // Match ordinary capability normalization so preactivation retains the same
+  // header identity and its completed support objects can be adopted.
+  if (!includeDirectories.includes(FLATBUFFERS_INCLUDE_DIRECTORY)) {
+    includeDirectories.push(FLATBUFFERS_INCLUDE_DIRECTORY);
+  }
   return {
     cacheLayout,
     cacheRoot,
@@ -19484,13 +19496,7 @@ function normalizeModuleGraphDeploymentBaseSupportOptions(
         artifactConfig.runtime.compileFlags,
         "module graph base support runtime.compileFlags"
       ),
-      includeDirectories: [
-        resolve(capabilityRuntimeHeaderDirectory),
-        ...requireStringArray(
-          artifactConfig.runtime.includeDirectories,
-          "module graph base support runtime.includeDirectories"
-        ).map((path) => resolve(path)),
-      ],
+      includeDirectories,
       mainCompileFlags: requireStringArray(
         artifactConfig.runtime.mainCompileFlags,
         "module graph base support runtime.mainCompileFlags"
