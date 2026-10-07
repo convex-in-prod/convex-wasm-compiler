@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     fs::{self, DirBuilder, File, Metadata, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -23,7 +23,8 @@ pub(super) const HEADER_BYTES: usize = 72;
 pub(super) const WAYS: usize = 16;
 // Slot sizes include authentication. Finer classes and more ways retain medium
 // and expensive large stencils instead of spending most capacity on padding.
-// The complete layout is bounded at 2 GiB across source/compiler revisions.
+// Retained records are bounded at 2 GiB across source/compiler revisions,
+// with a fixed lookup index smaller than 2 MiB.
 pub(super) const TIERS: [(usize, usize); 13] = [
     (1536, 4 * 1024),
     (256, 8 * 1024),
@@ -56,6 +57,7 @@ pub struct CacheReport {
 /// Cranelift's key additionally binds its function stencil and target settings.
 pub struct IncrementalCache {
     root: PathBuf,
+    lookup_index: File,
     namespace: [u8; 32],
     secret: [u8; 32],
     hits: AtomicU64,
@@ -123,6 +125,24 @@ impl IncrementalCache {
             }
             Err(error) => return Err(error),
         }
+        // The bounded index contains only lookup hints. Record authentication
+        // remains authoritative, including if a crash or an older executable
+        // replaces a slot without updating its hint. Executable namespaces
+        // prevent the new reader from needing an older executable's records.
+        let lookup_index = private_file(&root.join("lookup-index-v1"), true)?;
+        let index_bytes = TIERS
+            .iter()
+            .map(|(sets, _)| sets * WAYS * 32)
+            .sum::<usize>() as u64;
+        match lookup_index.metadata()?.len() {
+            0 => lookup_index.set_len(index_bytes)?,
+            length if length == index_bytes => {}
+            _ => {
+                return Err(io::Error::other(
+                    "incremental cache lookup index has invalid size",
+                ));
+            }
+        }
         drop(init_lock);
         for shard in 0..256 {
             let path = root.join(format!("{shard:02x}"));
@@ -135,6 +155,7 @@ impl IncrementalCache {
         }
         Ok(Self {
             root,
+            lookup_index,
             namespace,
             secret,
             hits: AtomicU64::new(0),
@@ -163,9 +184,25 @@ impl IncrementalCache {
         std::array::from_fn(|way| shard.join(format!("{tier}-{set:04x}-{way}")))
     }
 
+    fn index_set_offset(key: &[u8; 32], tier: usize) -> u64 {
+        let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % TIERS[tier].0;
+        let preceding_sets: usize = TIERS[..tier].iter().map(|(sets, _)| sets).sum();
+        ((preceding_sets + set) * WAYS * 32) as u64
+    }
+
     fn lookup(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
         for (tier, (_, limit)) in TIERS.iter().enumerate() {
-            for path in self.paths(key, tier) {
+            let mut hints = [0; WAYS * 32];
+            self.lookup_index
+                .read_exact_at(&mut hints, Self::index_set_offset(key, tier))?;
+            for (way, hint) in hints.chunks_exact(32).enumerate() {
+                if hint != key {
+                    continue;
+                }
+                let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % TIERS[tier].0;
+                let path = self
+                    .root
+                    .join(format!("{:02x}/{tier}-{set:04x}-{way}", set % 256));
                 let mut file = match private_file(&path, false) {
                     Ok(file) => file,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -211,10 +248,10 @@ impl IncrementalCache {
         let lock = private_file(&shard.join("insert.lock"), true)?;
         lock.lock()?;
         let mut oldest = None;
-        let mut selected = &paths[0];
+        let mut selected = 0;
         let mut replacing = true;
         let mut displaced_record_bytes = None;
-        for path in &paths {
+        for (way, path) in paths.iter().enumerate() {
             match fs::symlink_metadata(path) {
                 Ok(metadata) => {
                     require_private(&metadata, false)?;
@@ -226,7 +263,7 @@ impl IncrementalCache {
                             // Concurrent compilation can insert the same key
                             // after both workers missed. Replace its slot instead
                             // of letting duplicate records evict other functions.
-                            selected = path;
+                            selected = way;
                             replacing = false;
                             displaced_record_bytes = None;
                             break;
@@ -235,12 +272,12 @@ impl IncrementalCache {
                     let modified = metadata.modified()?;
                     if oldest.is_none_or(|time| modified < time) {
                         oldest = Some(modified);
-                        selected = path;
+                        selected = way;
                         displaced_record_bytes = Some(metadata.len());
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    selected = path;
+                    selected = way;
                     replacing = false;
                     displaced_record_bytes = None;
                     break;
@@ -262,7 +299,14 @@ impl IncrementalCache {
         file.set_len(0)?;
         file.write_all(&header)?;
         file.write_all(value)?;
-        fs::rename(pending, selected)?;
+        fs::rename(pending, &paths[selected])?;
+        // Publish the hint after the complete record, under the same shard lock
+        // as replacement. Readers can miss a racing/torn hint, but never accept
+        // a value from it without checking the record's key and MAC.
+        self.lookup_index.write_all_at(
+            key,
+            Self::index_set_offset(key, tier) + (selected * 32) as u64,
+        )?;
         if replacing {
             self.evictions.fetch_add(1, Ordering::Relaxed);
         }
@@ -558,6 +602,66 @@ mod tests {
             assert!(value.iter().all(|byte| *byte == tier as u8));
         }
         assert_eq!(cache.report().unwrap().rejected_records, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_readers_observe_later_insertions_from_other_stores() {
+        let root = root("live-readers");
+        let reader = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        let writer = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        assert!(reader.get(b"later-function").is_none());
+        assert!(writer.insert(b"later-function", b"compiled bytes".to_vec()));
+        assert_eq!(
+            reader.get(b"later-function").unwrap().as_ref(),
+            b"compiled bytes"
+        );
+        assert!(writer.insert(b"later-function", b"replaced bytes".to_vec()));
+        assert_eq!(
+            reader.get(b"later-function").unwrap().as_ref(),
+            b"replaced bytes"
+        );
+        assert!(reader.lookup_index.metadata().unwrap().len() < 2 * 1024 * 1024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lookup_hints_cannot_authorize_a_different_or_unauthenticated_record() {
+        let root = root("hints");
+        let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        assert!(cache.insert(b"source", b"compiled bytes".to_vec()));
+        let source = cache.paths(&cache.key(b"source"), 0)[0].clone();
+        let key = cache.key(b"different-function");
+        let target = cache.paths(&key, 0)[0].clone();
+        assert_ne!(source, target);
+        fs::copy(&source, &target).unwrap();
+        cache
+            .lookup_index
+            .write_all_at(&key, IncrementalCache::index_set_offset(&key, 0))
+            .unwrap();
+        assert!(cache.get(b"different-function").is_none());
+        assert_eq!(cache.report().unwrap().rejected_records, 0);
+
+        let mut bytes = fs::read(&target).unwrap();
+        bytes[8..40].copy_from_slice(&key);
+        fs::write(&target, bytes).unwrap();
+        assert!(cache.get(b"different-function").is_none());
+        assert_eq!(cache.report().unwrap().rejected_records, 1);
+        assert_eq!(cache.get(b"source").unwrap().as_ref(), b"compiled bytes");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lookup_index_rejects_unbounded_files_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = root("hint-permissions");
+        let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        let index = cache.root.join("lookup-index-v1");
+        cache.lookup_index.set_len(2 * 1024 * 1024).unwrap();
+        assert!(IncrementalCache::open(root.clone(), [1; 32], None).is_err());
+        fs::remove_file(&index).unwrap();
+        symlink(cache.root.join("authentication-key"), &index).unwrap();
+        assert!(IncrementalCache::open(root.clone(), [1; 32], None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

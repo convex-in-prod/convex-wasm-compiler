@@ -621,6 +621,12 @@ Thirteen bounded size classes retain at most 2 GiB of records, with sixteen ways
 per set and records up to 16 MiB. Repeated insertion of the same function replaces
 its existing slot. The fixed `size-classes-v2` directory is shared across source
 and compiler revisions; it does not create a directory for every namespace.
+A fixed lookup index smaller than 2 MiB skips unrelated records with one bounded
+read per size class instead of opening every possible slot. Writers update the
+index under the existing shard lock after publishing the record. Index entries
+are hints: matching records still require the exact function key, private-file
+checks and authentication before deserialization. A stale or interrupted index
+update can cause a miss, but cannot authorize other compiled code.
 The preceding layout's slots remain separate and bounded at 1 GiB, allowing
 older and newer executables to share the root safely. An operator can remove
 those legacy slots once no older executable uses the cache.
