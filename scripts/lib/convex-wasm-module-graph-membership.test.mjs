@@ -3,6 +3,11 @@ import test from "node:test";
 
 import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { deriveConvexWasmOfficialOutputModuleGraphMembership } from "./convex-wasm-module-graph-membership.mjs";
+import { deriveConvexWasmOfficialOutputModuleGraphMembership as derivePipelineMembership } from "./convex-wasm-artifact-pipeline.mjs";
+
+test("pipeline membership export uses the caller-owned partition authority implementation", () => {
+  assert.strictEqual(derivePipelineMembership, deriveConvexWasmOfficialOutputModuleGraphMembership);
+});
 
 const digest = (character) => character.repeat(64);
 const emptyCommonAuthority = {
