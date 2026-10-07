@@ -229,7 +229,7 @@ function hasExactOwnDataPropertySnapshot(value, snapshot) {
   );
 }
 
-function createConvexWasmDeploymentOutputClosureProjection({
+export function createConvexWasmDeploymentOutputClosureProjection({
   bundleModulesByPath,
   metafile,
   repoRoot,
@@ -575,8 +575,11 @@ function exactDeploymentOutputClosureProjectionGraphSession(graphSession) {
     : undefined;
 }
 
+const deeplyFrozenBuildInputs = new WeakSet();
+
 function isDeeplyFrozenBuildInput(value, seen = new Set()) {
   if (value === null || typeof value !== "object") return true;
+  if (deeplyFrozenBuildInputs.has(value)) return true;
   if (seen.has(value)) return false;
   if (
     isProxy(value) ||
@@ -596,6 +599,9 @@ function isDeeplyFrozenBuildInput(value, seen = new Set()) {
     );
   });
   seen.delete(value);
+  // Only complete immutable data trees may retain this result. Shared closure members can
+  // then cross selections without repeated traversal; mutable parents and cycles never do.
+  if (frozen) deeplyFrozenBuildInputs.add(value);
   return frozen;
 }
 

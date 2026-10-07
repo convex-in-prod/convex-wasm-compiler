@@ -9,6 +9,7 @@ import {
   buildConvexWasmDeploymentOutputClosures,
   canDeferConvexWasmDeploymentOutputClosureAuthentication,
   createConvexWasmDeploymentOutputClosureAuthentication,
+  createConvexWasmDeploymentOutputClosureProjection,
   projectConvexWasmDeploymentOutputChunkGraph,
   selectConvexWasmDeploymentOutputClosure,
 } from "./convex-wasm-output-closure.mjs";
@@ -411,5 +412,66 @@ test("exact producer graph authority is revoked when an output map changes", () 
   assert.equal(
     canDeferConvexWasmDeploymentOutputClosureAuthentication({ authentication, graphSession }),
     false
+  );
+});
+
+test("retains one projection and immutable member validation across entry selections", (t) => {
+  const entries = [
+    { entryPath: "convex/first.ts", modulePath: "first.js" },
+    { entryPath: "convex/second.ts", modulePath: "second.js" },
+  ];
+  const graph = fixtureDeploymentOutputGraph({
+    entries,
+    importsByModulePath: new Map([
+      ["first.js", [{ path: "shared.js" }]],
+      ["second.js", [{ path: "shared.js" }]],
+    ]),
+    inputs: {},
+  });
+  const projection = createConvexWasmDeploymentOutputClosureProjection({
+    bundleModulesByPath: graph.bundleModulesByPath,
+    metafile: graph.metafile,
+    repoRoot: "/fixture",
+  });
+  const sharedIdentity = graph.bundleModulesByPath.get("shared.js");
+  for (const identity of graph.bundleModulesByPath.values()) {
+    if (identity !== sharedIdentity) Object.freeze(identity.sourceMap);
+    Object.freeze(identity);
+  }
+  for (const module of graph.deploymentOutputModulesByPath.values()) Object.freeze(module);
+  const select = ({ entryPath, modulePath }) => {
+    const runtimeModulePathByEntry = new Map([[entryPath, modulePath]]);
+    const selected = projection.select({ entryPaths: [entryPath], runtimeModulePathByEntry });
+    const graphSession = authenticateDeploymentOutputClosureProjectionGraphSession({
+      ...closureGraphSession(graph),
+      deploymentOutputClosureByEntry: selected.closures,
+      deploymentOutputMetafileSha256: selected.metafileSha256,
+      runtimeModulePathByEntry,
+    });
+    const authentication = createConvexWasmDeploymentOutputClosureAuthentication(graphSession);
+    return { authentication, graphSession };
+  };
+
+  const mutable = select(entries[0]);
+  assert.equal(canDeferConvexWasmDeploymentOutputClosureAuthentication(mutable), false);
+  Object.freeze(sharedIdentity.sourceMap);
+  const first = select(entries[0]);
+  assert.equal(canDeferConvexWasmDeploymentOutputClosureAuthentication(first), true);
+
+  let repeatedSharedMetadataReads = 0;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  t.mock.method(Object, "getOwnPropertyDescriptor", (value, key) => {
+    if (value === sharedIdentity.sourceMap) repeatedSharedMetadataReads += 1;
+    return getOwnPropertyDescriptor(value, key);
+  });
+  const second = select(entries[1]);
+  assert.equal(canDeferConvexWasmDeploymentOutputClosureAuthentication(second), true);
+  assert.equal(repeatedSharedMetadataReads, 0);
+  const firstClosure = first.graphSession.deploymentOutputClosureByEntry.get(entries[0].entryPath);
+  const secondClosure = second.graphSession.deploymentOutputClosureByEntry.get(entries[1].entryPath);
+  assert.equal(firstClosure.modules[1], secondClosure.modules[1]);
+  assert.equal(
+    select(entries[0]).graphSession.deploymentOutputClosureByEntry.get(entries[0].entryPath),
+    firstClosure
   );
 });
