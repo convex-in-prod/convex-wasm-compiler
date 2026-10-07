@@ -17,6 +17,7 @@ import { ensureArtifactStage } from "./convex-wasm-artifact-pipeline.mjs";
 import { normalizeConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { decodeUtf8 } from "./convex-wasm-artifact-material.mjs";
 import { normalizeConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
+import { requireConvexWasmRepositoryRelativePath } from "./convex-wasm-relative-source-closure.mjs";
 import {
   authenticateConvexWasmOfficialOutputSelectionSet,
   projectConvexWasmOfficialOutputSourceChunkGraph,
@@ -182,7 +183,7 @@ function requireEsbuild(esbuild) {
   return esbuild;
 }
 
-function transformImplementationIdentity(producerIdentity) {
+function transformImplementationIdentity(producerIdentity, sourceRoot) {
   const sourceRecords = [
     ...producerIdentity.sources.map((source) => ({ semantic: true, source })),
     ...(producerIdentity.operationalSources ?? []).map((source) => ({
@@ -190,7 +191,8 @@ function transformImplementationIdentity(producerIdentity) {
       source,
     })),
   ];
-  const sources = convexWasmOfficialOutputChunkTransformImplementationSourcePaths.map((path) => {
+  const sources = convexWasmOfficialOutputChunkTransformImplementationSourcePaths.map((relativePath) => {
+    const path = sourceRoot === undefined ? relativePath : `${sourceRoot}/${relativePath}`;
     const matching = sourceRecords.filter(({ source }) => source.path === path);
     if (matching.length !== 1) {
       fail(
@@ -212,7 +214,12 @@ function transformImplementationIdentity(producerIdentity) {
 function normalizePersistentTransformCache(value) {
   const cache = requireExactKeys(
     value,
-    new Set(["cacheLayout", "cacheRoot", "producerIdentity"]),
+    new Set([
+      "cacheLayout",
+      "cacheRoot",
+      "producerIdentity",
+      ...(Object.hasOwn(value, "implementationSourceRoot") ? ["implementationSourceRoot"] : []),
+    ]),
     "official-output chunk persistent transform cache"
   );
   const cacheLayout = normalizeConvexWasmCacheLayout(cache.cacheLayout);
@@ -220,11 +227,19 @@ function normalizePersistentTransformCache(value) {
     fail("official-output chunk persistent transform cache root disagrees with its layout");
   }
   const producerIdentity = normalizeConvexWasmProducerIdentity(cache.producerIdentity);
+  // Installed consumers authenticate package files under their own source root.
+  // They must select it explicitly; a same-named local adapter is not the owner.
+  const sourceRoot = Object.hasOwn(cache, "implementationSourceRoot")
+    ? requireConvexWasmRepositoryRelativePath(
+        cache.implementationSourceRoot,
+        "transform implementation source root"
+      )
+    : undefined;
   return Object.freeze({
     cacheLayout,
     cacheRoot: cacheLayout.cacheRoot,
     producerIdentity,
-    transformImplementation: transformImplementationIdentity(producerIdentity),
+    transformImplementation: transformImplementationIdentity(producerIdentity, sourceRoot),
   });
 }
 

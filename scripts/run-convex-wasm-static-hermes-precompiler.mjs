@@ -16,6 +16,7 @@ const C_BUNDLE_SHARD_SIZE_ARGUMENT = `-Xemit-c-shard-size=${String(C_BUNDLE_SHAR
 const C_BUNDLE_C_OPTIMIZATION_LEVEL_ZERO = 0;
 const C_BUNDLE_OVERSIZE_REASONS = new Set(["no-outlineable-run", "single-instruction"]);
 const MAX_C_BUNDLE_MANIFEST_BYTES = 16 * 1024 * 1024;
+const MAX_RETAINED_LAYOUT_BYTES = 32 * 1024 * 1024;
 // The producer's file limit includes the manifest, header, and metadata translation unit.
 const MAX_C_BUNDLE_MEMBERS = 65_536;
 const MAX_C_BUNDLE_FUNCTION_MEMBERS = MAX_C_BUNDLE_MEMBERS - 3;
@@ -453,13 +454,24 @@ async function readCanonicalBundleManifest(path) {
   }
   const manifestObject = requireExactKeys(
     rawManifest,
-    ["header", "kind", "schemaVersion", "translationUnits"],
+    ["header", "kind", ...(Object.hasOwn(rawManifest, "layout") ? ["layout"] : []), "schemaVersion", "translationUnits"],
     "C bundle manifest"
   );
   if (manifestObject.kind !== C_BUNDLE_KIND || manifestObject.schemaVersion !== 1) {
     fail("C bundle manifest kind or schema version is unsupported");
   }
   const header = normalizeBundleMember(manifestObject.header, "C bundle header");
+  let layout;
+  if (Object.hasOwn(manifestObject, "layout")) {
+    layout = requireExactKeys(manifestObject.layout, ["path", "sha256", "size"], "C bundle layout");
+    if (!/^sh_[A-Za-z_][A-Za-z0-9_]*_layout\.json$/u.test(layout.path)) {
+      fail("C bundle layout path must name a retained unit layout");
+    }
+    requireSha256(layout.sha256, "C bundle layout SHA-256");
+    if (requirePositiveInteger(layout.size, "C bundle layout size") > MAX_RETAINED_LAYOUT_BYTES) {
+      fail("C bundle layout exceeds its byte limit");
+    }
+  }
   if (header.role !== "header") {
     fail("C bundle header must have the header role");
   }
@@ -468,7 +480,7 @@ async function readCanonicalBundleManifest(path) {
   }
   if (
     manifestObject.translationUnits.length < 2 ||
-    manifestObject.translationUnits.length > MAX_C_BUNDLE_MEMBERS - 2
+    manifestObject.translationUnits.length > MAX_C_BUNDLE_MEMBERS - 2 - (layout === undefined ? 0 : 1)
   ) {
     fail("C bundle must contain header, metadata, and function members");
   }
@@ -493,6 +505,7 @@ async function readCanonicalBundleManifest(path) {
   const manifest = {
     header,
     kind: C_BUNDLE_KIND,
+    ...(layout === undefined ? {} : { layout }),
     schemaVersion: 1,
     translationUnits,
   };
@@ -506,9 +519,13 @@ async function readCanonicalBundleManifest(path) {
   };
 }
 
-async function authenticateBundleOutput(namesBeforeCompiler) {
+async function authenticateBundleOutput(namesBeforeCompiler, layoutOutputPath) {
   const { bytes, manifest } = await readCanonicalBundleManifest(C_BUNDLE_MANIFEST_PATH);
-  const members = [manifest.header, ...manifest.translationUnits];
+  if (manifest.layout?.path !== layoutOutputPath) {
+    fail("C bundle retained layout does not match its invocation");
+  }
+  const members = [manifest.header, ...manifest.translationUnits,
+    ...(manifest.layout === undefined ? [] : [manifest.layout])];
   for (const member of members) {
     if (namesBeforeCompiler.has(member.path)) {
       fail(`C bundle member path existed before compilation: ${JSON.stringify(member.path)}`);
@@ -533,6 +550,7 @@ async function authenticateBundleOutput(namesBeforeCompiler) {
   return {
     header: manifest.header,
     kind: C_BUNDLE_KIND,
+    ...(manifest.layout === undefined ? {} : { layout: manifest.layout }),
     manifest: {
       path: C_BUNDLE_MANIFEST_PATH,
       sha256: sha256(bytes),
@@ -562,6 +580,7 @@ async function readCanonicalRequest(path) {
       "kind",
       "materialSha256",
       "nonce",
+      ...(Object.hasOwn(request, "retainedLayout") ? ["retainedLayout"] : []),
       "schemaVersion",
     ],
     "request"
@@ -579,6 +598,14 @@ async function readCanonicalRequest(path) {
     const identity = requireExactKeys(request[field], ["sha256", "size"], description);
     requireSha256(identity.sha256, `${description} SHA-256`);
     requirePositiveInteger(identity.size, `${description} size`);
+  }
+  if (Object.hasOwn(request, "retainedLayout")) {
+    const layout = requireExactKeys(request.retainedLayout, ["path", "sha256", "size"], "retained layout input");
+    requireSha256(layout.sha256, "retained layout SHA-256");
+    if (layout.path !== "retained-layout.json" ||
+        requirePositiveInteger(layout.size, "retained layout size") > MAX_RETAINED_LAYOUT_BYTES) {
+      fail("retained layout input path or byte limit is invalid");
+    }
   }
   if (`${canonicalJson(request)}\n` !== source) {
     fail("request is not canonical JSON");
@@ -769,6 +796,28 @@ export async function runStaticHermesPrecompiler(options) {
     fail("generated source does not match the authenticated request");
   }
   const bundleOutput = options.compilerArguments.includes(C_BUNDLE_ARGUMENT);
+  const layoutEmission = options.compilerArguments.filter((argument) => argument.startsWith("-Xemit-c-layout"));
+  const layoutInputs = options.compilerArguments.filter((argument) => argument.startsWith("-Xc-layout-input"));
+  let layoutOutputPath;
+  if (layoutEmission.length !== 0 || layoutInputs.length !== 0) {
+    if (!bundleOutput || layoutEmission.length !== 1 || layoutEmission[0] !== "-Xemit-c-layout" ||
+        layoutInputs.length > 1 ||
+        (layoutInputs.length === 1 && layoutInputs[0] !== "-Xc-layout-input=retained-layout.json")) {
+      fail("retained layout requires bundle emission and one fixed input path");
+    }
+    const units = options.compilerArguments.filter((argument) => argument.startsWith("-exported-unit="));
+    if (units.length > 1) fail("retained layout requires one exported unit name");
+    const unitName = units.length === 0 ? "this_unit" : units[0].slice("-exported-unit=".length);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(unitName)) fail("retained layout unit name is invalid");
+    layoutOutputPath = `sh_${unitName}_layout.json`;
+  }
+  if ((layoutInputs.length !== 0) !== Object.hasOwn(request, "retainedLayout")) {
+    fail("retained layout input must match its authenticated request");
+  }
+  if (request.retainedLayout !== undefined &&
+      await hashRegularFile(request.retainedLayout.path, request.retainedLayout.size, "retained layout", { rejectSymlink: true }) !== request.retainedLayout.sha256) {
+    fail("retained layout does not match the authenticated request");
+  }
   if (bundleOutput) {
     const outputIndexes = options.compilerArguments.flatMap((argument, index) =>
       argument === "-o" ? [index] : []
@@ -790,6 +839,9 @@ export async function runStaticHermesPrecompiler(options) {
   if (bundleOutput && namesBeforeCompiler.has(C_BUNDLE_MANIFEST_PATH)) {
     fail("C bundle manifest existed before compilation");
   }
+  if (layoutOutputPath !== undefined && namesBeforeCompiler.has(layoutOutputPath)) {
+    fail("retained layout output existed before compilation");
+  }
   const result = await runCompiler(options);
   // The compiler and input are opened by the child process after the initial
   // identity checks. Re-authenticate both paths after it exits so a concurrent
@@ -809,9 +861,13 @@ export async function runStaticHermesPrecompiler(options) {
   ) {
     fail("generated source changed during execution");
   }
+  if (request.retainedLayout !== undefined &&
+      await hashRegularFile(request.retainedLayout.path, request.retainedLayout.size, "retained layout", { rejectSymlink: true }) !== request.retainedLayout.sha256) {
+    fail("retained layout changed during execution");
+  }
   if (result.code === 0 && result.signal === null) {
     if (bundleOutput) {
-      const output = await authenticateBundleOutput(namesBeforeCompiler);
+      const output = await authenticateBundleOutput(namesBeforeCompiler, layoutOutputPath);
       await writeResponse(options.responsePath, requestSha256, {
         kind: "success",
         output,

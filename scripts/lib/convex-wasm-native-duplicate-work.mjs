@@ -27,6 +27,7 @@ export const convexWasmNativeMemberDuplicateWorkReportKind =
 export const convexWasmNativeMemberBatchTimingKind = "convex-wasm-native-member-batch-timing-v1";
 
 const MEMBER_OBJECT_IDENTITY_KIND = "convex-wasm-static-hermes-c-bundle-member-object-v1";
+const MEMBER_LOCAL_OBJECT_IDENTITY_KIND = "convex-wasm-static-hermes-c-bundle-member-object-v2";
 const MEMBER_OBJECT_STAGE = "static-hermes-c-bundle-member-object";
 const RUNTIME_PRELUDE_PCH_PATH = "static-hermes-runtime-prelude.pch";
 const RUNTIME_PRELUDE_PCH_STAGE = "static-hermes-runtime-prelude-pch";
@@ -59,7 +60,7 @@ function normalizeMemberObjectIdentity(value, description) {
     ],
     description
   );
-  if (value.kind !== MEMBER_OBJECT_IDENTITY_KIND) {
+  if (value.kind !== MEMBER_OBJECT_IDENTITY_KIND && value.kind !== MEMBER_LOCAL_OBJECT_IDENTITY_KIND) {
     fail(`${description}.kind is unsupported`);
   }
   requirePositiveInteger(
@@ -159,6 +160,12 @@ function normalizeMemberObjectIdentity(value, description) {
     value.generatedC.member,
     `${description}.generatedC.member`
   );
+  if (
+    value.kind === MEMBER_LOCAL_OBJECT_IDENTITY_KIND &&
+    member.role === "function" && member.firstFunctionId !== 0
+  ) {
+    fail(`${description}.generatedC.member must use a member-local function range`);
+  }
   if (header.role !== "header" || member.role === "header" || header.path === member.path) {
     fail(`${description}.generatedC does not identify a header and distinct translation unit`);
   }
@@ -271,9 +278,26 @@ function normalizeMemberObjectWork(value, description) {
   });
   assertPlainObject(value.member, `${description}.member`);
   const authenticatedMember = { ...authenticatedInput.identity.generatedC.member };
+  requireExactPlainObject(
+    value.member,
+    Object.keys(authenticatedMember).filter((key) => key !== "sha256" && key !== "size"),
+    `${description}.member`
+  );
+  const reportedMember = normalizeStaticHermesCBundleMember({
+    ...value.member,
+    sha256: authenticatedMember.sha256,
+    size: authenticatedMember.size,
+  }, `${description}.member`);
+  if (authenticatedInput.identity.kind === MEMBER_LOCAL_OBJECT_IDENTITY_KIND &&
+      reportedMember.role === "function") {
+    reportedMember.firstFunctionId = 0;
+    reportedMember.lastFunctionId = reportedMember.functionCount - 1;
+  }
+  delete reportedMember.sha256;
+  delete reportedMember.size;
   delete authenticatedMember.sha256;
   delete authenticatedMember.size;
-  if (canonicalJson(value.member) !== canonicalJson(authenticatedMember)) {
+  if (canonicalJson(reportedMember) !== canonicalJson(authenticatedMember)) {
     fail(`${description}.member disagrees with its authenticated generated-C input`);
   }
   const optimization = requireString(value.optimization, `${description}.optimization`);

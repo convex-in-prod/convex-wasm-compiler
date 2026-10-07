@@ -534,6 +534,24 @@ metadata. Validation checks private file identities across reads and
 reauthenticates changed payloads before reuse.
 Runtime-header snapshots copy authenticated include directories into the
 immutable cache and verify their bytes and filesystem state on reuse.
+With a matching Static Hermes binary, `-Xemit-c-layout` in bundle mode enables
+retained allocation layouts. The manifest declares the layout's path, digest
+and size separately from C translation units. The launcher authenticates the
+input layout before and after compilation and authenticates the declared output.
+The artifact pipeline selects a compatible prior layout before computing C
+identities and pins that choice for each exact source/compiler identity. The
+selected layout digest and size, or explicit cold `null`, bind generated C and
+downstream receipts. Concurrent planners adopt the first authenticated choice;
+unchanged builds keep it even after newer layouts become available. Discovery
+pointers have no artifact authority. Selections own their seed bytes, and cache
+maintenance retains selections and output layouts with their live C bundles.
+Retained layouts are allocation hints: current code is always regenerated, and
+object reuse still requires identical C, headers, runtime/toolchain materials
+and compilation policy. Generated gate configurations enable layouts for the
+pinned compiler; manually configured older binaries must omit the layout flag.
+`buildConvexWasmGeneratedCLinkInput` also supports an explicit
+`retainedLayout: { path, sha256, size }` input and returns the immutable output
+layout for callers managing their own selection.
 The artifact pipeline accepts a caller-owned `resourceGuard` for native work.
 The guard must carry `convexWasmBuildResourceGuardKind`, an active `released`
 state, a normalized launch policy with aggregate memory, jobs, and AOT-worker

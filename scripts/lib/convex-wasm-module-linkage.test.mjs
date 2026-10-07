@@ -449,6 +449,83 @@ test("source-local summaries reuse warm work and invalidate only incorporated bo
   assert.notDeepEqual(changed.plan.bodies, cold.plan.bodies);
 });
 
+test("installed chunk transforms require their exact semantic implementation source root", async (t) => {
+  const cacheRoot = await fs.mkdtemp(
+    join(tmpdir(), "convex-wasm-installed-transforms-"),
+  );
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const repositoryRoot = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../..",
+  );
+  const standalone = await buildConvexWasmProducerIdentity(repositoryRoot);
+  const implementationSourceRoot = "node_modules/convex-wasm-compiler";
+  const installed = {
+    ...standalone,
+    sources: standalone.sources.map((source) => ({
+      ...source,
+      path: `${implementationSourceRoot}/${source.path}`,
+    })),
+    operationalSources: [],
+  };
+  const create = (producerIdentity, options = {}) =>
+    createConvexWasmOfficialOutputChunkTransformSession({
+      esbuild,
+      persistentCache: {
+        cacheRoot,
+        cacheLayout: deriveConvexWasmCacheLayout({
+          buildId: "installed",
+          cacheRoot,
+          repositoryRoot,
+          scope: "isolated-test",
+        }),
+        producerIdentity,
+        ...options,
+      },
+    });
+  assert.doesNotThrow(() => create(standalone));
+  assert.doesNotThrow(() => create(installed, { implementationSourceRoot }));
+  assert.throws(() => create(installed), /exactly one source record/);
+  assert.throws(
+    () => create(standalone, { implementationSourceRoot }),
+    /exactly one source record/,
+  );
+  for (const root of [
+    "",
+    "/absolute",
+    "../compiler",
+    "node_modules/../compiler",
+  ]) {
+    assert.throws(
+      () => create(installed, { implementationSourceRoot: root }),
+      /source root/,
+    );
+  }
+  const path = `${implementationSourceRoot}/scripts/lib/convex-wasm-official-output-chunk-unit.mjs`;
+  const owner = installed.sources.find((source) => source.path === path);
+  const sources = installed.sources.filter((source) => source.path !== path);
+  assert.throws(
+    () => create({ ...installed, sources }, { implementationSourceRoot }),
+    /exactly one source record/,
+  );
+  assert.throws(
+    () =>
+      create(
+        { ...installed, sources, operationalSources: [owner] },
+        { implementationSourceRoot },
+      ),
+    /must be a semantic producer source/,
+  );
+  assert.throws(
+    () =>
+      create(
+        { ...installed, operationalSources: [owner] },
+        { implementationSourceRoot },
+      ),
+    /exactly one source record/,
+  );
+});
+
 test("chunk preparation binds imported bodies and reuses unaffected compact artifacts", async (t) => {
   const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-linkage-pipeline-"));
   t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));

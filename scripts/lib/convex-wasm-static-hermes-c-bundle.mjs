@@ -21,6 +21,7 @@ import {
 export const C_BUNDLE_CACHE_ENTRY_KIND = "convex-wasm-c-bundle-cache-entry-v1";
 export const C_BUNDLE_KIND = "static-hermes-c-bundle-v1";
 export const C_BUNDLE_MANIFEST_PATH = "unit.c.json";
+export const MAX_STATIC_HERMES_RETAINED_LAYOUT_BYTES = 32 * 1024 * 1024;
 const C_BUNDLE_ARGUMENT = "-Xemit-c-bundle";
 export const staticHermesCBundleShardTargetBytes = 2_097_152;
 export const staticHermesLargeCBundleMemberBytesThreshold = 2 * staticHermesCBundleShardTargetBytes;
@@ -571,11 +572,25 @@ function normalizeStaticHermesCBundleLayout(headerValue, translationUnitValues, 
   return { header, translationUnits };
 }
 
+export function normalizeStaticHermesRetainedLayoutFile(value, description) {
+  assertPlainObject(value, description);
+  assertExactKeys(value, new Set(["path", "sha256", "size"]), description);
+  const path = requireStaticHermesCBundleBasename(value.path, `${description}.path`, ".json");
+  if (!/^sh_[A-Za-z_][A-Za-z0-9_]*_layout\.json$/u.test(path)) {
+    fail(`${description}.path must name a retained unit layout`);
+  }
+  const size = requirePositiveInteger(value.size, `${description}.size`);
+  if (size > MAX_STATIC_HERMES_RETAINED_LAYOUT_BYTES) {
+    fail(`${description}.size exceeds the retained layout byte limit`);
+  }
+  return { path, sha256: requireSha256(value.sha256, `${description}.sha256`), size };
+}
+
 function normalizeStaticHermesCBundleManifest(value, description) {
   assertPlainObject(value, description);
   assertExactKeys(
     value,
-    new Set(["header", "kind", "schemaVersion", "translationUnits"]),
+    new Set(["header", "kind", ...(Object.hasOwn(value, "layout") ? ["layout"] : []), "schemaVersion", "translationUnits"]),
     description
   );
   if (value.kind !== C_BUNDLE_KIND || value.schemaVersion !== 1) {
@@ -586,9 +601,16 @@ function normalizeStaticHermesCBundleManifest(value, description) {
     value.translationUnits,
     description
   );
+  const retainedLayout = Object.hasOwn(value, "layout")
+    ? normalizeStaticHermesRetainedLayoutFile(value.layout, `${description}.layout`)
+    : undefined;
+  if (retainedLayout !== undefined && layout.translationUnits.length > MAX_STATIC_HERMES_C_BUNDLE_MEMBERS - 3) {
+    fail(`${description} exceeds the bundle member limit with its retained layout`);
+  }
   return {
     header: layout.header,
     kind: C_BUNDLE_KIND,
+    ...(retainedLayout === undefined ? {} : { layout: retainedLayout }),
     schemaVersion: 1,
     translationUnits: layout.translationUnits,
   };
@@ -598,7 +620,7 @@ export function normalizeStaticHermesCBundleOutput(value, description) {
   assertPlainObject(value, description);
   assertExactKeys(
     value,
-    new Set(["header", "kind", "manifest", "schemaVersion", "translationUnits"]),
+    new Set(["header", "kind", ...(Object.hasOwn(value, "layout") ? ["layout"] : []), "manifest", "schemaVersion", "translationUnits"]),
     description
   );
   const manifest = value.manifest;
@@ -607,14 +629,13 @@ export function normalizeStaticHermesCBundleOutput(value, description) {
   if (value.kind !== C_BUNDLE_KIND || value.schemaVersion !== 1) {
     fail(`${description} kind or schema version is unsupported`);
   }
-  const layout = normalizeStaticHermesCBundleLayout(
-    value.header,
-    value.translationUnits,
-    description
-  );
+  const manifestValue = { ...value };
+  delete manifestValue.manifest;
+  const layout = normalizeStaticHermesCBundleManifest(manifestValue, description);
   return {
     header: layout.header,
     kind: C_BUNDLE_KIND,
+    ...(layout.layout === undefined ? {} : { layout: layout.layout }),
     manifest: {
       path: (() => {
         const path = requireStaticHermesCBundleBasename(
@@ -636,7 +657,7 @@ export function normalizeStaticHermesCBundleOutput(value, description) {
 }
 
 export function staticHermesCBundleMembers(bundle) {
-  return [bundle.header, ...bundle.translationUnits];
+  return [bundle.header, ...bundle.translationUnits, ...(bundle.layout === undefined ? [] : [bundle.layout])];
 }
 
 async function runStaticHermesCBundleFileOperationsBounded(
@@ -783,6 +804,7 @@ export async function authenticateStaticHermesCBundle(
     canonicalJson({
       header: bundle.header,
       kind: bundle.kind,
+      ...(bundle.layout === undefined ? {} : { layout: bundle.layout }),
       schemaVersion: bundle.schemaVersion,
       translationUnits: bundle.translationUnits,
     })

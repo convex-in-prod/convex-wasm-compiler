@@ -119,6 +119,7 @@ function bundleCompilerFixture({
     },
   ],
   manifestSource,
+  layoutSource,
   mutateManifest,
   omitPath,
 } = {}) {
@@ -142,6 +143,11 @@ function bundleCompilerFixture({
     schemaVersion: 1,
     translationUnits: members.slice(1),
   };
+  if (layoutSource !== undefined) {
+    const path = "sh_this_unit_layout.json";
+    files.set(path, layoutSource);
+    manifest.layout = { path, sha256: sha256(layoutSource), size: Buffer.byteLength(layoutSource) };
+  }
   manifest = mutateManifest?.(structuredClone(manifest)) ?? manifest;
   const writes = [...files]
     .filter(([path]) => path !== omitPath)
@@ -170,6 +176,44 @@ function oversizeFunctionMember(overrides = {}) {
     ...overrides,
   };
 }
+
+test("authenticates retained layout input and the exact declared output", async (t) => {
+  const layout = '{"kind":"static-hermes-c-layout-v1","unitName":"this_unit","strings":[],"functions":[],"scopes":[],"shards":[]}\n';
+  const fixture = bundleCompilerFixture({ layoutSource: layout });
+  const compilerArguments = ["-emit-c", "-Xemit-c-bundle", "-Xemit-c-shard-size=2097152", "-Xemit-c-layout", "-o", "unit.c.json", "input.js"];
+  const cold = await runLauncher(t, fixture.body, { compilerArguments });
+  assert.equal(cold.code, 0, cold.stderr);
+  assert.deepEqual(JSON.parse(cold.response).result.output.layout, fixture.manifest.layout);
+  const seeded = {
+    compilerArguments: [...compilerArguments.slice(0, -1), "-Xc-layout-input=retained-layout.json", "input.js"],
+    mutatePaths: ({ root }) => fs.writeFile(join(root, "retained-layout.json"), layout),
+    mutateRequest: (request) => ({ ...request, retainedLayout: {
+      path: "retained-layout.json", sha256: sha256(layout), size: Buffer.byteLength(layout),
+    } }),
+  };
+  const warm = await runLauncher(t, fixture.body, seeded);
+  assert.equal(warm.code, 0, warm.stderr);
+  for (const [name, body, options, error] of [
+    ["missing input identity", fixture.body, { ...seeded, mutateRequest: undefined }, /input must match/u],
+    ["changed seed", fixture.body, { ...seeded, mutatePaths: ({ root }) => fs.writeFile(join(root, "retained-layout.json"), " ".repeat(Buffer.byteLength(layout))) }, /retained layout does not match/u],
+    ["replaced seed", fixture.body + '\nwriteFileSync("retained-layout.json", " ".repeat(' + String(Buffer.byteLength(layout)) + '));', seeded, /retained layout changed during execution/u],
+    ["seed symlink", fixture.body, { ...seeded, mutatePaths: async ({ root }) => {
+      await fs.writeFile(join(root, "seed.json"), layout);
+      await fs.symlink("seed.json", join(root, "retained-layout.json"));
+    } }, /retained layout.*(?:regular|symlink)/u],
+    ["missing output", bundleCompilerFixture().body, { compilerArguments }, /layout does not match/u],
+    ["undeclared layout", fixture.body, { compilerArguments: compilerArguments.filter((arg) => arg !== "-Xemit-c-layout") }, /layout does not match/u],
+    ["extra output", fixture.body + '\nwriteFileSync("extra.json", "extra");', { compilerArguments }, /missing or extra C bundle files/u],
+    ["wrong output digest", bundleCompilerFixture({ layoutSource: layout, mutateManifest: (manifest) => ({ ...manifest, layout: { ...manifest.layout, sha256: "0".repeat(64) } }) }).body, { compilerArguments }, /layout\.json SHA-256 does not match/u],
+  ]) {
+    await t.test(name, async (t) => {
+      const result = await runLauncher(t, body, options);
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, error);
+      assert.equal(result.response, undefined);
+    });
+  }
+});
 
 test("writes an authenticated success response only after unit.c exists", async (t) => {
   const result = await runLauncher(t, 'writeFileSync("unit.c", "generated C");');

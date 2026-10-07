@@ -36,7 +36,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function bundleFixture({ functionCount = 1 } = {}) {
+function bundleFixture({ functionCount = 1, retainedLayout } = {}) {
   const sources = new Map([
     ["unit.h", "#define SH_UNIT 1\n"],
     ["metadata.c", "const int metadata = 1;\n"],
@@ -62,7 +62,12 @@ function bundleFixture({ functionCount = 1 } = {}) {
       })
     ),
   ];
-  const manifestValue = { header, kind: C_BUNDLE_KIND, schemaVersion: 1, translationUnits };
+  let layout;
+  if (retainedLayout !== undefined) {
+    sources.set("sh_this_unit_layout.json", retainedLayout);
+    layout = { path: "sh_this_unit_layout.json", sha256: sha256(retainedLayout), size: Buffer.byteLength(retainedLayout) };
+  }
+  const manifestValue = { header, kind: C_BUNDLE_KIND, ...(layout === undefined ? {} : { layout }), schemaVersion: 1, translationUnits };
   const manifestSource = `${canonicalJson(manifestValue)}\n`;
   return {
     bundle: {
@@ -138,6 +143,25 @@ test("recognizes only the exact Static Hermes C-bundle compiler flags", () => {
     /must contain exactly one -Xemit-c-bundle/u
   );
   assert.equal(isStaticHermesCBundleEntry({ kind: C_BUNDLE_CACHE_ENTRY_KIND }), true);
+});
+
+test("authenticates the declared bounded layout alongside its C bundle", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-c-layout-"));
+  t.after(() => fs.rm(root, { force: true, recursive: true }));
+  const fixture = bundleFixture({ retainedLayout: '{"kind":"static-hermes-c-layout-v1"}\n' });
+  await Promise.all([
+    fs.writeFile(join(root, C_BUNDLE_MANIFEST_PATH), fixture.manifestSource),
+    ...[...fixture.sources].map(([path, source]) => fs.writeFile(join(root, path), source)),
+  ]);
+  const authenticated = await authenticateStaticHermesCBundle(root, fixture.bundle, 1024 * 1024);
+  assert.deepEqual(authenticated.bundle.layout, fixture.bundle.layout);
+  await fs.writeFile(join(root, fixture.bundle.layout.path), Buffer.alloc(fixture.bundle.layout.size, 32));
+  await assert.rejects(authenticateStaticHermesCBundle(root, fixture.bundle, 1024 * 1024), /layout\.json does not match its identity/u);
+  for (const change of [{ path: "../layout.json" }, { path: "unit.c.json" }, { size: 32 * 1024 * 1024 + 1 }]) {
+    assert.throws(() => normalizeStaticHermesCBundleOutput({
+      ...fixture.bundle, layout: { ...fixture.bundle.layout, ...change },
+    }, "test bundle"), /layout/u);
+  }
 });
 
 test("normalizes and authenticates a canonical C-bundle material set", async (t) => {

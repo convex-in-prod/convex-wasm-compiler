@@ -40,6 +40,7 @@ import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { buildConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
 import { convexWasmTargetRuntimeSurfacePolicyIdentity } from "./convex-wasm-runtime-surface.mjs";
 import { convexWasmStaticHermesCBundleMemberCompilationPolicy } from "./convex-wasm-static-hermes-c-bundle.mjs";
+import { analyzeConvexWasmNativeMemberObjectWork } from "./convex-wasm-native-duplicate-work.mjs";
 import { writeFixturePrecompilerPackage } from "../test-fixtures/precompiler-package.mjs";
 import { buildSyntheticDeploymentApplication } from "../test-fixtures/deployment-application.mjs";
 import { buildConvexWasmOfficialOutputModuleGraphInputs } from "./convex-wasm-official-output-artifact-adapter.mjs";
@@ -414,6 +415,7 @@ if (tool === "shermes") {
     const hasBatchConcurrencyProbe = source.includes("SHERMES_BATCH_CONCURRENCY_PROBE");
     const hasFullSizedBundleMembers = source.includes("SHERMES_FULL_SIZED_C_BUNDLE_MEMBERS");
     const hasLargeCBundleMember = source.includes("SHERMES_LARGE_C_BUNDLE_MEMBER");
+    const hasAddedFunction = source.includes("SHERMES_ADDED_FUNCTION_IN_FIRST_MEMBER");
     const emitsOutlinedFunctionMembers =
       source.includes("SHERMES_OUTLINED_C_BUNDLE") ||
       hasInvalidFunctionFragmentSequence ||
@@ -443,10 +445,11 @@ if (tool === "shermes") {
           {
             contents:
               "/* function zero */" +
+              (hasAddedFunction ? "/* added function */" : "") +
               (hasFullSizedBundleMembers ? "x".repeat(1100000) : ""),
             firstFunctionId: 0,
-            functionCount: 1,
-            lastFunctionId: 0,
+            functionCount: hasAddedFunction ? 2 : 1,
+            lastFunctionId: hasAddedFunction ? 1 : 0,
             oversize: false,
             path: "functions-0000.c",
             role: "function",
@@ -470,9 +473,9 @@ if (tool === "shermes") {
               : hasCOptimizationLevelZeroMember || hasNoOutlineableRunOversizeMember
                 ? { cOptimizationLevel: 0 }
                 : {}),
-            firstFunctionId: source.includes("SHERMES_INVALID_C_BUNDLE_FUNCTION_OVERLAP") ? 0 : 1,
+            firstFunctionId: source.includes("SHERMES_INVALID_C_BUNDLE_FUNCTION_OVERLAP") ? 0 : hasAddedFunction ? 2 : 1,
             functionCount: source.includes("SHERMES_INVALID_C_BUNDLE_FUNCTION_OVERLAP") ? 2 : 1,
-            lastFunctionId: 1,
+            lastFunctionId: hasAddedFunction ? 2 : 1,
             oversize: hasOversizeBundleMember || hasLargeCBundleMember,
             ...(hasLargeCBundleMember
               ? { oversizeReason: "single-instruction" }
@@ -525,10 +528,18 @@ if (tool === "shermes") {
     if (source.includes("SHERMES_MALFORMED_BUNDLE")) {
       members[3].sha256 = "f".repeat(64);
     }
+    let layout;
+    if (args.includes("-Xemit-c-layout")) {
+      const unitName = args.find((argument) => argument.startsWith("-exported-unit=")).slice("-exported-unit=".length);
+      const path = "sh_" + unitName + "_layout.json";
+      const contents = JSON.stringify({ kind: "static-hermes-c-layout-v1", unitName, strings: [Buffer.from(sourceSha256).toString("hex")], functions: [], scopes: [], shards: [] }) + "\\n";
+      bundleFiles.set(path, contents);
+      layout = { path, sha256: createHash("sha256").update(contents).digest("hex"), size: Buffer.byteLength(contents) };
+    }
     for (const [path, contents] of bundleFiles) writeFileSync(path, contents);
     writeFileSync(
       args[outputIndex + 1],
-      JSON.stringify(canonicalValue({ header: members[0], kind: "static-hermes-c-bundle-v1", schemaVersion: 1, translationUnits: members.slice(1) })) + "\\n"
+      JSON.stringify(canonicalValue({ header: members[0], kind: "static-hermes-c-bundle-v1", ...(layout === undefined ? {} : { layout }), schemaVersion: 1, translationUnits: members.slice(1) })) + "\\n"
     );
     process.exit(0);
   }
@@ -1188,6 +1199,83 @@ test("public artifact pipeline constructs and reuses a complete package", async 
   assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, initialCommandCount);
 });
 
+test("bundle coverage renumbering reuses byte-identical C objects", async (t) => {
+  const fixture = await createFixture(t, { staticHermesCBundle: true });
+  fixture.options.resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy: { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 },
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  const first = await compileConvexWasmArtifact(fixture.options);
+  const second = await compileConvexWasmArtifact(bindFixtureGuestSourceProvenance({
+    ...fixture.options,
+    generatedJavaScript: fixture.options.generatedJavaScript +
+      "const SHERMES_ADDED_FUNCTION_IN_FIRST_MEMBER = true;\n",
+  }));
+  const original = first.buildReport.phases.find(({ timing }) => timing?.memberCompilations)
+    .timing.memberCompilations;
+  const changed = second.buildReport.phases.find(({ timing }) => timing?.memberCompilations)
+    .timing.memberCompilations;
+  assert.deepEqual(changed.map(({ member, cache }) => [member.path, cache]), [
+    ["metadata.c", "hit"],
+    ["functions-0000.c", "miss"],
+    ["functions-0001.c", "hit"],
+  ]);
+  assert.equal(original[2].member.firstFunctionId, 1);
+  assert.equal(changed[2].member.firstFunctionId, 2);
+  assert.equal(original[2].authenticatedInput.cacheKey, changed[2].authenticatedInput.cacheKey);
+  const report = analyzeConvexWasmNativeMemberObjectWork(changed);
+  assert.equal(report.summary.cacheHitCount, 2);
+  assert.equal(report.summary.cacheMissCount, 1);
+});
+
+test("generated-C planning pins layout input across edits and unchanged rebuilds", async (t) => {
+  const fixture = await createFixture(t, { staticHermesCBundle: true });
+  fixture.options.toolchain.staticHermes.flags.push("-Xemit-c-layout");
+  fixture.options.resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy: { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 },
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  const first = await compileConvexWasmArtifact(fixture.options);
+  const phase = first.buildReport.phases.find(({ stage }) => stage === "generated-c");
+  const root = join(fixture.options.cacheLayout.immutable.artifacts, phase.stage, phase.cacheKey);
+  const entry = JSON.parse(await fs.readFile(join(root, "entry.json"), "utf8"));
+  const layout = await fs.readFile(join(root, entry.bundle.layout.path));
+  assert.equal(createHash("sha256").update(layout).digest("hex"), entry.bundle.layout.sha256);
+  const second = await compileConvexWasmArtifact(fixture.options);
+  assert.equal(second.buildReport.phases.find(({ stage }) => stage === "generated-c").cache, "hit");
+  assert.equal(second.package.cacheKey, first.package.cacheKey);
+  assert.equal(entry.identity.retainedLayout, null);
+  const editedOptions = bindFixtureGuestSourceProvenance({
+    ...fixture.options,
+    generatedJavaScript: fixture.options.generatedJavaScript + "const insertedValue = 2;\n",
+  });
+  const edited = await compileConvexWasmArtifact(editedOptions);
+  const editedPhase = edited.buildReport.phases.find(({ stage }) => stage === "generated-c");
+  const editedEntry = JSON.parse(await fs.readFile(join(
+    fixture.options.cacheLayout.immutable.artifacts, editedPhase.stage, editedPhase.cacheKey, "entry.json"
+  ), "utf8"));
+  assert.deepEqual(editedEntry.identity.retainedLayout, {
+    sha256: entry.bundle.layout.sha256, size: entry.bundle.layout.size,
+  });
+  assert.notEqual(editedEntry.bundle.layout.sha256, entry.bundle.layout.sha256);
+  const repeat = await compileConvexWasmArtifact(editedOptions);
+  assert.equal(repeat.package.cacheKey, edited.package.cacheKey);
+  assert.equal(repeat.buildReport.phases.find(({ stage }) => stage === "generated-c").cache, "hit");
+  const restored = await compileConvexWasmArtifact(fixture.options);
+  assert.equal(restored.package.cacheKey, first.package.cacheKey);
+  const compilerCalls = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n")
+    .map((line) => JSON.parse(line)).filter(({ tool }) => tool === "shermes");
+  assert.equal(compilerCalls.length, 2);
+  assert.equal(compilerCalls[0].args.includes("-Xc-layout-input=retained-layout.json"), false);
+  assert.equal(compilerCalls[1].args.includes("-Xc-layout-input=retained-layout.json"), true);
+});
+
 test("public artifact pipeline rejects malformed incremental cache counters", async (t) => {
   for (const { name, report, error } of [
     {
@@ -1298,7 +1386,8 @@ test("deployment support preactivation adopts the ordinary capability header ide
 });
 
 test("public artifact pipeline constructs a module-graph package with Core Wasm and AOT", async (t) => {
-  const fixture = await createFixture(t, { moduleGraphWasm: true });
+  const fixture = await createFixture(t, { moduleGraphWasm: true, staticHermesCBundle: true });
+  fixture.options.toolchain.staticHermes.flags.push("-Xemit-c-layout");
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
   fixture.options.resourceGuard = {
     kind: convexWasmBuildResourceGuardKind,
@@ -1315,6 +1404,16 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   });
   const compilerOutput = await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(session, [options]);
   await finalizeConvexWasmArtifactMaterialSession(session);
+  const compilerCalls = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
+  const repeatedSession = await createConvexWasmCapabilityArtifactMaterialSession(options, {
+    launchPolicy, nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
+  });
+  try {
+    await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(repeatedSession, [options]);
+  } finally {
+    await finalizeConvexWasmArtifactMaterialSession(repeatedSession);
+  }
+  assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, compilerCalls);
   const entries = scheduledCohortEntriesForCompilerOutput(compilerOutput);
   const cohort = { cohortId: fingerprintJson({ entries }), entries };
   const artifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts({

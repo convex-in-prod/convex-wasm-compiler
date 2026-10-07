@@ -1,16 +1,16 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "3d78e872f6ddba2c4f76d94390f0df8e4a22f779",
-    "sourceRevision": "3d78e872f6ddba2c4f76d94390f0df8e4a22f779",
-    "observedCheckoutRevision": "3d78e872f6ddba2c4f76d94390f0df8e4a22f779",
+    "buildRevision": "9429d85f5b8ffa383468fa4d595f8bd145952bd4",
+    "sourceRevision": "9429d85f5b8ffa383468fa4d595f8bd145952bd4",
+    "observedCheckoutRevision": "9429d85f5b8ffa383468fa4d595f8bd145952bd4",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
     "hostCmakeCacheSha256": "ee0798f69ed398c4f12f65defcea2e09294318e9dfabfc5ded8b276bbad339d9",
-    "hostShermesSha256": "e4d5663db0b60e9de900795911f3ef46329ee15d3853425ade33de6598a98f14",
+    "hostShermesSha256": "881b3fd92ab48d3b43c4c8deccff5e6c8c6879cec1b435f414bc3b6eab82afc3",
     "wasmCmakeCacheSha256": "f985b6b3eb0895c4a41d45c15f4620aa6ffe8cb227e96844284c3f8c542dd566",
-    "wasmLibhermesvmArchiveSha256": "27f40784ef64284e9f5cd61f42a08d350c6686bee7817eb7398d63ba159ae3e5"
+    "wasmLibhermesvmArchiveSha256": "ed1fd2a1bfb8b5e18d6383d65b06e2b78072b68c78f193800946b328b412f9d0"
   },
   "buildConfiguration": {
     "coreExtensions": true,
@@ -73,8 +73,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "bcf87c15859c4658effe170f4aa0372df6c4051501d0d71e7efb26da70641bda",
-    "reportSha256": "47a871d1e49764446b15cbe9b92a466ad4f7ff3cf1a09d7e85c89e43ee226ab0",
+    "reportFileSha256": "2e07e8670c890a298b7c3bfdd400d8be7edb1d091aa2782de8d78f9767b28ad2",
+    "reportSha256": "6c930317474678936a42923303138093056d5081837f9dc3e8883aeb19a07cd3",
     "globals": [
       "$SHBuiltin",
       "AggregateError",

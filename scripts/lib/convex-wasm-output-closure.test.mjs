@@ -8,8 +8,11 @@ import {
   authenticateDeploymentOutputClosureProjectionGraphSession,
   buildConvexWasmDeploymentOutputClosures,
   canDeferConvexWasmDeploymentOutputClosureAuthentication,
+  captureConvexWasmDeploymentBuildInputGraph,
+  convexWasmDeploymentGraphSessionAuthority,
   createConvexWasmDeploymentOutputClosureAuthentication,
   createConvexWasmDeploymentOutputClosureProjection,
+  isCurrentConvexWasmDeploymentBuildInputGraph,
   projectConvexWasmDeploymentOutputChunkGraph,
   selectConvexWasmDeploymentOutputClosure,
 } from "./convex-wasm-output-closure.mjs";
@@ -397,6 +400,12 @@ test("exact producer graph authority is revoked when an output map changes", () 
   }
   for (const module of graphSession.deploymentOutputModulesByPath.values()) Object.freeze(module);
   authenticateDeploymentOutputClosureProjectionGraphSession(graphSession);
+  const authority = convexWasmDeploymentGraphSessionAuthority(graphSession);
+  assert.notEqual(authority, undefined);
+  assert.equal(Object.isFrozen(authority), true);
+  assert.deepEqual(Reflect.ownKeys(authority), []);
+  assert.equal(convexWasmDeploymentGraphSessionAuthority(graphSession), authority);
+  assert.equal(convexWasmDeploymentGraphSessionAuthority({ ...graphSession }), undefined);
   const authentication = createConvexWasmDeploymentOutputClosureAuthentication(graphSession);
   assert.equal(
     canDeferConvexWasmDeploymentOutputClosureAuthentication({ authentication, graphSession }),
@@ -413,6 +422,7 @@ test("exact producer graph authority is revoked when an output map changes", () 
     canDeferConvexWasmDeploymentOutputClosureAuthentication({ authentication, graphSession }),
     false
   );
+  assert.equal(convexWasmDeploymentGraphSessionAuthority(graphSession), undefined);
 });
 
 test("retains one projection and immutable member validation across entry selections", (t) => {
@@ -474,4 +484,37 @@ test("retains one projection and immutable member validation across entry select
     select(entries[0]).graphSession.deploymentOutputClosureByEntry.get(entries[0].entryPath),
     firstClosure
   );
+});
+
+test("build input graph shares freeze admission and permanently rejects changed extra maps", () => {
+  const graphSession = closureGraphSession(
+    fixtureDeploymentOutputGraph({
+      entries: [{ entryPath: "convex/entry.ts", modulePath: "entry.js" }],
+      inputs: {},
+    })
+  );
+  const input = { digest: digest("a"), nested: { size: 7 } };
+  graphSession.inputMaterials = new Map([["source.ts", input]]);
+  graphSession.sourceGraphContext = { projections: 0 };
+  assert.throws(
+    () => captureConvexWasmDeploymentBuildInputGraph(graphSession),
+    /exact authenticated/u
+  );
+  authenticateDeploymentOutputClosureProjectionGraphSession(graphSession);
+  const token = captureConvexWasmDeploymentBuildInputGraph(graphSession);
+  assert.equal(Object.isFrozen(input.nested), true);
+  assert.equal(Object.isFrozen(graphSession.sourceGraphContext), false);
+  assert.equal(Object.isFrozen(token), true);
+  assert.deepEqual(Reflect.ownKeys(token), []);
+  assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph({}, graphSession), false);
+  assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession), true);
+  const authentication = createConvexWasmDeploymentOutputClosureAuthentication(graphSession);
+  assert.equal(
+    canDeferConvexWasmDeploymentOutputClosureAuthentication({ authentication, graphSession }),
+    true
+  );
+  graphSession.inputMaterials.set("source.ts", { ...input });
+  assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession), false);
+  graphSession.inputMaterials.set("source.ts", input);
+  assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession), false);
 });

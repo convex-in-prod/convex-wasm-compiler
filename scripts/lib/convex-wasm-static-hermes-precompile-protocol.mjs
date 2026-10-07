@@ -12,7 +12,10 @@ import {
   requireString,
 } from "./convex-wasm-artifact-contract.mjs";
 import { decodeUtf8, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
-import { normalizeStaticHermesCBundleOutput } from "./convex-wasm-static-hermes-c-bundle.mjs";
+import {
+  MAX_STATIC_HERMES_RETAINED_LAYOUT_BYTES,
+  normalizeStaticHermesCBundleOutput,
+} from "./convex-wasm-static-hermes-c-bundle.mjs";
 
 const REQUEST_KIND = "convex-wasm-static-hermes-precompile-request-v1";
 const RESPONSE_KIND = "convex-wasm-static-hermes-precompile-response-v1";
@@ -26,10 +29,42 @@ const SOURCE_REJECTION_CATEGORIES = new Set([
 ]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
-export function createStaticHermesPrecompileRequest(command, generatedSource, materials) {
+export function staticHermesRetainedLayoutInvocation(argumentsList) {
+  const emission = argumentsList.filter((argument) => argument.startsWith("-Xemit-c-layout"));
+  const inputs = argumentsList.filter((argument) => argument.startsWith("-Xc-layout-input"));
+  if (emission.length === 0 && inputs.length === 0) return undefined;
+  if (emission.length !== 1 || emission[0] !== "-Xemit-c-layout" ||
+      !argumentsList.includes("-Xemit-c-bundle") || inputs.length > 1 ||
+      (inputs.length === 1 && inputs[0] !== "-Xc-layout-input=retained-layout.json")) {
+    fail("retained layout requires bundle emission and one fixed input path");
+  }
+  const units = argumentsList.filter((argument) => argument.startsWith("-exported-unit="));
+  if (units.length > 1) fail("retained layout requires one exported unit name");
+  const unitName = units.length === 0 ? "this_unit" : units[0].slice("-exported-unit=".length);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(unitName)) fail("retained layout unit name is invalid");
+  return {
+    outputPath: `sh_${unitName}_layout.json`,
+    ...(inputs.length === 0 ? {} : { inputPath: "retained-layout.json" }),
+  };
+}
+
+export function createStaticHermesPrecompileRequest(command, generatedSource, materials, retainedLayout) {
   const separator = command.args.indexOf("--");
   if (separator < 0 || command.args.indexOf("--", separator + 1) >= 0) {
     fail("Static Hermes launcher command must contain exactly one argument separator");
+  }
+  const layout = staticHermesRetainedLayoutInvocation(command.args.slice(separator + 1));
+  if ((layout?.inputPath !== undefined) !== (retainedLayout !== undefined)) {
+    fail("retained layout input must match its authenticated request");
+  }
+  if (retainedLayout !== undefined) {
+    assertPlainObject(retainedLayout, "retained layout input");
+    assertExactKeys(retainedLayout, new Set(["path", "sha256", "size"]), "retained layout input");
+    if (retainedLayout.path !== layout.inputPath ||
+        requirePositiveU32(retainedLayout.size, "retained layout size") > MAX_STATIC_HERMES_RETAINED_LAYOUT_BYTES) {
+      fail("retained layout input path or byte limit is invalid");
+    }
+    requireSha256(retainedLayout.sha256, "retained layout SHA-256");
   }
   const compiler = materials.staticHermes.entries.find(
     ({ label }) => label === "static-hermes-executable"
@@ -50,6 +85,7 @@ export function createStaticHermesPrecompileRequest(command, generatedSource, ma
       kind: REQUEST_KIND,
       materialSha256: materials.staticHermes.sha256,
       nonce: randomBytes(32).toString("hex"),
+      ...(retainedLayout === undefined ? {} : { retainedLayout }),
       schemaVersion: 1,
     },
     "Static Hermes precompile request"
@@ -123,11 +159,12 @@ export async function readStaticHermesPrecompileResponse(path, request) {
       new Set(hasOutput ? ["kind", "output"] : ["kind"]),
       "Static Hermes success result"
     );
+    const output = hasOutput
+      ? normalizeStaticHermesCBundleOutput(response.result.output, "Static Hermes C bundle output")
+      : undefined;
     return {
       kind: "success",
-      ...(hasOutput
-        ? { output: normalizeStaticHermesCBundleOutput(response.result.output, "Static Hermes C bundle output") }
-        : {}),
+      ...(output === undefined ? {} : { output }),
     };
   }
   return normalizeStaticHermesSourceRejection(response.result, "Static Hermes source rejection");

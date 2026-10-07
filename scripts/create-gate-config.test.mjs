@@ -109,6 +109,7 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     "-emit-c",
     "-Xemit-c-bundle",
     "-Xemit-c-shard-size=2097152",
+    "-Xemit-c-layout",
   ]);
   assert.equal(config.toolchain.wasmtime.packageDirectory, "/package");
   assert.equal(config.toolchain.wasmtime.revision, wasmtimeRevision);

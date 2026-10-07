@@ -102,6 +102,8 @@ function bundleModuleIdentity(bundle, description, expectedEnvironment) {
   };
 }
 
+export { bundleModuleIdentity as convexWasmDeploymentOutputModuleIdentity };
+
 function outputModulePath(repoRoot, outputPath) {
   const pathFromOutdir = isAbsolute(outputPath)
     ? relative(resolve(repoRoot, "out"), outputPath)
@@ -522,6 +524,7 @@ export function authenticateDeploymentOutputClosureProjectionGraphSession(graphS
   deploymentOutputClosureProjectionGraphSessions.set(
     graphSession,
     Object.freeze({
+      token: Object.freeze({}),
       bundleModulesByPath: selection.bundleModulesByPath,
       // These maps stay mutable for existing consumers. Reference-only snapshots invalidate the
       // exact fast path after an in-place edit without repeating canonical JSON or byte hashing.
@@ -575,7 +578,63 @@ function exactDeploymentOutputClosureProjectionGraphSession(graphSession) {
     : undefined;
 }
 
+// Consumers can retain the admitted session's identity without receiving the
+// mutable maps that implement its proof. Every read revalidates current state.
+export function convexWasmDeploymentGraphSessionAuthority(graphSession) {
+  return exactDeploymentOutputClosureProjectionGraphSession(graphSession)?.token;
+}
+
 const deeplyFrozenBuildInputs = new WeakSet();
+const deploymentBuildInputGraphs = new WeakMap();
+
+export function captureConvexWasmDeploymentBuildInputGraph(graphSession) {
+  const authority = exactDeploymentOutputClosureProjectionGraphSession(graphSession);
+  if (authority === undefined) {
+    fail("build input session requires an exact authenticated deployment graph session");
+  }
+  const maps = [];
+  for (const [field, value] of authority.graphSessionOwnProperties) {
+    // Response telemetry aliases counters updated by later source projections.
+    // It must neither authorize the build nor be frozen through this view.
+    if (field === "sourceGraphContext") continue;
+    if (isOrdinaryJsonData(value)) {
+      freezeAuthenticatedJsonTree(value);
+      if (value !== null && typeof value === "object") deeplyFrozenBuildInputs.add(value);
+    } else if (
+      value !== null &&
+      typeof value === "object" &&
+      !isProxy(value) &&
+      value instanceof Map
+    ) {
+      if (!isExactPlainMap(value)) fail("build input graph maps must be exact plain Maps");
+      for (const nested of value.values()) {
+        if (isOrdinaryJsonData(nested)) {
+          freezeAuthenticatedJsonTree(nested);
+          if (nested !== null && typeof nested === "object") deeplyFrozenBuildInputs.add(nested);
+        }
+      }
+      maps.push({ entries: plainMapSnapshot(value), map: value });
+    }
+  }
+  const token = Object.freeze({});
+  deploymentBuildInputGraphs.set(token, { authority, graphSession, maps });
+  return token;
+}
+
+export function isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession) {
+  const record = deploymentBuildInputGraphs.get(token);
+  if (record === undefined) return false;
+  if (
+    record.graphSession !== graphSession ||
+    exactDeploymentOutputClosureProjectionGraphSession(graphSession) !== record.authority ||
+    !record.maps.every(({ entries, map }) => hasExactMapEntries(map, entries))
+  ) {
+    // Observing a changed map revokes admission even if its old entries return.
+    deploymentBuildInputGraphs.delete(token);
+    return false;
+  }
+  return true;
+}
 
 function isDeeplyFrozenBuildInput(value, seen = new Set()) {
   if (value === null || typeof value !== "object") return true;

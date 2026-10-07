@@ -23,7 +23,7 @@ const materials = {
   },
 };
 
-async function fixture(t, bundleOutput) {
+async function fixture(t, bundleOutput, { emitLayout = false } = {}) {
   const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-generated-c-build-"));
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }));
   const cacheLayout = deriveConvexWasmCacheLayout({
@@ -45,9 +45,12 @@ async function fixture(t, bundleOutput) {
     sha256: sha256(bundleFiles.get(path)),
     size: Buffer.byteLength(bundleFiles.get(path)),
   });
+  const layoutSource = '{"kind":"static-hermes-c-layout-v1","unitName":"this_unit","strings":[],"functions":[],"scopes":[],"shards":[]}\n';
+  if (emitLayout) bundleFiles.set("sh_this_unit_layout.json", layoutSource);
   const manifest = {
     header: member("unit.h", "header"),
     kind: C_BUNDLE_KIND,
+    ...(emitLayout ? { layout: { path: "sh_this_unit_layout.json", sha256: sha256(layoutSource), size: Buffer.byteLength(layoutSource) } } : {}),
     schemaVersion: 1,
     translationUnits: [
       member("metadata.c", "metadata"),
@@ -61,19 +64,25 @@ async function fixture(t, bundleOutput) {
       }),
     ],
   };
-  const manifestSource = `${canonicalJson(manifest)}\n`;
-  const bundle = {
-    ...manifest,
-    manifest: {
-      path: C_BUNDLE_MANIFEST_PATH,
-      sha256: sha256(manifestSource),
-      size: Buffer.byteLength(manifestSource),
-    },
-  };
   const runCommand = async ({ command, stage, workPath }) => {
     calls.push({ args: command.args, stage });
     if (stage === "static-hermes") {
       const request = JSON.parse(await fs.readFile(join(workPath, "request.json"), "utf8"));
+      if (request.retainedLayout !== undefined) {
+        assert.equal(request.retainedLayout.path, "retained-layout.json");
+        const input = await fs.readFile(join(workPath, request.retainedLayout.path));
+        assert.equal(sha256(input), request.retainedLayout.sha256);
+        assert.equal(input.length, request.retainedLayout.size);
+      }
+      const manifestSource = `${canonicalJson(manifest)}\n`;
+      const bundle = {
+        ...manifest,
+        manifest: {
+          path: C_BUNDLE_MANIFEST_PATH,
+          sha256: sha256(manifestSource),
+          size: Buffer.byteLength(manifestSource),
+        },
+      };
       const result = bundleOutput ? { kind: "success", output: bundle } : { kind: "success" };
       if (bundleOutput) {
         await Promise.all([
@@ -101,6 +110,8 @@ async function fixture(t, bundleOutput) {
     return { wallMilliseconds: 1 };
   };
   return {
+    bundleFiles,
+    manifest,
     calls,
     options: {
       cacheLayout,
@@ -114,6 +125,7 @@ async function fixture(t, bundleOutput) {
             ...(bundleOutput
               ? ["-Xemit-c-bundle", `-Xemit-c-shard-size=${String(staticHermesCBundleShardTargetBytes)}`]
               : []),
+            ...(emitLayout ? ["-Xemit-c-layout"] : []),
             "-o", bundleOutput ? C_BUNDLE_MANIFEST_PATH : "unit.c", "input.js",
           ],
         },
@@ -151,6 +163,59 @@ test("generated C becomes a cached linker object across fresh source work direct
   assert.equal(first.linkInput.name, "selected.o");
   assert.equal(first.linkInput.sha256, second.linkInput.sha256);
   assert.equal((await fs.readFile(first.linkInput.path, "utf8")).startsWith("object:"), true);
+});
+
+test("retained layouts survive scratch cleanup and authenticate the next source compilation", async (t) => {
+  const { calls, options } = await fixture(t, true, { emitLayout: true });
+  const first = await buildConvexWasmGeneratedCLinkInput(options);
+  const original = await fs.readFile(first.retainedLayout.path);
+  assert.equal(sha256(original), first.retainedLayout.sha256);
+  const second = await buildConvexWasmGeneratedCLinkInput({ ...options, retainedLayout: first.retainedLayout });
+  assert.deepEqual(second.objects.map(({ report }) => report.cache), ["hit", "hit"]);
+  assert.equal(second.retainedLayout.sha256, first.retainedLayout.sha256);
+  assert.equal(calls.filter(({ args }) => args.includes("-Xc-layout-input=retained-layout.json")).length, 1);
+  await fs.writeFile(first.retainedLayout.path, Buffer.alloc(original.length, 32));
+  const count = calls.length;
+  await assert.rejects(
+    buildConvexWasmGeneratedCLinkInput({ ...options, retainedLayout: first.retainedLayout }),
+    /retained layout input does not match its identity/u
+  );
+  assert.equal(calls.length, count);
+});
+
+test("inserting a C member retains existing objects while source and policy edits rebuild", async (t) => {
+  const { bundleFiles, manifest, options } = await fixture(t, true);
+  const first = await buildConvexWasmGeneratedCLinkInput(options);
+  const retained = manifest.translationUnits[1];
+  retained.firstFunctionId = 1;
+  retained.lastFunctionId = 1;
+  const contents = "int inserted(void) { return 2; }\n";
+  bundleFiles.set("inserted.c", contents);
+  manifest.translationUnits.splice(1, 0, {
+    firstFunctionId: 0,
+    functionCount: 1,
+    lastFunctionId: 0,
+    oversize: false,
+    path: "inserted.c",
+    role: "function",
+    sha256: sha256(contents),
+    size: Buffer.byteLength(contents),
+    targetBytes: staticHermesCBundleShardTargetBytes,
+  });
+  const second = await buildConvexWasmGeneratedCLinkInput(options);
+  assert.deepEqual(second.objects.map(({ report }) => report.cache), ["hit", "miss", "hit"]);
+  assert.equal(second.objects[2].entry.artifactSha256, first.objects[1].entry.artifactSha256);
+  assert.notEqual(second.linkInput.sha256, first.linkInput.sha256);
+
+  const changed = "int synthetic_function(void) { return SYNTHETIC + 1; }\n";
+  bundleFiles.set(retained.path, changed);
+  retained.sha256 = sha256(changed);
+  retained.size = Buffer.byteLength(changed);
+  const edited = await buildConvexWasmGeneratedCLinkInput(options);
+  assert.deepEqual(edited.objects.map(({ report }) => report.cache), ["hit", "hit", "miss"]);
+  delete retained.cOptimizationLevel;
+  const optimized = await buildConvexWasmGeneratedCLinkInput(options);
+  assert.deepEqual(optimized.objects.map(({ report }) => report.cache), ["hit", "hit", "miss"]);
 });
 
 test("generated C bundle compiles every member with its policy and caches an ordered archive", async (t) => {

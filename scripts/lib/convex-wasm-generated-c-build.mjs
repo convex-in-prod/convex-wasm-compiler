@@ -34,6 +34,7 @@ export async function buildConvexWasmGeneratedCLinkInput({
   materials,
   memberCompilationPolicy,
   memberJobs,
+  retainedLayout,
   runCommand,
   verifyEmscriptenMaterials,
   verifyStaticHermesMaterials,
@@ -80,6 +81,7 @@ export async function buildConvexWasmGeneratedCLinkInput({
       generatedJavaScript,
       materials,
       maxGeneratedCBytes,
+      retainedLayout,
       runCommand,
       verifyMaterials: verifyStaticHermesMaterials,
       workPath,
@@ -128,6 +130,38 @@ export async function buildConvexWasmGeneratedCLinkInput({
       bundle,
       maxGeneratedCBytes
     );
+    let retainedLayoutOutput;
+    if (bundle.layout !== undefined) {
+      const layoutPath = join(workPath, bundle.layout.path);
+      const authenticateLayout = async () => {
+        const digest = await hashPrivateRegularFile(layoutPath, bundle.layout.size, "generated retained layout");
+        if (digest.sha256 !== bundle.layout.sha256 || digest.size !== bundle.layout.size) {
+          fail("generated retained layout does not match its bundle identity");
+        }
+      };
+      const published = await ensureArtifactStage({
+        authenticatePublicationPrerequisite: authenticateLayout,
+        build: async () => ({ metadata: null, outputPath: layoutPath, timing: null }),
+        cacheLayout,
+        cacheRoot,
+        extension: "json",
+        identity: {
+          bundleManifest: bundle.manifest,
+          generatedSource: source.generatedSource,
+          input: retainedLayout === undefined ? null : { sha256: retainedLayout.sha256, size: retainedLayout.size },
+          kind: "convex-wasm-retained-c-layout-v1",
+          layout: bundle.layout,
+          staticHermes: materials.staticHermes.sha256,
+        },
+        maxArtifactBytes: bundle.layout.size,
+        stage: "static-hermes-retained-layout",
+      });
+      retainedLayoutOutput = {
+        path: published.entry.artifactPath,
+        sha256: published.entry.artifactSha256,
+        size: published.entry.artifactSize,
+      };
+    }
     const translationUnitBytes = staticHermesCBundleTranslationUnitBytes(bundle);
     const header = {
       name: bundle.header.path,
@@ -136,10 +170,12 @@ export async function buildConvexWasmGeneratedCLinkInput({
       size: bundle.header.size,
     };
     const objects = await mapBounded(
-      bundle.translationUnits.map((member, index) => ({ member, index })),
+      bundle.translationUnits,
       memberJobs,
-      async ({ member, index }) => {
-        const objectName = `member-${String(index).padStart(5, "0")}.o`;
+      async (member) => {
+        // Each member has an isolated work directory. Its bundle position is
+        // archive ordering, not an input to C compilation or object reuse.
+        const objectName = "artifact.o";
         const compilation = staticHermesCBundleMemberCompilation(
           member,
           {
@@ -233,6 +269,7 @@ export async function buildConvexWasmGeneratedCLinkInput({
         size: archive.entry.artifactSize,
       },
       objects,
+      ...(retainedLayoutOutput === undefined ? {} : { retainedLayout: retainedLayoutOutput }),
       source,
     };
   } finally {

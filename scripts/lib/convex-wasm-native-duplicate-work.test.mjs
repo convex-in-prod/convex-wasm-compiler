@@ -75,6 +75,25 @@ function inputForIdentity(identity) {
   });
 }
 
+test("member-local object identity permits only valid positional changes in reports", () => {
+  const identity = memberIdentity();
+  identity.kind = "convex-wasm-static-hermes-c-bundle-member-object-v2";
+  const input = inputForIdentity(identity);
+  const record = work(input, "hit", null);
+  record.member.firstFunctionId = 27;
+  record.member.lastFunctionId = 27;
+  assert.equal(analyzeConvexWasmNativeMemberObjectWork([record]).summary.cacheHitCount, 1);
+  assert.throws(() => analyzeConvexWasmNativeMemberObjectWork([{
+    ...record, member: { ...record.member, lastFunctionId: 28 },
+  }]), /function range and count disagree/u);
+  assert.throws(() => analyzeConvexWasmNativeMemberObjectWork([{
+    ...record, member: { ...record.member, path: "different.c" },
+  }]), /disagrees with its authenticated generated-C input/u);
+  identity.generatedC.member.firstFunctionId = 27;
+  identity.generatedC.member.lastFunctionId = 27;
+  assert.throws(() => inputForIdentity(identity), /member-local function range/u);
+});
+
 test("reports only measured duplicate native member work with an authenticated input", () => {
   const input = inputForIdentity(memberIdentity());
   const report = analyzeConvexWasmNativeMemberObjectWork([
@@ -360,6 +379,6 @@ test("rejects incomplete or inconsistent native batch evidence", () => {
       analyzeConvexWasmNativeMemberObjectWork([
         { ...work(firstInput, "miss", timing), member: { path: "other.c", role: "function" } },
       ]),
-    /member disagrees with its authenticated generated-C input/u
+    /member must contain exactly/u
   );
 });

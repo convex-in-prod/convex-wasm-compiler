@@ -1,3 +1,11 @@
+import {
+  readStaticHermesPrecompileResponse,
+} from "./convex-wasm-static-hermes-precompile-protocol.mjs";
+import { prepareStaticHermesSourceInput } from "./convex-wasm-static-hermes-stage.mjs";
+import {
+  planStaticHermesRetainedLayout,
+  publishStaticHermesRetainedLayout,
+} from "./convex-wasm-static-hermes-layout-cache.mjs";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
@@ -279,8 +287,6 @@ const CAPABILITY_ENTRY_MANIFEST_KIND = "convex-wasm-capability-entry-manifest-v2
 const CAPABILITY_ENTRY_PACKAGE_KIND = "convex-wasm-capability-entry-package-v2";
 const CAPABILITY_ENTRY_PROVENANCE_KIND = "convex-wasm-capability-entry-provenance-v3";
 const COHORT_ROUTE_STATE_KIND = "convex-wasm-cohort-route-state-v1";
-const STATIC_HERMES_PRECOMPILE_REQUEST_KIND = "convex-wasm-static-hermes-precompile-request-v1";
-const STATIC_HERMES_PRECOMPILE_RESPONSE_KIND = "convex-wasm-static-hermes-precompile-response-v1";
 const STATIC_HERMES_SOURCE_REJECTION_KIND = "convex-wasm-static-hermes-source-incompatibility-v1";
 const STATIC_HERMES_SOURCE_REJECTION_CATEGORIES = new Set([
   "flow-type-incompatible-binary-operation",
@@ -4433,8 +4439,10 @@ export async function startConvexWasmCapabilitySharedGeneratedCPrewarmInMaterial
       runArtifactPhase,
       speculative: true,
     };
-    const bridgePlan = planCapabilityBridgeGeneratedC(sharedPlanOptions);
-    const formatterPlan = planCapabilityFormatterGeneratedC(sharedPlanOptions);
+    const [bridgePlan, formatterPlan] = await settleConcurrentWork([
+      planCapabilityBridgeGeneratedC(sharedPlanOptions),
+      planCapabilityFormatterGeneratedC(sharedPlanOptions),
+    ]);
     const bridgePrewarm = ensureMaterialSessionSharedArtifactStage(
       record,
       bridgePlan.generatedCStageOptions,
@@ -4891,11 +4899,17 @@ function staticHermesCBundleMemberObjectIdentity({
       header: bundle.header,
       member: {
         ...staticHermesCBundleMemberTimingIdentity(member),
+        // Dense bundle coverage changes when another shard gains or loses a
+        // function. Only the member's local extent belongs in its object key;
+        // exact source/header bytes and effective compile policy stay bound.
+        ...(member.role === "function"
+          ? { firstFunctionId: 0, lastFunctionId: member.functionCount - 1 }
+          : {}),
         sha256: member.sha256,
         size: member.size,
       },
     },
-    kind: "convex-wasm-static-hermes-c-bundle-member-object-v1",
+    kind: "convex-wasm-static-hermes-c-bundle-member-object-v2",
     runtimeHeaders: materials.runtimeHeaders.sha256,
     ...(runtimePreludePch === undefined
       ? {}
@@ -6130,40 +6144,6 @@ class StaticHermesSourceRejection extends Error {
   }
 }
 
-function normalizeStaticHermesSourceRejection(value, description) {
-  assertPlainObject(value, description);
-  assertExactKeys(value, new Set(["diagnostics", "kind", "rawDiagnosticSha256"]), description);
-  if (value.kind !== "sourceRejected") {
-    fail(`${description}.kind must be sourceRejected`);
-  }
-  if (!Array.isArray(value.diagnostics) || value.diagnostics.length === 0) {
-    fail(`${description}.diagnostics must be a nonempty array`);
-  }
-  if (value.diagnostics.length > 256) {
-    fail(`${description}.diagnostics must contain at most 256 entries`);
-  }
-  return {
-    diagnostics: value.diagnostics.map((diagnostic, index) => {
-      const diagnosticDescription = `${description}.diagnostics[${index}]`;
-      assertPlainObject(diagnostic, diagnosticDescription);
-      assertExactKeys(diagnostic, new Set(["category", "column", "line"]), diagnosticDescription);
-      if (!STATIC_HERMES_SOURCE_REJECTION_CATEGORIES.has(diagnostic.category)) {
-        fail(`${diagnosticDescription}.category is unsupported`);
-      }
-      return {
-        category: diagnostic.category,
-        column: requirePositiveU32(diagnostic.column, `${diagnosticDescription}.column`),
-        line: requirePositiveU32(diagnostic.line, `${diagnosticDescription}.line`),
-      };
-    }),
-    kind: "sourceRejected",
-    rawDiagnosticSha256: requireSha256(
-      value.rawDiagnosticSha256,
-      `${description}.rawDiagnosticSha256`
-    ),
-  };
-}
-
 function mapStaticHermesSourceRejection(rejection, provenance) {
   const diagnostics = rejection.diagnostics.map((diagnostic, index) => {
     const unit = provenance.units.find(
@@ -6192,96 +6172,6 @@ function mapStaticHermesSourceRejection(rejection, provenance) {
     },
     "mapped Static Hermes source rejection"
   );
-}
-
-function staticHermesCompilerMaterial(materials) {
-  const compiler = materials.staticHermes.entries.find(
-    ({ label }) => label === "static-hermes-executable"
-  );
-  if (
-    compiler === undefined ||
-    !Number.isSafeInteger(compiler.size) ||
-    compiler.size <= 0 ||
-    !SHA256_PATTERN.test(compiler.sha256)
-  ) {
-    fail("Static Hermes material identity does not contain its compiler executable");
-  }
-  return { sha256: compiler.sha256, size: compiler.size };
-}
-
-function createStaticHermesPrecompileRequest(command, generatedSource, materials) {
-  const separator = command.args.indexOf("--");
-  if (separator < 0 || command.args.indexOf("--", separator + 1) >= 0) {
-    fail("Static Hermes launcher command must contain exactly one argument separator");
-  }
-  return normalizeJson(
-    {
-      argumentsSha256: fingerprintJson(command.args.slice(separator + 1)),
-      compiler: staticHermesCompilerMaterial(materials),
-      generatedSource,
-      kind: STATIC_HERMES_PRECOMPILE_REQUEST_KIND,
-      materialSha256: materials.staticHermes.sha256,
-      nonce: randomBytes(32).toString("hex"),
-      schemaVersion: 1,
-    },
-    "Static Hermes precompile request"
-  );
-}
-
-async function readStaticHermesPrecompileResponse(path, request) {
-  const source = decodeUtf8(
-    await readPrivateRegularFile(
-      path,
-      MAX_STATIC_HERMES_RESPONSE_BYTES,
-      "Static Hermes precompile response"
-    ),
-    "Static Hermes precompile response"
-  );
-  let response;
-  try {
-    response = JSON.parse(source);
-  } catch (error) {
-    throw new Error("Convex Wasm artifact pipeline: Static Hermes response is not valid JSON", {
-      cause: error,
-    });
-  }
-  assertPlainObject(response, "Static Hermes precompile response");
-  assertExactKeys(
-    response,
-    new Set(["kind", "requestSha256", "result", "schemaVersion"]),
-    "Static Hermes precompile response"
-  );
-  if (response.kind !== STATIC_HERMES_PRECOMPILE_RESPONSE_KIND || response.schemaVersion !== 1) {
-    fail("Static Hermes precompile response kind or schema version is unsupported");
-  }
-  if (response.requestSha256 !== fingerprintJson(request)) {
-    fail("Static Hermes precompile response does not match its authenticated request");
-  }
-  if (`${canonicalJson(response)}\n` !== source) {
-    fail("Static Hermes precompile response is not canonical JSON");
-  }
-  assertPlainObject(response.result, "Static Hermes precompile result");
-  requireString(response.result.kind, "Static Hermes precompile result kind");
-  if (response.result.kind === "success") {
-    const hasOutput = Object.hasOwn(response.result, "output");
-    assertExactKeys(
-      response.result,
-      new Set(hasOutput ? ["kind", "output"] : ["kind"]),
-      "Static Hermes success result"
-    );
-    return {
-      kind: "success",
-      ...(hasOutput
-        ? {
-            output: normalizeStaticHermesCBundleOutput(
-              response.result.output,
-              "Static Hermes C bundle output"
-            ),
-          }
-        : {}),
-    };
-  }
-  return normalizeStaticHermesSourceRejection(response.result, "Static Hermes source rejection");
 }
 
 async function writeNewFile(path, contents) {
@@ -9394,6 +9284,7 @@ async function ensureStaticHermesGeneratedCStage(
         )
     );
     if (cached !== undefined) {
+      await publishStaticHermesRetainedLayout({ cacheLayout, generatedCEntry: cached });
       activityResult = { cache: "hit" };
       activityCompleted = true;
       return {
@@ -9440,6 +9331,7 @@ async function ensureStaticHermesGeneratedCStage(
             stage,
           })
       );
+      await publishStaticHermesRetainedLayout({ cacheLayout, generatedCEntry: entry });
       activityResult = { cache: "miss" };
       return {
         entry,
@@ -25491,7 +25383,7 @@ function createArtifactPhaseRunner({
   };
 }
 
-function planCapabilityBridgeGeneratedC({
+async function planCapabilityBridgeGeneratedC({
   automaticMaterials,
   boundedCommandConfig,
   cBundleMemberScheduler,
@@ -25539,7 +25431,7 @@ function planCapabilityBridgeGeneratedC({
       ),
     },
   });
-  const generatedCIdentity = nativeStageIdentity({
+  const unseededGeneratedCIdentity = nativeStageIdentity({
     effectExecutionMode: options.effectExecutionMode,
     exportedUnitName: CAPABILITY_BRIDGE_EXPORTED_UNIT_NAME,
     flags: options.toolchain.staticHermes.flags,
@@ -25560,6 +25452,11 @@ function planCapabilityBridgeGeneratedC({
     valueCodec,
     valueMode: options.valueMode,
   });
+  const { identity: generatedCIdentity, retainedLayout } = await planStaticHermesRetainedLayout({
+    cacheLayout: options.cacheLayout,
+    generatedCIdentity: unseededGeneratedCIdentity,
+    stage: "capability-bridge-generated-c",
+  });
   const bundleOutput = staticHermesCBundleEnabled(options.toolchain.staticHermes.flags);
   return {
     commands,
@@ -25567,18 +25464,12 @@ function planCapabilityBridgeGeneratedC({
     generatedCStageOptions: {
       bundleOutput,
       build: async (workPath) => {
-        const request = createStaticHermesPrecompileRequest(
-          commands.staticHermes,
-          generatedSource,
-          materials
-        );
-        await settleConcurrentWork([
-          fs.writeFile(join(workPath, "input.js"), bridgeJavaScript, { mode: 0o600 }),
-          writeNewFile(join(workPath, "static-hermes-request.json"), `${canonicalJson(request)}\n`),
-        ]);
+        const { command: invocationCommand, request } = await prepareStaticHermesSourceInput({
+          command: commands.staticHermes, generatedJavaScript: bridgeJavaScript, materials, retainedLayout, workPath,
+        });
         const timing = await runArtifactPhase(
           "capability-bridge-generated-c",
-          commands.staticHermes,
+          invocationCommand,
           "Static Hermes shared capability-bridge C generation",
           workPath,
           join(workPath, "time.json"),
@@ -25631,7 +25522,7 @@ function planCapabilityBridgeGeneratedC({
   };
 }
 
-function planCapabilityFormatterGeneratedC({
+async function planCapabilityFormatterGeneratedC({
   automaticMaterials,
   boundedCommandConfig,
   cBundleMemberScheduler,
@@ -25669,7 +25560,7 @@ function planCapabilityFormatterGeneratedC({
       ),
     },
   });
-  const generatedCIdentity = nativeStageIdentity({
+  const unseededGeneratedCIdentity = nativeStageIdentity({
     exportedUnitName: CAPABILITY_FORMATTER_EXPORTED_UNIT_NAME,
     flags,
     generatedSource,
@@ -25685,6 +25576,11 @@ function planCapabilityFormatterGeneratedC({
     },
     unitRole: "shared-untyped-runtime-support",
   });
+  const { identity: generatedCIdentity, retainedLayout } = await planStaticHermesRetainedLayout({
+    cacheLayout: options.cacheLayout,
+    generatedCIdentity: unseededGeneratedCIdentity,
+    stage: "console-formatter-generated-c",
+  });
   const bundleOutput = staticHermesCBundleEnabled(flags);
   return {
     commands,
@@ -25692,21 +25588,12 @@ function planCapabilityFormatterGeneratedC({
     generatedCStageOptions: {
       bundleOutput,
       build: async (workPath) => {
-        const request = createStaticHermesPrecompileRequest(
-          commands.staticHermesApplication,
-          generatedSource,
-          materials
-        );
-        await settleConcurrentWork([
-          fs.writeFile(join(workPath, "input.js"), formatterJavaScript, { mode: 0o600 }),
-          writeNewFile(
-            join(workPath, "application-static-hermes-request.json"),
-            `${canonicalJson(request)}\n`
-          ),
-        ]);
+        const { command: invocationCommand, request } = await prepareStaticHermesSourceInput({
+          command: commands.staticHermesApplication, generatedJavaScript: formatterJavaScript, materials, retainedLayout, workPath,
+        });
         const timing = await runArtifactPhase(
           "console-formatter-generated-c",
-          commands.staticHermesApplication,
+          invocationCommand,
           "Static Hermes shared runtime-support C generation",
           workPath,
           join(workPath, "time.json"),
@@ -26059,7 +25946,7 @@ async function compileNormalizedConvexWasmCohorts(
     let capabilitySharedReports = [];
     let capabilitySharedSupportPromise;
     if (options.capabilityEntry !== undefined) {
-      const bridgeGeneratedCPlan = planCapabilityBridgeGeneratedC({
+      const bridgeGeneratedCPlan = await planCapabilityBridgeGeneratedC({
         automaticMaterials,
         boundedCommandConfig,
         cBundleMemberScheduler,
@@ -26208,7 +26095,7 @@ async function compileNormalizedConvexWasmCohorts(
         moduleGraphPhysicalUnitPreactivation === undefined
           ? capabilitySharedSupportOrchestrator.run(async () => {
               const reports = [];
-              const formatterGeneratedCPlan = planCapabilityFormatterGeneratedC({
+              const formatterGeneratedCPlan = await planCapabilityFormatterGeneratedC({
                 automaticMaterials,
                 boundedCommandConfig,
                 cBundleMemberScheduler,
@@ -26576,7 +26463,7 @@ async function compileNormalizedConvexWasmCohorts(
         ),
         revision: options.toolchain.staticHermes.revision,
       };
-      const generatedCIdentity =
+      const unseededGeneratedCIdentity =
         physicalChunkUnit === undefined
           ? nativeStageIdentity({
               ...(member.capabilityEntry === undefined
@@ -26631,6 +26518,11 @@ async function compileNormalizedConvexWasmCohorts(
               unit: physicalChunkUnit,
               valueMode: memberOptions.valueMode,
             });
+      const { identity: generatedCIdentity, retainedLayout } = await planStaticHermesRetainedLayout({
+        cacheLayout: options.cacheLayout,
+        generatedCIdentity: unseededGeneratedCIdentity,
+        stage: "generated-c",
+      });
       const generatedCKey = fingerprintJson({
         identity: generatedCIdentity,
         kind: PIPELINE_KIND,
@@ -26781,29 +26673,17 @@ async function compileNormalizedConvexWasmCohorts(
                 member.capabilityEntry === undefined
                   ? commands.staticHermes
                   : commands.staticHermesApplication;
-              const inputFileName = "input.js";
-              const requestFileName =
-                member.capabilityEntry === undefined
-                  ? "static-hermes-request.json"
-                  : "application-static-hermes-request.json";
-              const responseFileName =
-                member.capabilityEntry === undefined
-                  ? "static-hermes-response.json"
-                  : "application-static-hermes-response.json";
-              const request = createStaticHermesPrecompileRequest(
-                staticHermesCommand,
-                generatedSource,
-                materials
-              );
-              await settleConcurrentWork([
-                fs.writeFile(join(workPath, inputFileName), generatedJavaScriptInput, {
-                  mode: 0o600,
-                }),
-                writeNewFile(join(workPath, requestFileName), `${canonicalJson(request)}\n`),
-              ]);
+              const { command: invocationCommand, request, responsePath, generatedSource: stagedSource } =
+                await prepareStaticHermesSourceInput({
+                  command: staticHermesCommand, generatedJavaScript: generatedJavaScriptInput,
+                  materials, retainedLayout, workPath,
+                });
+              if (stagedSource.sha256 !== generatedSource.sha256 || stagedSource.size !== generatedSource.size) {
+                fail("Static Hermes staged source does not match its planned identity");
+              }
               const timing = await runArtifactPhase(
                 "generated-c",
-                staticHermesCommand,
+                invocationCommand,
                 member.capabilityEntry === undefined
                   ? "Static Hermes C generation"
                   : "Static Hermes untyped application C generation",
@@ -26818,7 +26698,7 @@ async function compileNormalizedConvexWasmCohorts(
                 }
               );
               const [response] = await settleConcurrentWork([
-                readStaticHermesPrecompileResponse(join(workPath, responseFileName), request),
+                readStaticHermesPrecompileResponse(responsePath, request),
                 verifyMaterials(
                   automaticMaterials.staticHermes,
                   materials.staticHermes,

@@ -27,6 +27,11 @@ import {
   sweepConvexWasmImmutableGc,
 } from "./convex-wasm-cache-retention-immutable.mjs";
 import { loadOrCreateConvexWasmRuntimeHeaderSnapshotCache } from "./convex-wasm-runtime-header-snapshot-cache.mjs";
+import {
+  planStaticHermesRetainedLayout,
+  publishStaticHermesRetainedLayout,
+  staticHermesLayoutCacheReferences,
+} from "./convex-wasm-static-hermes-layout-cache.mjs";
 
 async function fixture(t) {
   const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-cache-retention-"));
@@ -219,7 +224,7 @@ async function writeLegacyV2ModuleGraphPackage(cacheLayout) {
   return { aot, artifacts, coreWasm, entry, key, manifest, provenance, root };
 }
 
-async function writeCBundleArtifact({ cacheLayout, complete = true, functionCount = 1, stage }) {
+async function writeCBundleArtifact({ cacheLayout, complete = true, functionCount = 1, identity: rawIdentity, retainedLayout, stage }) {
   const sources = new Map([
     ["unit.h", "#define SH_UNIT 1\n"],
     ["metadata.c", "const int metadata = 1;\n"],
@@ -256,6 +261,11 @@ async function writeCBundleArtifact({ cacheLayout, complete = true, functionCoun
     schemaVersion: 1,
     translationUnits,
   };
+  if (retainedLayout !== undefined) {
+    const path = "sh_this_unit_layout.json";
+    sources.set(path, retainedLayout);
+    manifest.layout = { path, sha256: createHash("sha256").update(retainedLayout).digest("hex"), size: Buffer.byteLength(retainedLayout) };
+  }
   const manifestSource = `${canonicalJson(manifest)}\n`;
   const bundle = {
     ...manifest,
@@ -265,7 +275,7 @@ async function writeCBundleArtifact({ cacheLayout, complete = true, functionCoun
       size: Buffer.byteLength(manifestSource),
     },
   };
-  const identity = { fixture: "cache-retention-c-bundle", stage };
+  const identity = rawIdentity ?? { fixture: "cache-retention-c-bundle", stage };
   const key = fingerprintJson({
     identity,
     kind: "convex-wasm-artifact-pipeline-v9",
@@ -2910,6 +2920,56 @@ test("immutable GC ignores stale package publication scratch", async (t) => {
   assert.ok(plan.categories.planningOnlyCandidates.allocatedBytes > 0);
   assert.equal(plan.categories.sweepableCandidates.count, 0);
   assert.ok(plan.retained.artifacts.length > 0);
+});
+
+test("immutable GC authenticates retained layout bytes before admitting a C bundle", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("retained-layout");
+  const artifact = await writeCBundleArtifact({
+    cacheLayout, retainedLayout: '{"kind":"static-hermes-c-layout-v1"}\n', stage: "retained-layout",
+  });
+  const options = {
+    cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+    nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+  };
+  const valid = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
+  assert.equal(valid.authenticated.invalid, 0);
+  assert.ok(valid.evictions.some(({ key }) => key === artifact.key));
+  await fs.writeFile(join(artifact.root, artifact.entry.bundle.layout.path), Buffer.alloc(artifact.entry.bundle.layout.size, 32));
+  const corrupt = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
+  assert.equal(corrupt.authenticated.invalid, 1);
+  assert.ok(corrupt.evictions.every(({ key }) => key !== artifact.key));
+});
+
+test("immutable GC preserves layout choices with their retained C bundles", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("layout-closure");
+  await fs.mkdir(cacheLayout.cacheRoot, { mode: 0o700 });
+  const generatedCIdentity = {
+    exportedUnitName: "this_unit", flags: ["-Xemit-c-bundle", "-Xemit-c-layout"],
+    generatedSource: { sha256: "a".repeat(64), size: 10 },
+    semanticEnvironment: { LANG: "C" }, staticHermes: { materials: "b".repeat(64) },
+    unitRole: "untyped-official-chunk",
+  };
+  const selection = await planStaticHermesRetainedLayout({ cacheLayout, generatedCIdentity, stage: "generated-c" });
+  const artifact = await writeCBundleArtifact({
+    cacheLayout, stage: "generated-c", identity: selection.identity,
+    retainedLayout: '{"kind":"static-hermes-c-layout-v1","unitName":"this_unit"}\n',
+  });
+  await publishStaticHermesRetainedLayout({ cacheLayout, generatedCEntry: { ...artifact.entry, bundlePath: artifact.root } });
+  const references = staticHermesLayoutCacheReferences(selection.identity, "generated-c");
+  for (const reference of references) await ageGenericArtifact(cacheLayout, reference);
+  const options = {
+    cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+    nowMs: Date.now(), recentRetentionMilliseconds: 60_000,
+  };
+  const live = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
+  assert.equal(live.authenticated.invalid, 0);
+  for (const { key, stage } of references) assert.ok(live.retained.artifacts.includes(`${stage}\0${key}`));
+  assert.equal(live.evictions.length, 0);
+  await ageGenericArtifact(cacheLayout, artifact);
+  const obsolete = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
+  for (const { key } of [...references, artifact]) assert.ok(obsolete.evictions.some((entry) => entry.key === key));
 });
 
 test("immutable GC never selects an incomplete C bundle as authenticated garbage", async (t) => {

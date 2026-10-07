@@ -11,6 +11,7 @@ import {
 import { decodeUtf8, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
 import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import { validateArtifactCacheEntry } from "./convex-wasm-artifact-cache-entry.mjs";
+import { staticHermesLayoutCacheReferences } from "./convex-wasm-static-hermes-layout-cache.mjs";
 import {
   authenticateStaticHermesCBundle,
   normalizeStaticHermesCBundleOutput,
@@ -3205,6 +3206,16 @@ export async function planConvexWasmImmutableGc({
   for (const record of artifacts) {
     if (record.authenticated && record.mtimeMs >= recentCutoffMs)
       retainedArtifactKeys.add(`${record.stage}\0${record.key}`);
+  }
+  // Retain each live bundle's pinned input and published output. These small entries preserve
+  // unchanged-build identities and the next edit's seed without retaining historical C bundles.
+  for (const record of artifacts) {
+    if (record.type !== "c-bundle" || !retainedArtifactKeys.has(`${record.stage}\0${record.key}`)) continue;
+    for (const reference of staticHermesLayoutCacheReferences(record.entry.identity, record.stage)) {
+      const key = `${reference.stage}\0${reference.key}`;
+      // Layout entries may already have been evicted independently by an older cache manager.
+      if (artifactRecordsByKey.has(key)) retainArtifact(key);
+    }
   }
   for (const record of artifacts) {
     if (retainedArtifactKeys.has(`${record.stage}\0${record.key}`)) retainedPaths.add(record.path);

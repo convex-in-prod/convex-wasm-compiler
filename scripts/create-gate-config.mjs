@@ -452,6 +452,7 @@ export function createStaticHermesGateArtifactConfig({
           "-emit-c",
           "-Xemit-c-bundle",
           "-Xemit-c-shard-size=2097152",
+          "-Xemit-c-layout",
         ],
         materialInputs: [],
         revision: gateRevisions.hermes,
