@@ -270,6 +270,14 @@ Without `--backend-report`, `producerCertificate` must already name a complete
 `convex-runtime-content-producer-certificate-v1` file for that backend image and
 helper. This package does not supply the patched backend image or helper.
 
+For replay to another backend, `deriveTargetBoundSourcePackage` in
+`scripts/lib/convex-wasm-preactivation-runtime-authority.mjs` reconstructs the
+destination archive using its immutable backend image and authenticated dependency
+descriptor and bytes. It verifies the original runtime-content identity while
+returning the destination ZIP hash and size. Keep the original frozen authority;
+bind this destination identity separately before activation and verify it afterward.
+The caller owns target inspection, scratch-directory selection, and activation.
+
 The reusable certificate and authority-cache operations live in
 `scripts/lib/source-producer-conformance.mjs` and
 `scripts/lib/source-authority-cache.mjs`. Backend
@@ -315,6 +323,13 @@ registries only; it does not append a generation to an existing local registry.
 Run the patched backend's registry preflight against the published directory
 before treating it as backend-accepted. Transfer, backend readiness, and
 activation remain separate steps.
+
+Registry publishers share `prepareRuntimeRegistryArtifactPublication` in
+`scripts/lib/runtime-registry-publication.mjs`. It removes cache-local physical
+receipts from new entry metadata before generation identity is computed. When
+an existing entry is supplied, it preserves its exact bytes only after every
+non-receipt field matches. Publishers still authenticate payloads and recheck
+source metadata when writing the prepared records.
 
 `deriveRuntimeRegistryTransferPlan` in
 `scripts/lib/runtime-registry-transfer-closure.mjs` accepts the patched

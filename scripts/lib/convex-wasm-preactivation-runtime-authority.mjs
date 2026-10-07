@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   createFrozenGraphInputAuthority,
@@ -278,6 +278,42 @@ export function normalizePreactivationHelperAuthority(
   value,
   { producerCertificate, sourcePackage, startPushBytes, targetExternalDepsPackage }
 ) {
+  const requestValue = JSON.parse(startPushBytes.toString("utf8"));
+  if (requestValue.externalDepsPackage !== undefined) {
+    const selected = validateTargetExternalDepsDescriptor(
+      targetExternalDepsPackage,
+      requestValue.nodeDependencies
+    );
+    if (
+      canonicalJson(requestValue.externalDepsPackage) !==
+      canonicalJson({ id: selected.id, sha256: selected.sha256 })
+    ) {
+      fail("target dependency selection differs from frozen request");
+    }
+  } else if (targetExternalDepsPackage !== undefined) {
+    fail("target dependency material requires an explicitly bound request");
+  }
+  const certifiedExternal = targetExternalDepsPackage === undefined
+    ? producerCertificate.externalDepsPackage : targetExternalDepsPackage;
+  if (producerCertificate.identity.runtimeContentAlgorithm !== convexRuntimeContentAlgorithm) {
+    fail("helper dependency material differs from the admitted material or producer conformance");
+  }
+  return normalizeMaterializedSourcePackageAuthority(value, {
+    sourcePackage,
+    startPushBytes,
+    expectedExternal: certifiedExternal === null ? null : {
+      dependencies: producerCertificate.identity.dependencies,
+      sha256: certifiedExternal.sha256,
+      size: certifiedExternal.size,
+      storageKey: certifiedExternal.storageKey,
+    },
+  });
+}
+
+function normalizeMaterializedSourcePackageAuthority(
+  value,
+  { sourcePackage, startPushBytes, expectedExternal }
+) {
   const authority = requireExactKeys(
     value,
     [
@@ -368,39 +404,7 @@ export function normalizePreactivationHelperAuthority(
             ),
           };
         })();
-  const requestValue = JSON.parse(startPushBytes.toString("utf8"));
-  if (requestValue.externalDepsPackage !== undefined) {
-    const selected = validateTargetExternalDepsDescriptor(
-      targetExternalDepsPackage,
-      requestValue.nodeDependencies
-    );
-    if (
-      canonicalJson(requestValue.externalDepsPackage) !==
-      canonicalJson({ id: selected.id, sha256: selected.sha256 })
-    ) {
-      fail("target dependency selection differs from frozen request");
-    }
-  } else if (targetExternalDepsPackage !== undefined) {
-    fail("target dependency material requires an explicitly bound request");
-  }
-  const certifiedExternal =
-    targetExternalDepsPackage === undefined
-      ? producerCertificate.externalDepsPackage
-      : targetExternalDepsPackage;
-  if (
-    canonicalJson(externalDepsPackage) !==
-      canonicalJson(
-        certifiedExternal === null
-          ? null
-          : {
-              dependencies: producerCertificate.identity.dependencies,
-              sha256: certifiedExternal.sha256,
-              size: certifiedExternal.size,
-              storageKey: certifiedExternal.storageKey,
-            }
-      ) ||
-    producerCertificate.identity.runtimeContentAlgorithm !== authority.runtimeContentAlgorithm
-  ) {
+  if (canonicalJson(externalDepsPackage) !== canonicalJson(expectedExternal)) {
     fail("helper dependency material differs from the admitted material or producer conformance");
   }
   return {
@@ -649,6 +653,104 @@ export async function executeRuntimeContentHelperInBackendImage({
       stdio: "ignore",
       timeout: 10_000,
     });
+  }
+}
+
+export async function deriveTargetBoundSourcePackage(
+  {
+    backendImageId,
+    expectedRuntimeContentSha256,
+    externalDepsPackage,
+    scratchDirectory,
+    startPushBytes,
+  },
+  { executeHelperImplementation = executeRuntimeContentHelperInBackendImage } = {}
+) {
+  requireSha256(expectedRuntimeContentSha256, "expected runtime-content SHA-256");
+  if (typeof backendImageId !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(backendImageId)) {
+    fail("backend image ID must be an immutable SHA-256 identity");
+  }
+  if (!Buffer.isBuffer(startPushBytes) || startPushBytes.length === 0 ||
+      startPushBytes.length > SOURCE_PACKAGE_MAX_BYTES) {
+    fail("target start_push bytes must be a bounded nonempty buffer");
+  }
+  // Retain owned inputs across asynchronous helper execution. Neither a caller's
+  // mutable buffer nor an edited source path may change the authenticated archive.
+  const requestBytes = Buffer.from(startPushBytes);
+  const request = JSON.parse(requestBytes.toString("utf8"));
+  if (!Array.isArray(request.nodeDependencies) ||
+      (request.nodeDependencies.length > 0) !== (request.externalDepsPackage !== undefined)) {
+    fail("target request requires an exact selection for its Node dependencies");
+  }
+  let descriptor;
+  let externalBytes;
+  if (request.externalDepsPackage !== undefined) {
+    requireExactKeys(externalDepsPackage, ["bytes", "descriptor"], "target dependency material");
+    descriptor = validateTargetExternalDepsDescriptor(
+      externalDepsPackage.descriptor, request.nodeDependencies
+    );
+    if (canonicalJson(request.externalDepsPackage) !==
+        canonicalJson({ id: descriptor.id, sha256: descriptor.sha256 })) {
+      fail("target dependency selection differs from frozen request");
+    }
+    if (!Buffer.isBuffer(externalDepsPackage.bytes) ||
+        externalDepsPackage.bytes.length !== descriptor.size ||
+        sha256(externalDepsPackage.bytes) !== descriptor.sha256) {
+      fail("target dependency archive differs from its authenticated descriptor");
+    }
+    externalBytes = Buffer.from(externalDepsPackage.bytes);
+  } else if (externalDepsPackage !== null) {
+    fail("target dependency material requires an explicitly bound request");
+  }
+  if (typeof scratchDirectory !== "string" || !isAbsolute(scratchDirectory) ||
+      await fs.realpath(scratchDirectory) !== scratchDirectory) {
+    fail("target source-package scratch directory must be canonical and absolute");
+  }
+  const directoryStatus = await fs.lstat(scratchDirectory);
+  if (!directoryStatus.isDirectory() || (directoryStatus.mode & 0o777) !== 0o700 ||
+      (typeof process.getuid === "function" && directoryStatus.uid !== process.getuid())) {
+    fail("target source-package scratch directory must be owner-private");
+  }
+  const scratch = await fs.mkdtemp(join(scratchDirectory, ".target-source-package-"));
+  try {
+    const startPushPath = join(scratch, "start-push.json");
+    const sourcePackageOutputPath = join(scratch, "source-package.zip");
+    await fs.writeFile(startPushPath, requestBytes, { flag: "wx", mode: 0o600 });
+    const externalDepsPackagePath = externalBytes === undefined
+      ? undefined : join(scratch, "external-deps.zip");
+    if (externalDepsPackagePath !== undefined) {
+      await fs.writeFile(externalDepsPackagePath, externalBytes, { flag: "wx", mode: 0o600 });
+    }
+    const authority = await executeHelperImplementation({
+      backendImageId,
+      externalDepsPackagePath,
+      externalDepsStorageKey: descriptor?.storageKey,
+      sourcePackageOutputPath,
+      startPushPath,
+    });
+    const sourcePackage = await readAndHashPrivateOutputFile(
+      sourcePackageOutputPath, "target source package"
+    );
+    const derivation = normalizeMaterializedSourcePackageAuthority(authority, {
+      sourcePackage,
+      startPushBytes: requestBytes,
+      expectedExternal: descriptor === undefined ? null : {
+        dependencies: descriptor.dependencies,
+        sha256: descriptor.sha256,
+        size: descriptor.size,
+        storageKey: descriptor.storageKey,
+      },
+    });
+    if (derivation.runtimeContentSha256 !== expectedRuntimeContentSha256) {
+      fail("target source package differs from the authenticated frozen runtime content");
+    }
+    return Object.freeze({
+      runtimeContentSha256: derivation.runtimeContentSha256,
+      sha256: sourcePackage.sha256,
+      size: sourcePackage.size,
+    });
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
   }
 }
 

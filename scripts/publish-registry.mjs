@@ -21,7 +21,10 @@ import {
   createRuntimeRegistryModuleGraphGeneration,
   createRuntimeRegistryModuleGraphRecord,
 } from "./lib/runtime-registry-generation.mjs";
-import { publishFreshRuntimeRegistry } from "./lib/runtime-registry-publication.mjs";
+import {
+  prepareFreshRuntimeRegistryModuleGraphs,
+  publishFreshRuntimeRegistry,
+} from "./lib/runtime-registry-publication.mjs";
 
 function parseArguments(argv) {
   const required = new Set([
@@ -150,7 +153,7 @@ export async function publishConvexWasmProjectRegistry({
     cacheRoot,
     repositoryRoot: config.projectRoot,
   });
-  const moduleGraphs = [];
+  const verifiedModuleGraphs = [];
   for (const graph of report.graphs) {
     const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
       cacheLayout,
@@ -158,11 +161,12 @@ export async function publishConvexWasmProjectRegistry({
       graphManifestSha256: graph.graphManifestSha256,
       packagePath: graph.packagePath,
     });
-    moduleGraphs.push({
+    verifiedModuleGraphs.push({
       cacheLayout,
       ...createRuntimeRegistryModuleGraphRecord(verified, cacheLayout),
     });
   }
+  const moduleGraphs = await prepareFreshRuntimeRegistryModuleGraphs(verifiedModuleGraphs);
   const deployment = await readConvexWasmPrivateEvidence(
     deploymentPath,
     "bound deployment manifest",

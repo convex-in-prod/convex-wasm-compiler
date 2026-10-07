@@ -13,6 +13,7 @@ import {
 import {
   convexRuntimeContentAlgorithm,
   createPreactivationRuntimeAuthority,
+  deriveTargetBoundSourcePackage,
   executeRuntimeContentHelperInBackendImage,
   inspectRuntimeContentHelper,
   normalizePreactivationHelperAuthority,
@@ -220,6 +221,119 @@ function fixture() {
     startPushBytes,
   };
 }
+
+function targetBoundFixture(directory, withDependencies = true) {
+  const value = fixture();
+  const descriptor = {
+    ...value.producerCertificate.externalDepsPackage,
+    dependencies: value.producerCertificate.identity.dependencies,
+    id: "destination-dependency-document",
+    kind: "convex-external-deps-package-v1",
+    storageKey: "destination-dependency-storage",
+  };
+  const request = JSON.parse(value.startPushBytes);
+  request.nodeDependencies = withDependencies
+    ? descriptor.dependencies.map(({ package: name, version }) => ({ name, version })) : [];
+  if (withDependencies) {
+    request.externalDepsPackage = { id: descriptor.id, sha256: descriptor.sha256 };
+  }
+  const startPushBytes = Buffer.from(`${canonicalJson(request)}\n`);
+  const sourcePackageBytes = Buffer.from("target-bound source package bytes");
+  const helperAuthority = {
+    ...value.helperAuthority,
+    externalDepsPackage: withDependencies ? {
+      ...value.helperAuthority.externalDepsPackage, storageKey: descriptor.storageKey,
+    } : null,
+    request: { sha256: digest(startPushBytes), size: startPushBytes.length },
+    sourcePackage: { sha256: digest(sourcePackageBytes), size: sourcePackageBytes.length },
+  };
+  return {
+    helperAuthority,
+    sourcePackageBytes,
+    input: {
+      backendImageId: `sha256:${"c".repeat(64)}`,
+      expectedRuntimeContentSha256: helperAuthority.runtimeContentSha256,
+      externalDepsPackage: withDependencies ? { bytes: value.externalDepsPackageBytes, descriptor } : null,
+      scratchDirectory: directory,
+      startPushBytes,
+    },
+  };
+}
+
+test("target-bound archive derivation preserves runtime identity and owns its helper inputs", async () => {
+  for (const withDependencies of [false, true]) {
+    await withTemporaryDirectory(async (directory) => {
+      const { input, helperAuthority, sourcePackageBytes } = targetBoundFixture(directory, withDependencies);
+      const expectedRequest = Buffer.from(input.startPushBytes);
+      const expectedExternal = withDependencies ? Buffer.from(input.externalDepsPackage.bytes) : null;
+      const result = await deriveTargetBoundSourcePackage(input, {
+        executeHelperImplementation: async (arguments_) => {
+          assert.equal(arguments_.backendImageId, input.backendImageId);
+          input.startPushBytes.fill(0);
+          if (withDependencies) input.externalDepsPackage.bytes.fill(0);
+          assert.deepEqual(await fs.readFile(arguments_.startPushPath), expectedRequest);
+          if (withDependencies) {
+            assert.deepEqual(await fs.readFile(arguments_.externalDepsPackagePath), expectedExternal);
+            assert.equal(arguments_.externalDepsStorageKey, "destination-dependency-storage");
+          } else {
+            assert.equal(arguments_.externalDepsPackagePath, undefined);
+            assert.equal(arguments_.externalDepsStorageKey, undefined);
+          }
+          await fs.writeFile(arguments_.sourcePackageOutputPath, sourcePackageBytes, { mode: 0o600 });
+          return helperAuthority;
+        },
+      });
+      assert.deepEqual(result, {
+        runtimeContentSha256: helperAuthority.runtimeContentSha256,
+        sha256: digest(sourcePackageBytes),
+        size: sourcePackageBytes.length,
+      });
+      assert.deepEqual(await fs.readdir(directory), []);
+    });
+  }
+});
+
+test("target-bound archive derivation rejects changed authority and cleans failed output", async () => {
+  for (const mutate of [
+    (value) => { value.request.sha256 = "0".repeat(64); },
+    (value) => { value.sourcePackage.sha256 = "0".repeat(64); },
+    (value) => { value.runtimeContentSha256 = "0".repeat(64); },
+    (value) => { value.externalDepsPackage.storageKey = "different-storage"; },
+    (value) => { value.runtimeModules[0].path = "unrequested.js"; },
+  ]) {
+    await withTemporaryDirectory(async (directory) => {
+      const { input, helperAuthority, sourcePackageBytes } = targetBoundFixture(directory);
+      mutate(helperAuthority);
+      await assert.rejects(() => deriveTargetBoundSourcePackage(input, {
+        executeHelperImplementation: async ({ sourcePackageOutputPath }) => {
+          await fs.writeFile(sourcePackageOutputPath, sourcePackageBytes, { mode: 0o600 });
+          return helperAuthority;
+        },
+      }), /differs|absent from the authenticated request/u);
+      assert.deepEqual(await fs.readdir(directory), []);
+    });
+  }
+});
+
+test("target-bound archive derivation rejects invalid dependency material before helper execution", async () => {
+  for (const mutate of [
+    (input) => { input.externalDepsPackage.bytes.fill(0); },
+    (input) => { input.externalDepsPackage.descriptor.id = "different-document"; },
+    (input) => { input.externalDepsPackage.descriptor.dependencies = []; },
+    (input) => { input.externalDepsPackage = null; },
+  ]) {
+    await withTemporaryDirectory(async (directory) => {
+      const { input } = targetBoundFixture(directory);
+      mutate(input);
+      let helperCalls = 0;
+      await assert.rejects(() => deriveTargetBoundSourcePackage(input, {
+        executeHelperImplementation: async () => { helperCalls += 1; },
+      }), /dependency|dependencies/u);
+      assert.equal(helperCalls, 0);
+      assert.deepEqual(await fs.readdir(directory), []);
+    });
+  }
+});
 
 test("direct preactivation authority binds canonical helper output to the frozen graph", async () => {
   await withTemporaryDirectory(async (directory) => {

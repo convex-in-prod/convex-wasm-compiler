@@ -3,10 +3,99 @@ import { createReadStream, constants, promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
+import { readConvexWasmPrivateEvidence } from "./convex-wasm-private-evidence.mjs";
 import { createRuntimeRegistrySourceCatalog } from "./runtime-registry-transfer-closure.mjs";
 
 function fail(message) {
   throw new Error(`Convex Wasm runtime registry publication: ${message}`);
+}
+
+export function prepareRuntimeRegistryArtifactPublication({
+  record,
+  sourceEntryBytes,
+  existingEntryBytes,
+}) {
+  const expected = record.files.find(({ name }) => name === "entry.json");
+  if (!Buffer.isBuffer(sourceEntryBytes) || expected === undefined ||
+      sourceEntryBytes.length !== expected.size ||
+      createHash("sha256").update(sourceEntryBytes).digest("hex") !== expected.sha256) {
+    fail("artifact metadata differs from its authenticated source record");
+  }
+  const parseEntry = (bytes) => {
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 16 * 1024 * 1024) {
+      fail("artifact metadata must be a bounded nonempty buffer");
+    }
+    const entry = JSON.parse(bytes.toString("utf8"));
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry) ||
+        !bytes.equals(Buffer.from(`${canonicalJson(entry)}\n`))) {
+      fail("artifact metadata must be a canonical object followed by one newline");
+    }
+    return entry;
+  };
+  const source = parseEntry(sourceEntryBytes);
+  if (!["coreWasm", "aot"].includes(record.kind) ||
+      source.kind !== "convex-wasm-artifact-cache-entry-v5" ||
+      source.key !== record.cacheKey || source.stage !== record.stage ||
+      source.artifactSha256 !== record.sha256 || source.artifactSize !== record.size ||
+      source.artifactFile !== (record.kind === "coreWasm" ? "artifact.wasm" : "artifact.cwasm")) {
+    fail("artifact metadata differs from its authenticated artifact reference");
+  }
+  const { admission: ignoredSourceAdmission, ...portable } = source;
+  let entrySource = `${canonicalJson(portable)}\n`;
+  if (existingEntryBytes !== null) {
+    const { admission: ignoredTargetAdmission, ...targetPortable } = parseEntry(existingEntryBytes);
+    if (canonicalJson(targetPortable) !== canonicalJson(portable)) {
+      fail("destination artifact metadata differs from its authenticated source record");
+    }
+    // Existing generations authenticate these exact bytes. A local admission
+    // receipt may differ, but no other field may change and no entry is rewritten.
+    entrySource = existingEntryBytes.toString("utf8");
+  }
+  const entryBytes = Buffer.from(entrySource);
+  return {
+    entrySource,
+    record: {
+      ...record,
+      files: record.files.map((file) => file.name === "entry.json" ? {
+        name: file.name,
+        sha256: createHash("sha256").update(entryBytes).digest("hex"),
+        size: entryBytes.length,
+      } : file),
+    },
+    sourceFiles: record.files,
+  };
+}
+
+export async function prepareFreshRuntimeRegistryModuleGraphs(moduleGraphs) {
+  const entries = new Map();
+  const result = [];
+  for (const graph of moduleGraphs) {
+    const artifactPublications = [];
+    for (const record of graph.record.artifacts) {
+      const sourcePath = join(
+        graph.cacheLayout.immutable.artifacts, record.stage, record.cacheKey, "entry.json"
+      );
+      const source = await readConvexWasmPrivateEvidence(
+        sourcePath, "artifact publication metadata", 16 * 1024 * 1024
+      );
+      const prepared = prepareRuntimeRegistryArtifactPublication({
+        record, sourceEntryBytes: source.bytes, existingEntryBytes: null,
+      });
+      const key = `${record.stage}/${record.cacheKey}`;
+      const previous = entries.get(key);
+      if (previous !== undefined && canonicalJson(previous.record) !== canonicalJson(prepared.record)) {
+        fail("module graphs disagree about one immutable artifact");
+      }
+      entries.set(key, prepared);
+      artifactPublications.push(prepared);
+    }
+    result.push({
+      ...graph,
+      artifactPublications,
+      record: { ...graph.record, artifacts: artifactPublications.map(({ record }) => record) },
+    });
+  }
+  return result;
 }
 
 async function hashFile(path) {
@@ -38,7 +127,7 @@ async function writeControlFile(path, bytes) {
   }
 }
 
-async function copyRecordedDirectory(source, target, files) {
+async function copyRecordedDirectory(source, target, files, metadata = null) {
   const sourceState = await fs.lstat(source);
   if (!sourceState.isDirectory() || (await fs.realpath(source)) !== source) {
     fail("verified source package directory changed before publication");
@@ -47,12 +136,22 @@ async function copyRecordedDirectory(source, target, files) {
   for (const record of files) {
     const sourcePath = join(source, record.name);
     const targetPath = join(target, record.name);
+    const sourceRecord = record.name === "entry.json" && metadata !== null
+      ? metadata.sourceFiles.find(({ name }) => name === "entry.json") : record;
     const state = await fs.lstat(sourcePath);
-    if (!state.isFile() || state.size !== record.size) {
+    if (!state.isFile() || state.size !== sourceRecord.size) {
       fail(`verified source file changed before publication: ${record.name}`);
     }
-    await fs.copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL);
-    await fs.chmod(targetPath, 0o600);
+    if (record.name === "entry.json" && metadata !== null) {
+      const entry = await hashFile(sourcePath);
+      if (entry.sha256 !== sourceRecord.sha256 || entry.size !== sourceRecord.size) {
+        fail("artifact metadata differs from its authenticated source record");
+      }
+      await writeControlFile(targetPath, Buffer.from(metadata.entrySource));
+    } else {
+      await fs.copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL);
+      await fs.chmod(targetPath, 0o600);
+    }
     const copied = await hashFile(targetPath);
     if (copied.sha256 !== record.sha256 || copied.size !== record.size) {
       fail(`published file differs from its authenticated record: ${record.name}`);
@@ -87,6 +186,11 @@ export async function publishFreshRuntimeRegistry({
     createHash("sha256").update(deploymentBytes).digest("hex") !==
       artifacts.deploymentManifest.sha256 ||
     moduleGraphs.length === 0 ||
+    moduleGraphs.some((graph) => !Array.isArray(graph.artifactPublications) ||
+      graph.artifactPublications.length !== graph.record.artifacts.length ||
+      graph.artifactPublications.some((metadata, index) =>
+        metadata === null || typeof metadata !== "object" ||
+        canonicalJson(metadata.record) !== canonicalJson(graph.record.artifacts[index]))) ||
     canonicalJson(generation.moduleGraphs) !==
       canonicalJson(moduleGraphs.map(({ record }) => record).sort((a, b) =>
         a.graphManifestSha256.localeCompare(b.graphManifestSha256)
@@ -190,7 +294,7 @@ export async function publishFreshRuntimeRegistry({
     }
     const copiedArtifacts = new Map();
     for (const graph of moduleGraphs) {
-      for (const artifact of graph.record.artifacts) {
+      for (const [index, artifact] of graph.record.artifacts.entries()) {
         const key = `${artifact.stage}/${artifact.cacheKey}`;
         const previous = copiedArtifacts.get(key);
         if (previous !== undefined) {
@@ -209,7 +313,8 @@ export async function publishFreshRuntimeRegistry({
         await copyRecordedDirectory(
           join(graph.cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey),
           join(stageRoot, artifact.cacheKey),
-          artifact.files
+          artifact.files,
+          graph.artifactPublications[index]
         );
         await syncPath(stageRoot);
       }
