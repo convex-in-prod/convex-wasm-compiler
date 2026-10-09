@@ -4,13 +4,33 @@ version = "0.2.0"
 edition = "2024"
 publish = false
 
+[workspace]
+members = ["src/vendor/cranelift-frontend"]
+default-members = [".", "src/vendor/cranelift-frontend"]
+resolver = "3"
+
+[patch."https://github.com/bytecodealliance/wasmtime"]
+cranelift-frontend = { path = "src/vendor/cranelift-frontend" }
+
+[features]
+capability-replay = ["dep:base64", "dep:flexbuffers"]
+
+[[bin]]
+name = "convex-wasm-capability-replay"
+path = "src/bin/convex-wasm-capability-replay.rs"
+required-features = ["capability-replay"]
+
 [dependencies]
+base64 = { version = "=0.22.1", optional = true }
+flexbuffers = { version = "=25.2.10", optional = true }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
 libc = "=0.2.189"
 rayon = "=1.10.0"
+wasm-encoder = { version = "=0.259.0", features = ["wasmparser"] }
+wasmparser = { version = "=0.259.0", default-features = false, features = ["features", "simd", "std", "validate"] }
 wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-null"] }
 
 [profile.release]

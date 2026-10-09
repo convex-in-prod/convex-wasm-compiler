@@ -63,6 +63,7 @@ const convexWasmOfficialOutputChunkTransformImplementationSourcePaths = Object.f
   "scripts/lib/convex-wasm-native-symbol-identity.mjs",
   "scripts/lib/convex-wasm-official-output-chunk-contract.mjs",
   "scripts/lib/convex-wasm-official-output-chunk-unit.mjs",
+  "scripts/lib/convex-wasm-record-specialization.mjs",
 ]);
 
 export const convexWasmOfficialOutputChunkModuleTransform = Object.freeze({

@@ -2,6 +2,11 @@
 #include "hermes/hermes.h"
 #include "hermes/VM/static_h.h"
 #include "jsi/jsi.h"
+
+namespace convex_wasm {
+// Linked from the separately cached compiler-owned platform support object.
+void installNativeUrl(facebook::jsi::Runtime &runtime);
+}
 #if defined(__EMSCRIPTEN__)
 // Packed values are verified and dispatched by type. Avoid FlexBuffers' unused
 // string-to-number fallback, which pulls a non-PIC locale singleton into the base module.
@@ -375,21 +380,30 @@ class ValueAbiWriter {
     if (length != 0) bytes_.insert(bytes_.end(), source, source + length);
   }
 
-  void byte(uint8_t value) { append(&value, 1); }
+  void byte(uint8_t value) {
+    if (bytes_.size() == kValueAbiMaximumFrameBytes) {
+      throw ValueAbiEncodeError{"Typed value frame exceeds the byte limit"};
+    }
+    bytes_.push_back(value);
+  }
 
   void u32(size_t value) {
     if (value > std::numeric_limits<uint32_t>::max()) {
       throw ValueAbiEncodeError{"Typed value length exceeds the byte limit"};
     }
-    for (size_t shift = 0; shift < 32; shift += 8) {
-      byte(static_cast<uint8_t>(value >> shift));
+    uint8_t encoded[4];
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+      encoded[index] = static_cast<uint8_t>(value >> (8 * index));
     }
+    append(encoded, sizeof(encoded));
   }
 
   void u64(uint64_t value) {
-    for (size_t shift = 0; shift < 64; shift += 8) {
-      byte(static_cast<uint8_t>(value >> shift));
+    uint8_t encoded[8];
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+      encoded[index] = static_cast<uint8_t>(value >> (8 * index));
     }
+    append(encoded, sizeof(encoded));
   }
 
   void patch_u32(size_t offset, size_t value) {
@@ -464,15 +478,16 @@ class ValueAbiWriter {
         append(buffer.data(js_), buffer.size(js_));
         return;
       }
-      for (const auto &ancestor : ancestors_) {
-        if (Value::strictEquals(js_, ancestor, input)) {
+      for (size_t index = 0; index < ancestor_count_; ++index) {
+        if (Value::strictEquals(js_, *ancestors_[index], input)) {
           throw ValueAbiEncodeError{"Cyclic objects are not Convex values"};
         }
       }
       if (nesting >= kValueAbiMaximumNesting) {
         throw ValueAbiEncodeError{"Typed value nesting exceeds the limit"};
       }
-      ancestors_.emplace_back(js_, input);
+      ancestors_[ancestor_count_] = &input;
+      ++ancestor_count_;
       if (object.isArray(js_)) {
         const auto array = object.asArray(js_);
         const size_t count = array.size(js_);
@@ -506,22 +521,44 @@ class ValueAbiWriter {
                                .getOwnEnumerableEntries(object);
         struct Entry {
           std::u16string units;
-          Value value;
+          const Value *value;
         };
-        std::vector<Entry> entries;
-        entries.reserve(own_entries.size());
-        for (auto &entry : own_entries) {
-          entries.push_back(Entry{entry.first.utf16(js_), std::move(entry.second)});
+        // Most Convex records are small. Keep the temporary sortable entry
+        // storage on the stack so encoding a record does not allocate a
+        // second container in addition to the strings and values it already
+        // owns. Borrow values from the stable rooted snapshot through sorting
+        // and recursive encoding; moving JSI owners adds lifetime work and is
+        // unnecessary. Large records retain a single extra heap allocation.
+        constexpr size_t kInlineEntryCount = 16;
+        std::array<Entry, kInlineEntryCount> inline_entries;
+        std::vector<Entry> heap_entries;
+        Entry *entries = inline_entries.data();
+        const size_t entry_count = own_entries.size();
+        const bool use_heap = entry_count > inline_entries.size();
+        if (use_heap) heap_entries.reserve(entry_count);
+        for (size_t index = 0; index < entry_count; ++index) {
+          auto &entry = own_entries[index];
+          Entry staged{entry.first.utf16(js_), &entry.second};
+          if (use_heap) {
+            heap_entries.push_back(std::move(staged));
+          } else {
+            inline_entries[index] = std::move(staged);
+          }
         }
-        std::sort(entries.begin(), entries.end(), [](const Entry &left, const Entry &right) {
-          return left.units < right.units;
-        });
+        if (use_heap) entries = heap_entries.data();
+        std::sort(
+            entries,
+            entries + entry_count,
+            [](const Entry &left, const Entry &right) {
+              return left.units < right.units;
+            });
         byte(8);
         const size_t count_offset = bytes_.size();
         u32(0);
         size_t count = 0;
-        for (const auto &entry : entries) {
-          if (entry.value.isUndefined() &&
+        for (size_t index = 0; index < entry_count; ++index) {
+          const auto &entry = entries[index];
+          if (entry.value->isUndefined() &&
               !(mode_ == ValueAbiMode::Patch && nesting == 0)) {
             continue;
           }
@@ -529,16 +566,16 @@ class ValueAbiWriter {
             throw ValueAbiEncodeError{"Typed value object length exceeds the limit"};
           }
           field_name(entry.units);
-          if (entry.value.isUndefined()) {
+          if (entry.value->isUndefined()) {
             byte(12);
           } else {
-            value(entry.value, nesting + 1);
+            value(*entry.value, nesting + 1);
           }
           ++count;
         }
         patch_u32(count_offset, count);
       }
-      ancestors_.pop_back();
+      --ancestor_count_;
     } else {
       throw ValueAbiEncodeError{"Unsupported Convex value"};
     }
@@ -549,7 +586,12 @@ class ValueAbiWriter {
   const ValueAbiIntrinsics &intrinsics_;
   ValueAbiMode mode_;
   std::vector<uint8_t> bytes_;
-  std::vector<Value> ancestors_;
+  // Each recursive call's input remains rooted and alive until it returns,
+  // including temporaries passed from array reads. Borrow those JSI values,
+  // not their movable VM pointers. Entries below ancestor_count_ are the only
+  // live ancestors; siblings may share an object without forming a cycle.
+  std::array<const Value *, kValueAbiMaximumNesting> ancestors_;
+  size_t ancestor_count_ = 0;
 };
 
 struct QueryAbiRecord : facebook::jsi::NativeState {
@@ -559,9 +601,51 @@ struct QueryAbiRecord : facebook::jsi::NativeState {
   size_t expression_depth;
 };
 
+// These protocol field names are stable; keep rooted identifiers for the
+// runtime lifetime instead of constructing strings for every query traversal.
+struct QueryAbiProperties {
+  explicit QueryAbiProperties(Runtime &js)
+      : source(PropNameID::forAscii(js, "source")),
+        type(PropNameID::forAscii(js, "type")),
+        order(PropNameID::forAscii(js, "order")),
+        table_name(PropNameID::forAscii(js, "tableName")),
+        index_name(PropNameID::forAscii(js, "indexName")),
+        range(PropNameID::forAscii(js, "range")),
+        field_path(PropNameID::forAscii(js, "fieldPath")),
+        value(PropNameID::forAscii(js, "value")),
+        filters(PropNameID::forAscii(js, "filters")),
+        operators(PropNameID::forAscii(js, "operators")),
+        filter(PropNameID::forAscii(js, "filter")),
+        limit(PropNameID::forAscii(js, "limit")),
+        cursor(PropNameID::forAscii(js, "cursor")),
+        end_cursor(PropNameID::forAscii(js, "endCursor")),
+        maximum_bytes_read(PropNameID::forAscii(js, "maximumBytesRead")),
+        maximum_rows_read(PropNameID::forAscii(js, "maximumRowsRead")),
+        page_size(PropNameID::forAscii(js, "pageSize")) {}
+
+  PropNameID source;
+  PropNameID type;
+  PropNameID order;
+  PropNameID table_name;
+  PropNameID index_name;
+  PropNameID range;
+  PropNameID field_path;
+  PropNameID value;
+  PropNameID filters;
+  PropNameID operators;
+  PropNameID filter;
+  PropNameID limit;
+  PropNameID cursor;
+  PropNameID end_cursor;
+  PropNameID maximum_bytes_read;
+  PropNameID maximum_rows_read;
+  PropNameID page_size;
+};
+
 class QueryAbiWriter {
  public:
-  explicit QueryAbiWriter(Runtime &js) : js_(js) {}
+  QueryAbiWriter(Runtime &js, const QueryAbiProperties &properties)
+      : js_(js), properties_(properties) {}
 
   Value record(const Value &kind_input, const Value &first, const Value &second) {
     try {
@@ -598,15 +682,43 @@ class QueryAbiWriter {
         byte(2);
         integer(first);
       } else invalid();
-      auto record = std::make_shared<QueryAbiRecord>();
-      record->kind = kind;
-      record->bytes = std::move(bytes_);
-      record->expression_nodes = expression_nodes_;
-      record->expression_depth = expression_depth_;
-      Object result(js_);
-      result.setNativeState(js_, record);
-      result.setExternalMemoryPressure(js_, sizeof(QueryAbiRecord) + record->bytes.capacity());
-      return Value(std::move(result));
+      return finish_record(kind);
+    } catch (const ValueAbiEncodeError &error) {
+      throw JSError(js_, error.message);
+    }
+  }
+
+  Value record_value(const Value &kind_input, const Value &field,
+                     const Value &input, const Value &commit_ts_placeholder,
+                     const ValueAbiIntrinsics &intrinsics) {
+    // Preserve eager capture before validating the field/record. The SDK has
+    // already consumed its builder; invalid values must fail at construction.
+    std::vector<uint8_t> captured;
+    if (!input.isUndefined()) {
+      captured = ValueAbiWriter(js_, commit_ts_placeholder, intrinsics,
+                                ValueAbiMode::Value).encode(input);
+    }
+    try {
+      if (!kind_input.isNumber()) invalid();
+      const double number = kind_input.getNumber();
+      if (number != 1 && number != 21 && number != 22 && number != 23 &&
+          number != 24 && number != 25 && number != 27) invalid();
+      const auto kind = static_cast<uint8_t>(number);
+      if (kind == 1) {
+        expression_nodes_ = 1;
+        expression_depth_ = 1;
+        byte(1);
+      } else {
+        byte(kind == 27 ? 2 : kind - 20);
+        string(field);
+      }
+      if (input.isUndefined()) byte(0);
+      else {
+        byte(1);
+        u32(captured.size());
+        append(captured.data(), captured.size());
+      }
+      return finish_record(kind);
     } catch (const ValueAbiEncodeError &error) {
       throw JSError(js_, error.message);
     }
@@ -617,9 +729,9 @@ class QueryAbiWriter {
                               const Value &pagination_input) {
     try {
       const Object query = object(query_input);
-      const Value source_value = query.getProperty(js_, "source");
+      const Value source_value = query.getProperty(js_, properties_.source);
       const Object source = object(source_value);
-      const Value source_type = source.getProperty(js_, "type");
+      const Value source_type = source.getProperty(js_, properties_.type);
       const std::string terminal_name = string_value(terminal_input);
       const std::string source_name = string_value(source_type);
       append(reinterpret_cast<const uint8_t *>("CQR1"), 4);
@@ -635,15 +747,15 @@ class QueryAbiWriter {
       else invalid();
       const Value order = source_name == "Search"
                               ? Value::null()
-                              : source.getProperty(js_, "order");
+                              : source.getProperty(js_, properties_.order);
       if (order.isNull()) byte(0);
       else if (string_value(order) == "asc") byte(1);
       else if (string_value(order) == "desc") byte(2);
       else invalid();
       if (source_name == "FullTableScan") {
-        string(source.getProperty(js_, "tableName"));
+        string(source.getProperty(js_, properties_.table_name));
       } else {
-        const std::string index_name = string_value(source.getProperty(js_, "indexName"));
+        const std::string index_name = string_value(source.getProperty(js_, properties_.index_name));
         const size_t separator = index_name.find('.');
         if (separator == 0 || separator == std::string::npos ||
             separator + 1 == index_name.size() ||
@@ -652,7 +764,7 @@ class QueryAbiWriter {
         string_bytes(index_name.substr(separator + 1));
       }
       if (source_name == "IndexRange") {
-        const Array constraints = array(source.getProperty(js_, "range"));
+        const Array constraints = array(source.getProperty(js_, properties_.range));
         const size_t count = constraints.size(js_);
         if (count > 256) invalid();
         u32(count);
@@ -660,18 +772,18 @@ class QueryAbiWriter {
           const Value input = constraints.getValueAtIndex(js_, i);
           if (append_record(input, 21, 25, 0)) continue;
           const Object constraint = object(input);
-          const std::string kind = string_value(constraint.getProperty(js_, "type"));
+          const std::string kind = string_value(constraint.getProperty(js_, properties_.type));
           if (kind == "Eq") byte(1);
           else if (kind == "Gt") byte(2);
           else if (kind == "Gte") byte(3);
           else if (kind == "Lt") byte(4);
           else if (kind == "Lte") byte(5);
           else invalid();
-          string(constraint.getProperty(js_, "fieldPath"));
-          optional_value(constraint.getProperty(js_, "value"));
+          string(constraint.getProperty(js_, properties_.field_path));
+          optional_value(constraint.getProperty(js_, properties_.value));
         }
       } else if (source_name == "Search") {
-        const Array filters = array(source.getProperty(js_, "filters"));
+        const Array filters = array(source.getProperty(js_, properties_.filters));
         const size_t count = filters.size(js_);
         if (count == 0 || count > 256) invalid();
         u32(count);
@@ -679,16 +791,16 @@ class QueryAbiWriter {
           const Value input = filters.getValueAtIndex(js_, i);
           if (append_record(input, i == 0 ? 26 : 27, i == 0 ? 26 : 27, 0)) continue;
           const Object filter = object(input);
-          const std::string kind = string_value(filter.getProperty(js_, "type"));
+          const std::string kind = string_value(filter.getProperty(js_, properties_.type));
           if (i == 0 && kind == "Search") byte(1);
           else if (i > 0 && kind == "Eq") byte(2);
           else invalid();
-          string(filter.getProperty(js_, "fieldPath"));
-          if (i == 0) string(filter.getProperty(js_, "value"));
-          else optional_value(filter.getProperty(js_, "value"));
+          string(filter.getProperty(js_, properties_.field_path));
+          if (i == 0) string(filter.getProperty(js_, properties_.value));
+          else optional_value(filter.getProperty(js_, properties_.value));
         }
       }
-      const Array operators = array(query.getProperty(js_, "operators"));
+      const Array operators = array(query.getProperty(js_, properties_.operators));
       const size_t count = operators.size(js_);
       if (count > 256) invalid();
       u32(count);
@@ -701,21 +813,21 @@ class QueryAbiWriter {
         const std::string kind = string_value(keys.getValueAtIndex(js_, 0));
         if (kind == "filter") {
           byte(1);
-          expression(operator_object.getProperty(js_, "filter"), 0);
+          expression(operator_object.getProperty(js_, properties_.filter), 0);
         } else if (kind == "limit") {
           byte(2);
-          integer(operator_object.getProperty(js_, "limit"));
+          integer(operator_object.getProperty(js_, properties_.limit));
         } else {
           invalid();
         }
       }
       if (terminal_name == "paginate") {
         const Object pagination = object(pagination_input);
-        optional_string(pagination.getProperty(js_, "cursor"));
-        optional_string(pagination.getProperty(js_, "endCursor"));
-        optional_integer(pagination.getProperty(js_, "maximumBytesRead"));
-        optional_integer(pagination.getProperty(js_, "maximumRowsRead"));
-        integer(pagination.getProperty(js_, "pageSize"));
+        optional_string(pagination.getProperty(js_, properties_.cursor));
+        optional_string(pagination.getProperty(js_, properties_.end_cursor));
+        optional_integer(pagination.getProperty(js_, properties_.maximum_bytes_read));
+        optional_integer(pagination.getProperty(js_, properties_.maximum_rows_read));
+        integer(pagination.getProperty(js_, properties_.page_size));
       }
       return std::move(bytes_);
     } catch (const ValueAbiEncodeError &error) {
@@ -724,6 +836,18 @@ class QueryAbiWriter {
   }
 
  private:
+  Value finish_record(uint8_t kind) {
+    auto record = std::make_shared<QueryAbiRecord>();
+    record->kind = kind;
+    record->bytes = std::move(bytes_);
+    record->expression_nodes = expression_nodes_;
+    record->expression_depth = expression_depth_;
+    Object result(js_);
+    result.setNativeState(js_, record);
+    result.setExternalMemoryPressure(js_, sizeof(QueryAbiRecord) + record->bytes.capacity());
+    return Value(std::move(result));
+  }
+
   [[noreturn]] void invalid() const {
     throw ValueAbiEncodeError{"Typed query request is invalid"};
   }
@@ -750,15 +874,28 @@ class QueryAbiWriter {
     if (length != 0) bytes_.insert(bytes_.end(), data, data + length);
   }
 
-  void byte(uint8_t value) { append(&value, 1); }
+  void byte(uint8_t value) {
+    if (bytes_.size() == kValueAbiMaximumFrameBytes) {
+      throw ValueAbiEncodeError{"Typed query request exceeds the byte limit"};
+    }
+    bytes_.push_back(value);
+  }
 
   void u32(size_t value) {
     if (value > std::numeric_limits<uint32_t>::max()) invalid();
-    for (size_t shift = 0; shift < 32; shift += 8) byte(value >> shift);
+    uint8_t encoded[4];
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+      encoded[index] = static_cast<uint8_t>(value >> (8 * index));
+    }
+    append(encoded, sizeof(encoded));
   }
 
   void u64(uint64_t value) {
-    for (size_t shift = 0; shift < 64; shift += 8) byte(value >> shift);
+    uint8_t encoded[8];
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+      encoded[index] = static_cast<uint8_t>(value >> (8 * index));
+    }
+    append(encoded, sizeof(encoded));
   }
 
   void string_bytes(const std::string &value) {
@@ -816,8 +953,9 @@ class QueryAbiWriter {
                      uint8_t maximum_kind, size_t depth) {
     if (!value.isObject()) return false;
     const Object object = value.asObject(js_);
-    if (!object.hasNativeState<QueryAbiRecord>(js_)) return false;
-    const auto record = object.getNativeState<QueryAbiRecord>(js_);
+    if (!object.hasNativeState(js_)) return false;
+    const auto record = std::dynamic_pointer_cast<QueryAbiRecord>(object.getNativeState(js_));
+    if (!record) return false;
     if (record->kind < minimum_kind || record->kind > maximum_kind ||
         depth + record->expression_depth > 64 ||
         expression_nodes_ + record->expression_nodes > 4096) invalid();
@@ -877,6 +1015,7 @@ class QueryAbiWriter {
   }
 
   Runtime &js_;
+  const QueryAbiProperties &properties_;
   std::vector<uint8_t> bytes_;
   size_t expression_nodes_ = 0;
   size_t expression_depth_ = 0;
@@ -995,14 +1134,15 @@ class ValueAbiReader {
         }
       }
       return Value(static_cast<facebook::hermes::HermesRuntime &>(js_)
-                       .createObjectFromEntries(
+                       .createObjectFromEntriesWithHint(
                            map.size(),
                            [&](size_t index) -> std::string_view {
                              return key_views[index];
                            },
                            [&](size_t index) {
                              return packed(values[index], nesting + 1);
-                           }));
+                           },
+                           object_layout_hints_[nesting]));
     }
     if (reference.IsAnyVector()) {
       const size_t count = reference.IsUntypedVector()
@@ -1093,24 +1233,38 @@ class ValueAbiReader {
         };
         // CVA1 interleaves keys and values. Index borrowed spans before
         // allocating the final layout; no keys or decoded values are copied.
-        std::vector<Field> fields;
-        fields.reserve(count);
+        // Keep the common small-record index inline to avoid a temporary heap
+        // allocation for every decoded object. The larger fallback preserves
+        // the previous bounded vector allocation behavior.
+        constexpr size_t kInlineFieldCount = 16;
+        std::array<Field, kInlineFieldCount> inline_fields;
+        std::vector<Field> heap_fields;
+        Field *fields = inline_fields.data();
+        const bool use_heap = count > inline_fields.size();
+        if (use_heap) heap_fields.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
           const auto [bytes, length] = slice();
-          fields.push_back({
+          Field field{
               std::string_view(reinterpret_cast<const char *>(bytes), length),
-              cursor_});
+              cursor_};
+          if (use_heap) {
+            heap_fields.push_back(field);
+          } else {
+            inline_fields[index] = field;
+          }
           skip_value(nesting + 1);
         }
+        if (use_heap) fields = heap_fields.data();
         const uint8_t *after = cursor_;
         auto result = static_cast<facebook::hermes::HermesRuntime &>(js_)
-                          .createObjectFromEntries(
+                          .createObjectFromEntriesWithHint(
                               count,
                               [&](size_t index) { return fields[index].key; },
                               [&](size_t index) {
                                 cursor_ = fields[index].value;
                                 return value(nesting + 1);
-                              });
+                              },
+                              object_layout_hints_[nesting]);
         cursor_ = after;
         return Value(std::move(result));
       }
@@ -1199,6 +1353,10 @@ class ValueAbiReader {
   Runtime &js_;
   const uint8_t *cursor_;
   const uint8_t *end_;
+  // Sibling records often share keys even when their packed buffers differ.
+  // Keep hints by depth so decoding a child cannot replace its parent's hint.
+  std::array<facebook::hermes::HermesRuntime::ObjectLayoutHint,
+             kValueAbiMaximumNesting> object_layout_hints_;
   const Value &commit_ts_placeholder_;
   const Function &array_buffer_constructor_;
 };
@@ -1242,6 +1400,7 @@ SHRuntime *initialize_runtime() {
   char alloc_young[] = "--gc-alloc-young=true";
   char revert_young[] = "--gc-revert-to-yg-at-tti=false";
   char register_stack[] = "--max-register-stack=16384";
+  char native_promise[] = "-Xnative-promise";
   char *argv[] = {
       program,
       init_heap,
@@ -1249,8 +1408,9 @@ SHRuntime *initialize_runtime() {
       alloc_young,
       revert_young,
       register_stack,
+      native_promise,
   };
-  return _sh_init(6, argv);
+  return _sh_init(7, argv);
 }
 
 std::shared_ptr<Function> guest_function(Runtime &js, const Value &value) {
@@ -2154,7 +2314,8 @@ void validate_runtime_support_installer(Runtime &js) {
 }
 
 void verify_runtime_support_installation(Runtime &js) {
-  if (js.global().hasProperty(js, kRuntimeSupportInstallerBinding)) {
+  if (js.global().hasProperty(js, kRuntimeSupportInstallerBinding) ||
+      js.global().hasProperty(js, "__convexWasmNativeUrl")) {
     throw JSError(js, "Runtime-support installer was retained after installation");
   }
 }
@@ -2233,6 +2394,7 @@ void install_guest_bridge(Runtime &js) {
   auto value_intrinsics = std::make_shared<ValueAbiIntrinsics>(ValueAbiIntrinsics{
       object_constructor.getPropertyAsObject(js, "prototype"),
   });
+  auto query_properties = std::make_shared<QueryAbiProperties>(js);
   auto take_typed_value = Function::createFromHostFunction(
       js,
       PropNameID::forAscii(js, "takeTypedCapabilityValue"),
@@ -2507,25 +2669,29 @@ void install_guest_bridge(Runtime &js) {
       js,
       PropNameID::forAscii(js, "createTypedQueryRecord"),
       3,
-      [](Runtime &js, const Value &, const Value *arguments,
+      [value_intrinsics, query_properties](Runtime &js, const Value &, const Value *arguments,
          size_t count) -> Value {
+        if (count == 4 && arguments[3].isObject()) {
+          return QueryAbiWriter(js, *query_properties).record_value(arguments[0], arguments[1],
+              arguments[2], arguments[3], *value_intrinsics);
+        }
         if (count != 3) {
           throw JSError(js, "Typed query record arguments are invalid");
         }
-        return QueryAbiWriter(js).record(arguments[0], arguments[1],
+        return QueryAbiWriter(js, *query_properties).record(arguments[0], arguments[1],
                                          arguments[2]);
       });
   auto start_typed_query = Function::createFromHostFunction(
       js,
       PropNameID::forAscii(js, "startTypedCapabilityQuery"),
       3,
-      [](Runtime &js, const Value &, const Value *arguments,
+      [query_properties](Runtime &js, const Value &, const Value *arguments,
          size_t count) -> Value {
         if (count != 3 || !arguments[0].isObject() ||
             !arguments[1].isString()) {
           throw JSError(js, "Typed query arguments are invalid");
         }
-        auto bytes = QueryAbiWriter(js).encode(arguments[0], arguments[1],
+        auto bytes = QueryAbiWriter(js, *query_properties).encode(arguments[0], arguments[1],
                                                arguments[2]);
         const int64_t capability = convex_capability_current();
         if (capability <= 0) {
@@ -3019,6 +3185,7 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
 #endif
       js_error_phase = JSErrorPhase::ValidateRuntimeSupportInstaller;
       validate_runtime_support_installer(js);
+      convex_wasm::installNativeUrl(js);
       js_error_phase = JSErrorPhase::InitializeFormatterUnit;
 #if defined(CONVEX_WASM_FORMATTER_PARTIAL_INITIALIZATION_FIXTURE)
       if (fixture_formatter_initialization_failure_armed) {
@@ -3278,98 +3445,104 @@ extern "C" int convex_wasm_udf_run(void) {
     if (capability_identity == 0) {
       return 7;
     }
-    js_error_phase = JSErrorPhase::ActivateSdkFacade;
-    guest_bridge->activate_sdk->call(
-        js, String::createFromAscii(js, udf_kind));
-    invocation_activated = true;
-    js_error_phase = JSErrorPhase::ReadInvocationRequest;
-    // Official wrappers use the bridge's value sentinel; only legacy handlers
-    // publish a sentinel through the compile-profile exports.
-    auto commit_ts_placeholder = invocation_abi == kSelectedInvocationAbiOfficialWrapper
-        ? Value(js, *guest_bridge->commit_ts_placeholder)
-        : selected_commit_ts_placeholder(js, entry_slot);
-    Value request;
     {
-      const int32_t length = convex_guest_value_request_binary_v1();
-      if (length < 0 || static_cast<size_t>(length) > kInvocationMaximumFrameBytes) {
-        throw JSError(js, "Binary invocation argument length is invalid");
+      // Reuse belongs to this invocation, including its async continuations.
+      // End the scope before cleanup can retire the retained runtime.
+      auto string_reuse_scope =
+          static_cast<facebook::hermes::HermesRuntime &>(js).createStringReuseScope();
+      js_error_phase = JSErrorPhase::ActivateSdkFacade;
+      guest_bridge->activate_sdk->call(
+          js, String::createFromAscii(js, udf_kind));
+      invocation_activated = true;
+      js_error_phase = JSErrorPhase::ReadInvocationRequest;
+      // Official wrappers use the bridge's value sentinel; only legacy handlers
+      // publish a sentinel through the compile-profile exports.
+      auto commit_ts_placeholder = invocation_abi == kSelectedInvocationAbiOfficialWrapper
+          ? Value(js, *guest_bridge->commit_ts_placeholder)
+          : selected_commit_ts_placeholder(js, entry_slot);
+      Value request;
+      {
+        const int32_t length = convex_guest_value_request_binary_v1();
+        if (length < 0 || static_cast<size_t>(length) > kInvocationMaximumFrameBytes) {
+          throw JSError(js, "Binary invocation argument length is invalid");
+        }
+        std::vector<uint8_t> bytes(static_cast<size_t>(length));
+        if (convex_guest_value_request_copy(
+                reinterpret_cast<char *>(bytes.data()), length) != length) {
+          throw JSError(js, "Binary invocation argument copy failed");
+        }
+        request = ValueAbiReader(js, bytes.data(), bytes.size(), commit_ts_placeholder,
+                                 *guest_bridge->array_buffer_constructor).decode();
+        if (!request.isObject() || request.asObject(js).isArray(js)) {
+          throw JSError(js, "Binary invocation arguments must be an object");
+        }
       }
-      std::vector<uint8_t> bytes(static_cast<size_t>(length));
-      if (convex_guest_value_request_copy(
-              reinterpret_cast<char *>(bytes.data()), length) != length) {
-        throw JSError(js, "Binary invocation argument copy failed");
-      }
-      request = ValueAbiReader(js, bytes.data(), bytes.size(), commit_ts_placeholder,
-                               *guest_bridge->array_buffer_constructor).decode();
-      if (!request.isObject() || request.asObject(js).isArray(js)) {
-        throw JSError(js, "Binary invocation arguments must be an object");
-      }
-    }
-    js_error_phase = JSErrorPhase::SelectHandler;
-    auto selected_export =
-        selected_application_export(js, entry_slot, export_name);
-    js_error_phase = JSErrorPhase::InvokeHandler;
-    if (invocation_abi == kSelectedInvocationAbiOfficialWrapper) {
-      Value invocation_arguments[] = {
-          Value(js, selected_export),
-          std::move(request),
-      };
-      guest_bridge->invoke_registered_wrapper->call(
-          js, static_cast<const Value *>(invocation_arguments), size_t{2});
-    } else {
-      js_error_phase = JSErrorPhase::CreateInvocationContext;
-      auto context = invocation_context(
-          js, capability_identity, udf_kind, commit_ts_placeholder);
-      Value invocation_arguments[] = {
-          Value(js, selected_export),
-          std::move(context),
-          std::move(request),
-      };
+      js_error_phase = JSErrorPhase::SelectHandler;
+      auto selected_export =
+          selected_application_export(js, entry_slot, export_name);
       js_error_phase = JSErrorPhase::InvokeHandler;
-      guest_bridge->invoke->call(
-          js, static_cast<const Value *>(invocation_arguments), size_t{3});
-    }
+      if (invocation_abi == kSelectedInvocationAbiOfficialWrapper) {
+        Value invocation_arguments[] = {
+            Value(js, selected_export),
+            std::move(request),
+        };
+        guest_bridge->invoke_registered_wrapper->call(
+            js, static_cast<const Value *>(invocation_arguments), size_t{2});
+      } else {
+        js_error_phase = JSErrorPhase::CreateInvocationContext;
+        auto context = invocation_context(
+            js, capability_identity, udf_kind, commit_ts_placeholder);
+        Value invocation_arguments[] = {
+            Value(js, selected_export),
+            std::move(context),
+            std::move(request),
+        };
+        js_error_phase = JSErrorPhase::InvokeHandler;
+        guest_bridge->invoke->call(
+            js, static_cast<const Value *>(invocation_arguments), size_t{3});
+      }
 
-    js_error_phase = JSErrorPhase::DrainInitialMicrotasks;
-    if (!js.drainMicrotasks()) {
-      throw InvocationFailure{2};
-    }
-    while (true) {
-      js_error_phase = JSErrorPhase::ReadInvocationDone;
-      if (guest_bridge->done->call(js).getBool()) {
-        break;
-      }
-      const auto settle_operation = [&](int32_t operation_handle) {
-        const int32_t completion_status =
-            convex_async_operation_completion_status(operation_handle);
-        const int64_t payload_handle =
-            convex_async_operation_completion_take(operation_handle);
-        js_error_phase = JSErrorPhase::SettleOperation;
-        guest_bridge->settle->call(js,
-                                   static_cast<double>(operation_handle),
-                                   static_cast<double>(completion_status),
-                                   static_cast<double>(payload_handle));
-      };
-      const int32_t operation_handle = convex_async_operation_wait_any();
-      if (operation_handle <= 0) {
-        throw InvocationFailure{3};
-      }
-      settle_operation(operation_handle);
-      // Polling only consumes already-ready completions from this host batch.
-      while (true) {
-        const int32_t ready_operation_handle =
-            convex_async_operation_poll_ready();
-        if (ready_operation_handle == 0) {
-          break;
-        }
-        if (ready_operation_handle < 0) {
-          throw InvocationFailure{3};
-        }
-        settle_operation(ready_operation_handle);
-      }
-      js_error_phase = JSErrorPhase::DrainOperationMicrotasks;
+      js_error_phase = JSErrorPhase::DrainInitialMicrotasks;
       if (!js.drainMicrotasks()) {
         throw InvocationFailure{2};
+      }
+      while (true) {
+        js_error_phase = JSErrorPhase::ReadInvocationDone;
+        if (guest_bridge->done->call(js).getBool()) {
+          break;
+        }
+        const auto settle_operation = [&](int32_t operation_handle) {
+          const int32_t completion_status =
+              convex_async_operation_completion_status(operation_handle);
+          const int64_t payload_handle =
+              convex_async_operation_completion_take(operation_handle);
+          js_error_phase = JSErrorPhase::SettleOperation;
+          guest_bridge->settle->call(js,
+                                     static_cast<double>(operation_handle),
+                                     static_cast<double>(completion_status),
+                                     static_cast<double>(payload_handle));
+        };
+        const int32_t operation_handle = convex_async_operation_wait_any();
+        if (operation_handle <= 0) {
+          throw InvocationFailure{3};
+        }
+        settle_operation(operation_handle);
+        // Polling only consumes already-ready completions from this host batch.
+        while (true) {
+          const int32_t ready_operation_handle =
+              convex_async_operation_poll_ready();
+          if (ready_operation_handle == 0) {
+            break;
+          }
+          if (ready_operation_handle < 0) {
+            throw InvocationFailure{3};
+          }
+          settle_operation(ready_operation_handle);
+        }
+        js_error_phase = JSErrorPhase::DrainOperationMicrotasks;
+        if (!js.drainMicrotasks()) {
+          throw InvocationFailure{2};
+        }
       }
     }
     report_layouts();

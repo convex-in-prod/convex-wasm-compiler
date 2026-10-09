@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { convexWasmNativeUrlSupportIdentity } from "./convex-wasm-native-url-support.mjs";
 
-const BROWSER_BUNDLE_SHA256 = "b2fc88e4e9d5c776bca6384c7d7a1411ba7350866d9974055bc10dcfc423e190";
+const BROWSER_BUNDLE_SHA256 = "d0f14730c84f853d6e1f262ff82f9e7b3f9f29bcc0eb049a3d841650cb3d5a0c";
 const browserBundle = readFileSync(
   new URL("../vendor/convex-wasm-runtime-support/browser-bundle.js.txt", import.meta.url),
   "utf8"
@@ -87,7 +88,8 @@ export const convexWasmRuntimeSupportIdentity = Object.freeze({
   browserBundleSha256: BROWSER_BUNDLE_SHA256,
   bundler: Object.freeze({ package: "esbuild@0.27.0", target: "es2020" }),
   globals: Object.freeze(["DOMException", "Intl", "URL", "URLSearchParams"]),
-  kind: "convex-wasm-shared-untyped-runtime-support-v2",
+  kind: "convex-wasm-shared-untyped-runtime-support-v3",
+  nativeUrl: convexWasmNativeUrlSupportIdentity,
   licenses: licenseIdentities,
   materials: materialIdentities,
   packages: Object.freeze({

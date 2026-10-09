@@ -13,9 +13,14 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { isProxy } from "node:util/types";
+import {
+  convexWasmNativeUrlSupportObjectInputs,
+  convexWasmNativeUrlSupportSha256,
+} from "./convex-wasm-native-url-support.mjs";
 
 import {
   buildArtifactCommands,
+  buildCoreNormalizationCommand,
   capabilityApplicationStaticHermesFlags,
   runtimeMainSourceFileName,
 } from "./convex-wasm-artifact-commands.mjs";
@@ -1008,7 +1013,7 @@ const MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS = Object.freeze([
 ]);
 const SEMANTIC_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "SOURCE_DATE_EPOCH", "TZ"];
 
-const MATERIAL_LOCATION_ENVIRONMENT_KEYS = ["EM_CONFIG", "EMSDK", "HOME", "PATH"];
+const MATERIAL_LOCATION_ENVIRONMENT_KEYS = ["EM_BINARYEN_ROOT", "EM_CONFIG", "EMSDK", "HOME", "PATH"];
 const COMMAND_ENVIRONMENT_KEYS = new Set([
   ...MATERIAL_LOCATION_ENVIRONMENT_KEYS,
   ...SEMANTIC_ENVIRONMENT_KEYS,
@@ -18976,6 +18981,7 @@ function moduleGraphBaseSupportObjectInputsFromContext(options) {
       source: renderConvexWasmModuleGraphStructuralTraps(),
       stage: "module-graph-structural-traps-object",
     },
+    ...convexWasmNativeUrlSupportObjectInputs(baseCompileFlags),
   ];
 }
 
@@ -19028,8 +19034,6 @@ function createModuleGraphBaseSupportObjectsPromise({
   materialVerificationFlights,
   runNativePhase,
 }) {
-  const [runtimeMain, selectorBridge, hostForwarders, structuralTraps] =
-    moduleGraphBaseSupportObjectInputs(compilerOutput);
   const sharedInputs = {
     cacheLayout,
     cacheRoot,
@@ -19038,28 +19042,13 @@ function createModuleGraphBaseSupportObjectsPromise({
     materialVerificationFlights,
     runNativePhase,
   };
-  return settleConcurrentWork([
+  return settleConcurrentWork(moduleGraphBaseSupportObjectInputs(compilerOutput).map((inputs) =>
     buildModuleGraphSupportObject({
       ...sharedInputs,
-      ...runtimeMain,
+      ...inputs,
       failureClosesAdmission,
-    }),
-    buildModuleGraphSupportObject({
-      ...sharedInputs,
-      ...selectorBridge,
-      failureClosesAdmission,
-    }),
-    buildModuleGraphSupportObject({
-      ...sharedInputs,
-      ...hostForwarders,
-      failureClosesAdmission,
-    }),
-    buildModuleGraphSupportObject({
-      ...sharedInputs,
-      ...structuralTraps,
-      failureClosesAdmission,
-    }),
-  ]);
+    })
+  ));
 }
 
 function startModuleGraphBaseSupportPreparation({
@@ -19802,6 +19791,7 @@ async function buildModuleGraphPrelink({
   cacheLayout,
   cacheRoot,
   compilerOutput,
+  ensureRetainedPrecompilerPath,
   exports,
   objects,
   role,
@@ -19838,6 +19828,7 @@ async function buildModuleGraphPrelink({
   };
   const identity = nativeStageIdentity({
     command,
+    normalization: moduleGraphCoreNormalizationIdentity(options, materials),
     emscripten: {
       llvmRevision: options.toolchain.emscripten.llvmRevision,
       materials: materials.emscripten.sha256,
@@ -19905,7 +19896,44 @@ async function buildModuleGraphPrelink({
         boundedCommandConfig,
         options.resourceGuard
       );
+      const retainedPrecompilerMaterial =
+        currentModuleGraphCompilerOutputRetainedPrecompilerMaterial(compilerOutput);
+      const retainedPrecompilerPath = await ensureRetainedPrecompilerPath(compilerOutput);
+      const logicalNormalizationCommand = buildCoreNormalizationCommand(options);
+      const normalizationCommand =
+        retainedPrecompilerPath === undefined
+          ? logicalNormalizationCommand
+          : retainedPrecompilerCommand(
+              logicalNormalizationCommand,
+              options.toolchain.wasmtime,
+              retainedPrecompilerPath
+            );
+      const normalization = await runNativePhase(
+        "core-wasm-normalization",
+        normalizationCommand,
+        `Normalize ${role} module-graph Core Wasm linkage`,
+        workPath,
+        join(workPath, "normalization-time.json"),
+        boundedCommandConfig,
+        options.resourceGuard,
+        ...(retainedPrecompilerPath === undefined ? [] : [{ reportCommand: logicalNormalizationCommand }])
+      );
       await settleConcurrentWork([
+        ...(retainedPrecompilerPath === undefined ||
+        currentModuleGraphCompilerOutputRetainedPrecompilerMaterial(compilerOutput) !==
+          retainedPrecompilerMaterial
+          ? [
+              verifyPackagedPrecompilerIdentity(options.toolchain.wasmtime),
+              verifyModuleGraphMaterials(
+                automaticMaterials.wasmtime,
+                materials.wasmtime,
+                "Core Wasm normalization materials",
+                undefined,
+                materialVerificationMemo,
+                materialVerificationFlights
+              ),
+            ]
+          : []),
         verifyModuleGraphMaterials(
           automaticMaterials.emscripten,
           materials.emscripten,
@@ -19930,7 +19958,19 @@ async function buildModuleGraphPrelink({
             ]
           : []),
       ]);
-      return { metadata: null, outputPath: join(workPath, "module.wasm"), timing };
+      return {
+        metadata: null,
+        outputPath: join(workPath, "module.normalized.wasm"),
+        timing: {
+          kind: "convex-wasm-normalized-core-timing-v1",
+          link: timing,
+          normalization,
+          maxRssKiB: Math.max(timing.maxRssKiB, normalization.maxRssKiB),
+          systemCpuMilliseconds: timing.systemCpuMilliseconds + normalization.systemCpuMilliseconds,
+          userCpuMilliseconds: timing.userCpuMilliseconds + normalization.userCpuMilliseconds,
+          wallMilliseconds: timing.wallMilliseconds + normalization.wallMilliseconds,
+        },
+      };
     },
     cacheLayout,
     cacheRoot,
@@ -19950,15 +19990,16 @@ async function buildModuleGraphBaseArtifacts({
   cacheRoot,
   compilerOutput,
   engineCompatibilitySha256,
+  ensureRetainedPrecompilerPath,
   formatterEntry,
   materialVerificationFlights,
   runNativePhase,
   authenticateDeferredObject,
   authenticateSupportObject,
 }) {
-  const [runtimeObject, selectorBridgeObject, hostForwardersObject, structuralTrapsObject] =
+  const [runtimeObject, selectorBridgeObject, hostForwardersObject, structuralTrapsObject, ...nativeUrlObjects] =
     baseSupportObjects;
-  const [runtimeEntry, selectorBridgeEntry, hostForwardersEntry, structuralTrapsEntry] =
+  const [runtimeEntry, selectorBridgeEntry, hostForwardersEntry, structuralTrapsEntry, ...nativeUrlEntries] =
     baseSupportEntries ?? baseSupportObjects.map(({ entry }) => entry);
   const baseSourceProvenance = moduleGraphSourceProvenance({
     bridge: {
@@ -19977,6 +20018,11 @@ async function buildModuleGraphBaseArtifacts({
       size: runtimeEntry.artifactSize,
     },
     selectorBridgeSha256: selectorBridgeEntry.artifactSha256,
+    nativeUrl: nativeUrlEntries.map((entry, index) => ({
+      identity: nativeUrlObjects[index].entry.identity,
+      sha256: entry.artifactSha256,
+      size: entry.artifactSize,
+    })),
     structuralBoundary: {
       forwardersSha256: hostForwardersEntry.artifactSha256,
       trapsSha256: structuralTrapsEntry.artifactSha256,
@@ -20008,6 +20054,7 @@ async function buildModuleGraphBaseArtifacts({
       [selectorBridgeObject, selectorBridgeEntry, "selector-bridge"],
       [hostForwardersObject, hostForwardersEntry, "host-forwarders"],
       [structuralTrapsObject, structuralTrapsEntry, "structural-traps"],
+      ...nativeUrlObjects.map((object, index) => [object, nativeUrlEntries[index], `native-url-${index}`]),
     ].map(([stageOutput, entry, name]) => ({
       ...(authenticateSupportObject === undefined
         ? {}
@@ -20023,6 +20070,7 @@ async function buildModuleGraphBaseArtifacts({
     cacheLayout,
     cacheRoot,
     compilerOutput,
+    ensureRetainedPrecompilerPath,
     exports: [
       MODULE_GRAPH_SELECTOR_REGISTRATION_SYMBOL,
       "convex_wasm_graph_select_entry",
@@ -20178,6 +20226,9 @@ function startModuleGraphBaseArtifactsPreactivation({
         cacheRoot,
         compilerOutput,
         engineCompatibilitySha256: compilerOutput.engine.compatibilitySha256,
+        // Session finalization drains this preactivation before removing its retained binary.
+        ensureRetainedPrecompilerPath: async (output) =>
+          currentModuleGraphCompilerOutputRetainedPrecompilerMaterial(output)?.path,
         formatterEntry,
         materialVerificationFlights,
         runNativePhase,
@@ -20288,6 +20339,15 @@ async function claimModuleGraphSharedPhaseReports(preparation) {
     fail("module graph and material-session reports both own a shared phase");
   }
   return reports;
+}
+
+function moduleGraphCoreNormalizationIdentity(options, materials) {
+  return {
+    kind: "convex-wasm-core-linkage-normalization-v1",
+    arguments: buildCoreNormalizationCommand(options).args.slice(3),
+    materialsSha256: materials.wasmtime.sha256,
+    package: options.toolchain.wasmtime.packageIdentity,
+  };
 }
 
 function moduleGraphPrecompileCommand(options) {
@@ -20650,6 +20710,7 @@ function moduleGraphCompilerToolchain(compilerOutput) {
       target: options.toolchain.wasmtime.target,
     },
     core: {
+      normalization: moduleGraphCoreNormalizationIdentity(options, materials),
       compileFlags: options.runtime.compileFlags,
       emscriptenMaterialsSha256: materials.emscripten.sha256,
       emscriptenRevision: options.toolchain.emscripten.revision,
@@ -20810,6 +20871,7 @@ async function buildModuleGraphSharedShardArtifacts({
   cacheLayout,
   cacheRoot,
   engine,
+  ensureRetainedPrecompilerPath,
   launchPolicy,
   materialVerificationFlights,
   runNativePhase,
@@ -20871,6 +20933,7 @@ async function buildModuleGraphSharedShardArtifacts({
         cacheLayout,
         cacheRoot,
         compilerOutput: representativeUnits[0].representative.compilerOutput,
+        ensureRetainedPrecompilerPath,
         exports,
         objects,
         role: sharedShard.role,
@@ -21238,7 +21301,7 @@ function createModuleGraphPackageReceiptSharedAuthority({
 }) {
   const compilerOutput = compilerResult.output;
   // Every cohort has already been required to use these exact shared production inputs. Plan the
-  // four base support objects once, then let all receipt probes join one physical authentication.
+  // base support objects once, then let all receipt probes join one physical authentication.
   // The shared result is scoped to this graph build; a later build still reauthenticates the
   // immutable entries and therefore detects mutation between invocations.
   let baseSupportAuthorityPromise;
@@ -21266,11 +21329,12 @@ function createModuleGraphPackageReceiptSharedAuthority({
         // A retained receipt may outlive a pruned intermediate. Preserve the ordinary miss that
         // reconstructs the support entry rather than treating retained data as physical authority.
         if (supportObjects.some((supportObject) => supportObject === undefined)) return undefined;
-        const [runtime, selectorBridge, hostForwarders, structuralTraps] = supportObjects;
+        const [runtime, selectorBridge, hostForwarders, structuralTraps, ...nativeUrl] = supportObjects;
         return Object.freeze({
           authority: Object.freeze({
             runtime: runtime.authority,
             selectorBridgeSha256: selectorBridge.authority.sha256,
+            nativeUrl: nativeUrl.map(({ authority }) => authority),
             structuralBoundary: {
               forwardersSha256: hostForwarders.authority.sha256,
               trapsSha256: structuralTraps.authority.sha256,
@@ -22959,6 +23023,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
         cacheLayout,
         cacheRoot,
         compilerOutput: cohortCompilerOutput,
+        ensureRetainedPrecompilerPath,
         exports: leafExports,
         objects: leafLinkObjects,
         role: "leaf",
@@ -23148,6 +23213,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
         cacheRoot,
         compilerOutput,
         engineCompatibilitySha256: engine.compatibilitySha256,
+        ensureRetainedPrecompilerPath,
         formatterEntry,
         materialVerificationFlights,
         runNativePhase,
@@ -23613,6 +23679,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
         cacheLayout,
         cacheRoot,
         engine,
+        ensureRetainedPrecompilerPath,
         launchPolicy: normalizedLaunchPolicy,
         materialVerificationFlights,
         runNativePhase,
@@ -25161,6 +25228,7 @@ function cohortArtifactPipelineIdentity(options, materials, engineIdentity) {
           contextReuseAnalysis: options.capabilityEntry.contextReuseAnalysis,
           invocationAbi: options.capabilityEntry.invocationAbi,
           runtimeSurfacePolicySha256: options.capabilityEntry.runtimeSurfacePolicySha256,
+          nativeUrlSupportSha256: convexWasmNativeUrlSupportSha256,
           unitTopology: {
             applicationFlags: capabilityApplicationStaticHermesFlags(
               options.toolchain.staticHermes.flags
@@ -25328,6 +25396,7 @@ function createArtifactPhaseRunner({
       (typeof schedulingCandidate === "object" &&
         schedulingCandidate !== null &&
         (Object.hasOwn(schedulingCandidate, "failureClosesAdmission") ||
+          Object.hasOwn(schedulingCandidate, "reportCommand") ||
           Object.hasOwn(schedulingCandidate, "workingSetEstimateBytes")))
         ? rawArgumentsList.pop()
         : undefined;
@@ -25335,7 +25404,11 @@ function createArtifactPhaseRunner({
       stage,
       async () => {
         if (materialSessionRecord === undefined) {
-          return await runBoundedCommand(...rawArgumentsList);
+          const [command, phase, cwd, timingPath, commandConfig, guard, boundary] = rawArgumentsList;
+          return await runBoundedCommand(
+            command, phase, cwd, timingPath, commandConfig, guard, boundary,
+            schedulingOptions?.reportCommand
+          );
         }
         const [command, phase, cwd, timingPath, commandConfig, phaseResourceGuard, boundary] =
           rawArgumentsList;
@@ -25366,7 +25439,7 @@ function createArtifactPhaseRunner({
           },
           phaseResourceGuard,
           boundary,
-          stage === "wasmtime-aot" ? command : undefined
+          stage === "wasmtime-aot" ? command : schedulingOptions?.reportCommand
         );
       },
       {
@@ -25375,7 +25448,7 @@ function createArtifactPhaseRunner({
         workerSlots:
           schedulingOptions?.workerSlots ??
           convexWasmNativeCommandWorkerSlots(
-            rawArgumentsList[0],
+            schedulingOptions?.reportCommand ?? rawArgumentsList[0],
             nativePhaseScheduler.launchPolicy
           ),
         ...(schedulingOptions?.workingSetEstimateBytes === undefined
@@ -27550,6 +27623,23 @@ async function compileNormalizedConvexWasmCohorts(
       materialSessionRecord === undefined
         ? ensureArtifactStage(runtimeMainStageOptions)
         : ensureMaterialSessionSharedArtifactStage(materialSessionRecord, runtimeMainStageOptions);
+    const nativeUrlObjectsPromise = settleConcurrentWork(
+      (options.capabilityEntry === undefined
+        ? []
+        : convexWasmNativeUrlSupportObjectInputs(options.runtime.compileFlags)
+      ).map((inputs) => buildModuleGraphSupportObject({
+        cacheLayout: options.cacheLayout,
+        cacheRoot: options.cacheRoot,
+        compilerOutput: { options, boundedCommandConfig, materials, automaticMaterials },
+        ensureStage: (stageOptions) => materialSessionRecord === undefined
+          ? ensureArtifactStage(stageOptions)
+          : ensureMaterialSessionSharedArtifactStage(materialSessionRecord, stageOptions),
+        materialVerificationFlights: materialSessionRecord?.materialVerificationFlights,
+        runNativePhase: runArtifactPhase,
+        ...inputs,
+      }))
+    );
+    void nativeUrlObjectsPromise.then(undefined, () => undefined);
 
     const membersByBucket = new Map();
     for (const member of nativeMembers) {
@@ -27734,9 +27824,10 @@ async function compileNormalizedConvexWasmCohorts(
           });
           // Runtime-main and cohort selectors share no inputs. Join them only where the Core Wasm
           // identity first needs both object digests, leaving admission to the native scheduler.
-          const [runtimeMainObject, selectorObject] = await settleConcurrentWork([
+          const [runtimeMainObject, selectorObject, nativeUrlObjects] = await settleConcurrentWork([
             runtimeMainObjectPromise,
             selectorObjectPromise,
+            nativeUrlObjectsPromise,
           ]);
           const coreWasmIdentity = nativeStageIdentity({
             abi: {
@@ -27906,6 +27997,11 @@ async function compileNormalizedConvexWasmCohorts(
                 sha256: runtimeMainObject.entry.artifactSha256,
                 size: runtimeMainObject.entry.artifactSize,
               },
+              nativeUrlObjects: nativeUrlObjects.map(({ entry }) => ({
+                identity: entry.identity,
+                sha256: entry.artifactSha256,
+                size: entry.artifactSize,
+              })),
             },
             selectorObject: {
               sha256: selectorObject.entry.artifactSha256,
@@ -27940,13 +28036,14 @@ async function compileNormalizedConvexWasmCohorts(
             capabilityEntry === undefined
               ? applicationObjectFiles
               : ["capability-bridge.o", "console-formatter.o", ...applicationObjectFiles];
+          const nativeUrlObjectFiles = nativeUrlObjects.map((_, index) => `native-url-${index}.o`);
           const cohortCommands = buildArtifactCommands({
             ...options,
             ...(capabilityEntry === undefined
               ? {}
               : { applicationEntrySelectorSymbol: "convex_wasm_selected_exported_unit" }),
             entrySelectorSymbol: "convex_wasm_selected_exported_unit",
-            exportObjectFiles: objectFiles,
+            exportObjectFiles: [...objectFiles, ...nativeUrlObjectFiles],
             runtime: {
               ...options.runtime,
               archives: options.runtime.archives.map(
@@ -27994,6 +28091,9 @@ async function compileNormalizedConvexWasmCohorts(
                         )
                       )),
                 fs.copyFile(runtimeMainObject.entry.artifactPath, join(workPath, "runtime_main.o")),
+                ...nativeUrlObjects.map(({ entry }, index) =>
+                  fs.copyFile(entry.artifactPath, join(workPath, nativeUrlObjectFiles[index]))
+                ),
                 fs.copyFile(selectorObject.entry.artifactPath, join(workPath, "cohort_selector.o")),
                 stageRuntimeInputs(workPath, options.runtime, { archives: true }),
               ]);
@@ -28398,7 +28498,10 @@ async function compileNormalizedConvexWasmCohorts(
           };
           const routeResults = [];
           if (capabilityEntry !== undefined) {
-            const cohortReports = [selectorObject.report, coreWasm.report, wasmtimeAot.report];
+            const cohortReports = [
+              ...nativeUrlObjects.map(({ report }) => report),
+              selectorObject.report, coreWasm.report, wasmtimeAot.report,
+            ];
             const memberReports = cohortMembers.flatMap((member) => member.reports);
             const packageReason =
               packageResult.cache === "hit"
@@ -28531,13 +28634,17 @@ async function compileNormalizedConvexWasmCohorts(
             bucket,
             manifest: cohortManifest,
             package: packageResult,
-            reports: [selectorObject.report, coreWasm.report, wasmtimeAot.report],
+            reports: [
+              ...nativeUrlObjects.map(({ report }) => report),
+              selectorObject.report, coreWasm.report, wasmtimeAot.report,
+            ],
             routeResults,
             routeIds: cohortMembers.map((member) => member.assignment.routeId),
           };
         }
       ),
       runtimeMainObjectPromise,
+      nativeUrlObjectsPromise,
     ]);
 
     if (materialSessionRecord === undefined) {

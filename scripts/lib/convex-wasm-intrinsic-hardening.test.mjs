@@ -351,7 +351,7 @@ function executeNodeProbe() {
 test("binds the inventory-derived intrinsic hardening policy and source", () => {
   assert.equal(
     convexWasmIntrinsicHardeningPolicy.kind,
-    "convex-wasm-effective-intrinsic-hardening-policy-v4"
+    "convex-wasm-effective-intrinsic-hardening-policy-v5"
   );
   assert.match(convexWasmIntrinsicHardeningPolicySha256, /^[a-f0-9]{64}$/u);
   assert.match(convexWasmIntrinsicHardeningSourceSha256, /^[a-f0-9]{64}$/u);
@@ -374,6 +374,37 @@ test("binds the inventory-derived intrinsic hardening policy and source", () => 
     convexWasmIntrinsicHardeningPolicy.lifecycle,
     "after-target-global-prelude-before-application-evaluation"
   );
+});
+
+test("hardening rejects preexisting nonstandard Object prototype properties without invoking getters", () => {
+  for (const descriptor of ["{ value: 7 }", "{ get() { throw new Error('getter executed'); } }"]) {
+    assert.throws(
+      () =>
+        runInNewContext(
+          executableSource(`
+        ${nodeTargetGlobals}
+        Object.defineProperty(Object.prototype, "unexpectedFixtureField", ${descriptor});
+        ${renderConvexWasmIntrinsicHardeningPrelude()}
+      `)
+        ),
+      /Object prototype has an unsupported string key/
+    );
+  }
+});
+
+test("absent prototype properties remain absent across retained invocations", () => {
+  const candidate = createNodeRetainedRuntimeCandidate(`
+    globalThis.probeAbsentField = function () {
+      const record = { value: 3 };
+      const added = Reflect.defineProperty(Object.prototype, "optionalFixtureField", { value: 9 });
+      return [added, record.optionalFixtureField, Object.getPrototypeOf(Object.prototype)];
+    };
+  `);
+  assert.equal(candidate.quarantined, false);
+  for (let i = 0; i < 2; ++i) {
+    assert.deepEqual(Array.from(candidate.context.probeAbsentField()), [false, undefined, null]);
+    assert.equal(candidate.descriptorStateValidator(), true);
+  }
 });
 
 test("accepts clean descendant shadowing and retains a descriptor-validated runtime", () => {

@@ -1,0 +1,15 @@
+--- a/ada.h
++++ b/ada.h
+@@ -7698,6 +7698,12 @@
+   url_aggregator& operator=(url_aggregator&& u) noexcept = default;
+   url_aggregator& operator=(const url_aggregator& u) = default;
+   ~url_aggregator() override = default;
++
++  // Retained storage for embedders accounting native URL memory. The inline
++  // string capacity may be counted twice; this is a conservative upper bound.
++  [[nodiscard]] size_t retained_bytes() const noexcept {
++    return sizeof(*this) + buffer.capacity() + 1;
++  }
+ 
+   /**
+    * The setter functions follow the steps defined in the URL Standard.

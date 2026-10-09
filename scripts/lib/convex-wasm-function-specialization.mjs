@@ -9,6 +9,7 @@ import { z } from "zod";
 import { canonicalJson } from "./convex-wasm-artifact-contract.mjs";
 import { decodeUtf8, mapBounded } from "./convex-wasm-artifact-material.mjs";
 import { ensureArtifactStage } from "./convex-wasm-artifact-stage.mjs";
+import { isReadOnlyRecordField } from "./convex-wasm-record-specialization.mjs";
 
 const traverse = traverseModule.default;
 const require = createRequire(import.meta.url);
@@ -17,8 +18,17 @@ const maximumBodyNodes = 180;
 const maximumBodyBytes = 4096;
 const maximumImportedBodies = 32;
 const maximumImportedBytes = 32 * 1024;
+const maximumLocalBodies = 64;
+const maximumLocalBodyNodes = 2400;
+const maximumLocalBodyBytes = 64 * 1024;
+const maximumLocalBytes = 128 * 1024;
+const maximumPromotedRecordFields = 8;
+const maximumPromotedLiteralFields = 16;
+const maximumCallableTargets = 64;
+const maximumGuardedCalls = 256;
+const maximumGuardedBytes = 64 * 1024;
 const summaryStage = "official-output-function-summary";
-const summaryKind = "convex-wasm-function-summary-v2";
+const summaryKind = "convex-wasm-function-summary-v4";
 
 function hash(source) {
   return createHash("sha256").update(source).digest("hex");
@@ -51,6 +61,9 @@ function analysisDependencyVersions() {
 export const convexWasmFunctionSpecializationIdentity = Object.freeze({
   kind: "convex-wasm-function-specialization-v1",
   sourceSha256: hash(readFileSync(new URL(import.meta.url))),
+  recordSpecializationSha256: hash(
+    readFileSync(new URL("./convex-wasm-record-specialization.mjs", import.meta.url))
+  ),
   parserVersion: require("@babel/parser/package.json").version,
   traversalVersion: require("@babel/traverse/package.json").version,
   analysisDependencies: analysisDependencyVersions(),
@@ -116,6 +129,43 @@ const summarySchema = z
       })
       .strict(),
     exports: z.array(z.object({ name: z.string(), body: bodySchema }).strict()),
+    callableTargets: z.array(
+      z.object({
+        local: z.string(),
+        start: z.int().nonnegative(),
+        end: z.int().positive(),
+        calls: z.array(
+          z.object({
+            start: z.int().nonnegative(),
+            end: z.int().positive(),
+            calleeStart: z.int().nonnegative(),
+            calleeEnd: z.int().positive(),
+          }).strict().refine(({ start, calleeStart, calleeEnd, end }) =>
+            start <= calleeStart && calleeStart < calleeEnd && calleeEnd < end)
+        ).max(maximumGuardedCalls),
+      }).strict()
+    ).max(maximumCallableTargets),
+    locals: z.array(
+      z
+        .object({
+          local: z.string(),
+          parameters: z.string(),
+          body: z.string(),
+          bodyStart: z.int().nonnegative(),
+          bodyEnd: z.int().positive(),
+          nodes: z.int().positive().max(maximumLocalBodyNodes),
+          bytes: z.int().positive().max(maximumLocalBodyBytes),
+          benefit: z.int().positive(),
+          calls: z.array(rangeSchema),
+        })
+        .strict()
+        .refine(
+          ({ parameters, body, bodyStart, bodyEnd, bytes, calls }) =>
+            bodyEnd - bodyStart === body.length &&
+            bytes === Buffer.byteLength(parameters) + Buffer.byteLength(body) &&
+            calls.length > 0
+        )
+    ),
     imports: z.array(
       z
         .object({
@@ -458,12 +508,201 @@ function analyzeModule(source) {
             (initialized.has(local) && declarations.get(local) === 1 && !writes.has(local))
         )
         .map(([name]) => name);
+  const locals = [];
+  const callableTargets = [];
+  if (!opaque) {
+    let guardedCallCount = 0;
+    let guardedBytes = 0;
+    for (const [local, binding] of Object.entries(program.scope.bindings)) {
+      if (
+        callableTargets.length === maximumCallableTargets ||
+        !binding.path.isVariableDeclarator() || !binding.constant ||
+        writes.has(local) || declarations.get(local) !== 1
+      ) continue;
+      const init = binding.path.get("init");
+      if (!init.isCallExpression() || init.node.optional || init.node.arguments.length === 0)
+        continue;
+      const fn = init.get("arguments.0");
+      if (
+        !fn.isArrowFunctionExpression() || fn.node.async || fn.node.params.length > 4 ||
+        fn.node.end - fn.node.start > 700
+      ) continue;
+      const calls = [];
+      let extraBytes = 0;
+      for (const reference of binding.referencePaths) {
+        const call = reference.parentPath;
+        if (!call.isCallExpression() || call.node.optional || call.node.callee !== reference.node)
+          continue;
+        let eligible = true;
+        // The two branches copy argument source. Keep source-site identities
+        // (tagged templates, nested closures and imports) out of that copy.
+        for (const argument of call.get("arguments")) {
+          if (argument.isFunction() || argument.isClass() || argument.isSpreadElement())
+            eligible = false;
+          argument.traverse({
+            "TaggedTemplateExpression|Function|Class|ImportExpression"(path) {
+              eligible = false;
+              path.stop();
+            },
+            CallExpression(path) {
+              if (path.node.callee.type === "Import") {
+                eligible = false;
+                path.stop();
+              }
+            },
+          });
+          if (argument.isTaggedTemplateExpression() || argument.isImportExpression() ||
+              (argument.isCallExpression() && argument.node.callee.type === "Import"))
+            eligible = false;
+        }
+        if (!eligible) continue;
+        extraBytes += Buffer.byteLength(source.slice(call.node.start, call.node.end)) +
+          4 * Buffer.byteLength(local) + 128;
+        calls.push({
+          start: call.node.start, end: call.node.end,
+          calleeStart: reference.node.start, calleeEnd: reference.node.end,
+        });
+      }
+      if (calls.length === 0 || guardedCallCount + calls.length > maximumGuardedCalls ||
+          guardedBytes + extraBytes > maximumGuardedBytes)
+        continue;
+      guardedCallCount += calls.length;
+      guardedBytes += extraBytes;
+      callableTargets.push({ local, start: fn.node.start, end: fn.node.end, calls });
+    }
+    // Duplicating both an outer call and its nested guarded arguments would
+    // grow source exponentially. Keep the outer guard and the original inner
+    // calls; each selected argument range is copied at most once.
+    const retainedCalls = new Set();
+    let previousEnd = -1;
+    for (const call of callableTargets.flatMap((target) => target.calls)
+      .sort((a, b) => a.start - b.start || b.end - a.end)) {
+      if (call.start < previousEnd) continue;
+      retainedCalls.add(call);
+      previousEnd = call.end;
+    }
+    for (let i = callableTargets.length - 1; i >= 0; --i) {
+      callableTargets[i].calls = callableTargets[i].calls.filter((call) => retainedCalls.has(call));
+      if (callableTargets[i].calls.length === 0) callableTargets.splice(i, 1);
+    }
+    for (const [local, binding] of Object.entries(program.scope.bindings)) {
+      const fn = binding.path;
+      if (
+        !fn.isFunctionDeclaration() ||
+        !binding.constant ||
+        writes.has(local) ||
+        declarations.get(local) !== 1 ||
+        fn.node.async ||
+        fn.node.generator ||
+        fn.node.params.length > 8 ||
+        fn.node.params.some((param) => param.type !== "Identifier")
+      )
+        continue;
+      // Keep the observable function, including annotation/registration uses.
+      // Only its direct calls receive a private copy in the same lexical scope.
+      const directCalls = binding.referencePaths.filter(
+        (reference) =>
+          reference.parentPath.isCallExpression() &&
+          !reference.parentPath.node.optional &&
+          reference.parentPath.node.callee === reference.node
+      );
+      if (directCalls.length === 0 || directCalls.length === binding.referencePaths.length)
+        continue;
+      let nodes = 0;
+      let eligible = true;
+      fn.traverse({
+        enter(path) {
+          if (++nodes > maximumLocalBodyNodes) {
+            eligible = false;
+            path.stop();
+          }
+        },
+        Identifier(path) {
+          if (path.isReferencedIdentifier() && path.node.name === "arguments") {
+            eligible = false;
+            path.stop();
+          }
+        },
+        "TaggedTemplateExpression|ImportExpression|CallExpression"(path) {
+          if (path.isCallExpression() && path.node.callee.type !== "Import") return;
+          // Template objects retain source-site identity across invocations.
+          // Copied imports would need new authenticated dependency ranges.
+          eligible = false;
+          path.stop();
+        },
+      });
+      if (!eligible) continue;
+      const reads = fn.node.params.map((param) => {
+        const parameter = fn.scope.getBinding(param.name);
+        if (!parameter.constant) return new Map();
+        const keys = new Map();
+        for (const reference of parameter.referencePaths) {
+          const member = reference.parentPath;
+          if (
+            member.node.object !== reference.node ||
+            !isReadOnlyRecordField(member)
+          )
+            return new Map();
+          const key = member.node.property.name;
+          keys.set(key, (keys.get(key) ?? 0) + 1);
+        }
+        // Match the native promotion budget before assigning a benefit. A
+        // large field-only interface otherwise crowds out removable records.
+        return keys.size <= maximumPromotedRecordFields ? keys : new Map();
+      });
+      let benefit = 0;
+      const calls = [];
+      for (const reference of directCalls) {
+        let callBenefit = 0;
+        reference.parentPath.node.arguments.forEach((arg, i) => {
+          if (
+            arg.type !== "ObjectExpression" ||
+            i >= reads.length ||
+            arg.properties.length > maximumPromotedLiteralFields ||
+            arg.properties.some(
+              (property) =>
+                property.type !== "ObjectProperty" ||
+                property.computed ||
+                property.key.name === "__proto__" ||
+                property.key.value === "__proto__"
+            )
+          )
+            return;
+          for (const property of arg.properties)
+            callBenefit += reads[i].get(property.key.name ?? property.key.value) ?? 0;
+        });
+        if (callBenefit < 4) continue;
+        benefit += callBenefit;
+        calls.push({ start: reference.node.start, end: reference.node.end });
+      }
+      if (calls.length === 0) continue;
+      const parameters = fn.node.params
+        .map((param) => source.slice(param.start, param.end))
+        .join(", ");
+      const body = source.slice(fn.node.body.start, fn.node.body.end);
+      const bytes = Buffer.byteLength(parameters) + Buffer.byteLength(body);
+      if (bytes > maximumLocalBodyBytes) continue;
+      locals.push({
+        local,
+        parameters,
+        body,
+        bodyStart: fn.node.body.start,
+        bodyEnd: fn.node.body.end,
+        nodes,
+        bytes,
+        benefit,
+        calls,
+      });
+    }
+  }
   return {
     kind: summaryKind,
     names: [...names].sort(),
     bindings: Object.keys(program.scope.bindings).sort(),
     exports,
     imports,
+    locals,
+    callableTargets,
     bindingFacts: {
       opaque,
       dependencies: [...dependencies],
@@ -607,25 +846,106 @@ export function planConvexWasmFunctionImports(module, modulesByPath, immutableIm
     }
     for (const call of binding.calls) calls.push({ ...call, name: selected.name });
   }
-  return { bodies: [...bodies.values()], calls, rejectedBindings };
+  const localBodies = [];
+  let localBytes = 0;
+  // A prebundled module can contain thousands of functions. Scale its budget
+  // with source size while bounding both body count and copied bytes. Beyond
+  // the small-module allowance, copied bodies occupy at most 1/64 of source.
+  const sourceBytes = Buffer.byteLength(module.source);
+  const localBodyLimit = Math.min(
+    maximumLocalBodies,
+    Math.max(4, Math.ceil(sourceBytes / (64 * 1024)))
+  );
+  const localByteLimit = Math.min(
+    maximumLocalBytes,
+    Math.max(16 * 1024, Math.floor(sourceBytes / 64))
+  );
+  for (const candidate of [...summary.locals].sort(
+    (a, b) => b.benefit - a.benefit || a.bytes - b.bytes || a.local.localeCompare(b.local, "en")
+  )) {
+    if (localBodies.length >= localBodyLimit || localBytes + candidate.bytes > localByteLimit)
+      continue;
+    // Profitability can change after a small edit. Keep unrelated copied
+    // functions' names independent of rank for retained native-layout reuse.
+    const stem = `__convexLocalBody_${candidate.local}`;
+    let name = stem;
+    let suffix = 0;
+    while (names.has(name)) name = `${stem}_${suffix++}`;
+    names.add(name);
+    localBodies.push({ ...candidate, name });
+    localBytes += candidate.bytes;
+    calls.push(...candidate.calls.map((call) => ({ ...call, name })));
+  }
+  // Ranking chooses membership, not emission order. Unchanged selections keep
+  // the same declaration order when just one body's score changes.
+  localBodies.sort((a, b) => a.bodyStart - b.bodyStart);
+  const callableTargets = summary.callableTargets.map((target) => {
+    const stem = `__convexCallableTarget_${target.local}`;
+    let name = stem;
+    let suffix = 0;
+    while (names.has(name)) name = `${stem}_${suffix++}`;
+    names.add(name);
+    return { ...target, name };
+  });
+  return { bodies: [...bodies.values()], localBodies, calls, callableTargets, rejectedBindings };
 }
 
 export function renderConvexWasmSpecializedModuleSource(source, dependencies, plan) {
   const edits = [
     ...dependencies.map(({ start, end, executableSpecifier }) => ({
-      start,
-      end,
-      text: JSON.stringify(executableSpecifier),
+      start, end, kind: "replace", text: JSON.stringify(executableSpecifier),
     })),
-    ...plan.calls.map(({ start, end, name }) => ({ start, end, text: name })),
-  ].sort((a, b) => b.start - a.start);
-  let previous = source.length;
+    ...plan.calls.map(({ start, end, name }) => ({ start, end, kind: "replace", text: name })),
+    ...plan.callableTargets.flatMap(({ start, end, name, local, calls }) => [
+      { start, end, name, kind: "target" },
+      ...calls.map((call) => ({ ...call, name, local, kind: "call" })),
+    ]),
+  ].sort((a, b) => a.start - b.start || b.end - a.end);
+  const roots = [];
+  const stack = [];
   for (const edit of edits) {
-    if (edit.start < 0 || edit.end <= edit.start || edit.end > previous)
-      throw new Error("Function specialization has overlapping or invalid source edits");
-    source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
-    previous = edit.start;
+    if (edit.start < 0 || edit.end <= edit.start || edit.end > source.length)
+      throw new Error("Function specialization has an invalid source edit");
+    while (stack.length > 0 && stack.at(-1).end <= edit.start) stack.pop();
+    const parent = stack.at(-1);
+    if (parent !== undefined &&
+        (edit.end > parent.end || parent.kind === "replace" ||
+         (edit.start === parent.start && edit.end === parent.end)))
+      throw new Error("Function specialization has overlapping source edits");
+    edit.children = [];
+    (parent === undefined ? roots : parent.children).push(edit);
+    stack.push(edit);
   }
+  const renderRange = (start, end, children) => {
+    let result = "";
+    let cursor = start;
+    for (const edit of children) {
+      if (edit.end <= start || edit.start >= end) continue;
+      if (edit.start < start || edit.end > end)
+        throw new Error("Function specialization crosses a copied body boundary");
+      result += source.slice(cursor, edit.start);
+      if (edit.kind === "replace") result += edit.text;
+      else if (edit.kind === "target") {
+        // Keep the arrow in argument position through syntax minifying; a
+        // comma expression would become a named assignment. Hermes inlines
+        // this identity call before resolving the guarded target's body.
+        result += `(${edit.name} = ((value) => value)(${renderRange(edit.start, edit.end, edit.children)}))`;
+      } else {
+        const prefix = source.slice(edit.start, edit.calleeStart);
+        const args = renderRange(edit.calleeEnd, edit.end, edit.children);
+        result += `(${edit.local} === ${edit.name} ? ${prefix}${edit.name}${args} : ${prefix}${edit.local}${args})`;
+      }
+      cursor = edit.end;
+    }
+    return result + source.slice(cursor, end);
+  };
+  const localBodies = plan.localBodies.map((entry) => {
+    if (source.slice(entry.bodyStart, entry.bodyEnd) !== entry.body)
+      throw new Error("Local function specialization does not match its source body");
+    const body = renderRange(entry.bodyStart, entry.bodyEnd, roots);
+    return `\nfunction ${entry.name}(${entry.parameters}) ${body}\n`;
+  });
+  source = renderRange(0, source.length, roots);
   // Transport source-map trailers are not executable material. Original source
   // and map identities remain independently authenticated by the caller.
   source = source.replace(/(^|\n)\/\/# sourceMappingURL=[^\n]*\n?$/u, "$1");
@@ -650,5 +970,8 @@ return function(${parameters}) ${body};\n})();\n`);
     const start = firstBody === undefined ? source.length : firstBody.start;
     source = source.slice(0, start) + factories.join("") + source.slice(start);
   }
+  source += localBodies.join("");
+  if (plan.callableTargets.length > 0)
+    source += `\nvar ${plan.callableTargets.map(({ name }) => name).join(", ")};\n`;
   return source;
 }

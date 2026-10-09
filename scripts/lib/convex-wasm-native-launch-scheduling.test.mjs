@@ -570,6 +570,11 @@ test("AOT process concurrency and per-process workers are independent", async ()
     "2",
   ]);
   assert.equal(convexWasmNativeCommandWorkerSlots({ args: ["-c", "input.c"] }, launchPolicy), 1);
+  for (const prefix of [[], ["--package", "/fixture/precompiler", "--"]]) {
+    const normalizationCommand = { args: [...prefix, "--normalize-core", "module.wasm", "module.normalized.wasm"] };
+    assert.equal(convexWasmNativeCommandWorkerSlots(normalizationCommand, launchPolicy), 1);
+    assert.deepEqual(convexWasmNativeCommandArguments(normalizationCommand, launchPolicy), normalizationCommand.args);
+  }
 
   const scheduler = createScheduler(launchPolicy);
   const started = [];

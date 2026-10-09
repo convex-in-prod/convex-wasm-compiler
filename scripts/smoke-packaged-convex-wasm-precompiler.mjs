@@ -81,6 +81,7 @@ export async function smokePackagedPrecompiler(
   await fs.chmod(root, 0o700);
   try {
     const inputPath = join(root, "representative.wasm");
+    const normalizedPath = join(root, "representative.normalized.wasm");
     const outputPath = join(root, "representative.cwasm");
     const identityPath = join(root, "engine-identity.json");
     await fs.writeFile(
@@ -97,7 +98,21 @@ export async function smokePackagedPrecompiler(
       "--package",
       packageDirectory,
       "--",
+      "--normalize-core",
       inputPath,
+      normalizedPath,
+    ]);
+    const normalized = await fs.readFile(normalizedPath);
+    const { instance } = await WebAssembly.instantiate(normalized);
+    if (instance.exports.answer() !== 42) {
+      throw new Error("packaged precompiler normalization changed the representative result");
+    }
+    await runBounded(process.execPath, [
+      join(scriptDirectory, "run-packaged-convex-wasm-precompiler.mjs"),
+      "--package",
+      packageDirectory,
+      "--",
+      normalizedPath,
       outputPath,
       "--engine-identity",
       identityPath,

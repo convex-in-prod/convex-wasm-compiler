@@ -1,0 +1,15 @@
+{
+  "revision": "55dff6b2430aee4fee7e5cf748af07222b079742",
+  "patchedTree": "9b680ce70567bfe678faac6da131edba278abec6",
+  "archiveSha256": "ae4401f6eea828ccede634a499fcae5ac5fffa2d7f3bd1aa4031a650234c1908",
+  "patches": [
+    {
+      "file": "bounded-stackir.patch",
+      "sha256": "3ab71048a0fbf9a4268a53780e9ffe7042c11c39a78353acf24fbc048bd87ff8"
+    },
+    {
+      "file": "cumulative-inline-budget.patch",
+      "sha256": "e8a1b4e0427dea0eb5ffe338b9095438386a7202bd97db967db07a2cc36267d5"
+    }
+  ]
+}

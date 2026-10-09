@@ -20,25 +20,85 @@ use crate::incremental_cache_trace::{CacheTrace, CompileInterval, InsertResult, 
 
 const MAGIC: &[u8; 8] = b"CWCLIF01";
 pub(super) const HEADER_BYTES: usize = 72;
-pub(super) const WAYS: usize = 16;
-// Slot sizes include authentication. Finer classes and more ways retain medium
-// and expensive large stencils instead of spending most capacity on padding.
+const MAX_WAYS: usize = 64;
+
+pub(super) struct CacheTier {
+    pub sets: usize,
+    pub ways: usize,
+    pub record_limit: usize,
+}
+
+// Slot sizes include authentication. Wider sets prevent repeated compilation
+// when a scan overfills a few hash buckets despite spare capacity elsewhere.
+// Each class keeps exactly the same slot count and byte budget as version 2.
 // Retained records are bounded at 2 GiB across source/compiler revisions,
 // with a fixed lookup index smaller than 2 MiB.
-pub(super) const TIERS: [(usize, usize); 13] = [
-    (1536, 4 * 1024),
-    (256, 8 * 1024),
-    (128, 16 * 1024),
-    (128, 32 * 1024),
-    (160, 64 * 1024),
-    (112, 128 * 1024),
-    (64, 256 * 1024),
-    (28, 512 * 1024),
-    (14, 1024 * 1024),
-    (5, 2 * 1024 * 1024),
-    (3, 4 * 1024 * 1024),
-    (1, 8 * 1024 * 1024),
-    (1, 16 * 1024 * 1024),
+pub(super) const TIERS: [CacheTier; 13] = [
+    CacheTier {
+        sets: 384,
+        ways: 64,
+        record_limit: 4 * 1024,
+    },
+    CacheTier {
+        sets: 64,
+        ways: 64,
+        record_limit: 8 * 1024,
+    },
+    CacheTier {
+        sets: 32,
+        ways: 64,
+        record_limit: 16 * 1024,
+    },
+    CacheTier {
+        sets: 32,
+        ways: 64,
+        record_limit: 32 * 1024,
+    },
+    CacheTier {
+        sets: 40,
+        ways: 64,
+        record_limit: 64 * 1024,
+    },
+    CacheTier {
+        sets: 28,
+        ways: 64,
+        record_limit: 128 * 1024,
+    },
+    CacheTier {
+        sets: 16,
+        ways: 64,
+        record_limit: 256 * 1024,
+    },
+    CacheTier {
+        sets: 7,
+        ways: 64,
+        record_limit: 512 * 1024,
+    },
+    CacheTier {
+        sets: 4,
+        ways: 56,
+        record_limit: 1024 * 1024,
+    },
+    CacheTier {
+        sets: 2,
+        ways: 40,
+        record_limit: 2 * 1024 * 1024,
+    },
+    CacheTier {
+        sets: 1,
+        ways: 48,
+        record_limit: 4 * 1024 * 1024,
+    },
+    CacheTier {
+        sets: 1,
+        ways: 16,
+        record_limit: 8 * 1024 * 1024,
+    },
+    CacheTier {
+        sets: 1,
+        ways: 16,
+        record_limit: 16 * 1024 * 1024,
+    },
 ];
 
 #[derive(Debug, Default, Serialize)]
@@ -88,11 +148,11 @@ impl IncrementalCache {
             .mode(0o700)
             .create(&root)?;
         require_private(&fs::symlink_metadata(&root)?, true)?;
-        // The preceding layout used different slot limits. Keep a fixed
+        // The preceding layouts used different slot addresses. Keep a fixed
         // format directory so old/new executables can run concurrently without
-        // reinterpreting or deleting each other's records. Legacy slots remain
-        // bounded at 1 GiB and can be removed by an idle-cache maintenance pass.
-        let root = root.join("size-classes-v2");
+        // reinterpreting or deleting each other's records. Legacy layouts remain
+        // separately bounded and can be removed by an idle-cache maintenance pass.
+        let root = root.join("size-classes-v3");
         match DirBuilder::new().mode(0o700).create(&root) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -132,7 +192,7 @@ impl IncrementalCache {
         let lookup_index = private_file(&root.join("lookup-index-v1"), true)?;
         let index_bytes = TIERS
             .iter()
-            .map(|(sets, _)| sets * WAYS * 32)
+            .map(|tier| tier.sets * tier.ways * 32)
             .sum::<usize>() as u64;
         match lookup_index.metadata()?.len() {
             0 => lookup_index.set_len(index_bytes)?,
@@ -177,29 +237,32 @@ impl IncrementalCache {
         hash.finalize().into()
     }
 
-    fn paths(&self, key: &[u8; 32], tier: usize) -> [PathBuf; WAYS] {
-        let (sets, _) = TIERS[tier];
-        let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % sets;
+    fn paths(&self, key: &[u8; 32], tier: usize) -> Vec<PathBuf> {
+        let layout = &TIERS[tier];
+        let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % layout.sets;
         let shard = self.root.join(format!("{:02x}", set % 256));
-        std::array::from_fn(|way| shard.join(format!("{tier}-{set:04x}-{way}")))
+        (0..layout.ways)
+            .map(|way| shard.join(format!("{tier}-{set:04x}-{way}")))
+            .collect()
     }
 
     fn index_set_offset(key: &[u8; 32], tier: usize) -> u64 {
-        let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % TIERS[tier].0;
-        let preceding_sets: usize = TIERS[..tier].iter().map(|(sets, _)| sets).sum();
-        ((preceding_sets + set) * WAYS * 32) as u64
+        let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % TIERS[tier].sets;
+        let preceding_slots: usize = TIERS[..tier].iter().map(|tier| tier.sets * tier.ways).sum();
+        ((preceding_slots + set * TIERS[tier].ways) * 32) as u64
     }
 
     fn lookup(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
-        for (tier, (_, limit)) in TIERS.iter().enumerate() {
-            let mut hints = [0; WAYS * 32];
+        for (tier, layout) in TIERS.iter().enumerate() {
+            let mut hints = [0; MAX_WAYS * 32];
+            let hints = &mut hints[..layout.ways * 32];
             self.lookup_index
-                .read_exact_at(&mut hints, Self::index_set_offset(key, tier))?;
+                .read_exact_at(hints, Self::index_set_offset(key, tier))?;
             for (way, hint) in hints.chunks_exact(32).enumerate() {
                 if hint != key {
                     continue;
                 }
-                let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % TIERS[tier].0;
+                let set = usize::from(u16::from_le_bytes([key[0], key[1]])) % layout.sets;
                 let path = self
                     .root
                     .join(format!("{:02x}/{tier}-{set:04x}-{way}", set % 256));
@@ -209,7 +272,7 @@ impl IncrementalCache {
                     Err(error) => return Err(error),
                 };
                 let length = file.metadata()?.len();
-                if length < HEADER_BYTES as u64 || length > *limit as u64 {
+                if length < HEADER_BYTES as u64 || length > layout.record_limit as u64 {
                     self.rejected_records.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
@@ -223,7 +286,7 @@ impl IncrementalCache {
                     continue; // An ordinary set collision is not a corrupt record.
                 }
                 let mut value = Vec::new();
-                file.take((*limit - HEADER_BYTES + 1) as u64)
+                file.take((layout.record_limit - HEADER_BYTES + 1) as u64)
                     .read_to_end(&mut value)?;
                 let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret).unwrap();
                 mac.update(&header[..40]);
@@ -387,7 +450,7 @@ impl CacheStore for IncrementalCache {
         };
         let Some(tier) = TIERS
             .iter()
-            .position(|(_, limit)| value.len() <= limit - HEADER_BYTES)
+            .position(|tier| value.len() <= tier.record_limit - HEADER_BYTES)
         else {
             self.oversized_values.fetch_add(1, Ordering::Relaxed);
             if let Some(trace) = &self.trace {
@@ -500,42 +563,43 @@ mod tests {
         let root = root("bounds");
         let trace_path = root.join("trace.jsonl");
         let cache = IncrementalCache::open(root.clone(), [1; 32], Some(&trace_path)).unwrap();
+        let ways = TIERS[0].ways;
         let mut keys = Vec::new();
         let mut candidate = 0_u64;
-        while keys.len() < WAYS + 1 {
+        while keys.len() < ways + 1 {
             let key = cache.key(&candidate.to_le_bytes());
-            if u16::from_le_bytes([key[0], key[1]]) as usize % TIERS[0].0 == 0 {
+            if u16::from_le_bytes([key[0], key[1]]) as usize % TIERS[0].sets == 0 {
                 keys.push(candidate.to_le_bytes());
             }
             candidate += 1;
         }
-        for key in &keys[..WAYS] {
+        for key in &keys[..ways] {
             assert!(cache.insert(key, key.to_vec()));
         }
-        for key in &keys[..WAYS] {
+        for key in &keys[..ways] {
             assert_eq!(cache.get(key).unwrap().as_ref(), key);
         }
-        assert!(cache.insert(&keys[WAYS], keys[WAYS].to_vec()));
+        assert!(cache.insert(&keys[ways], keys[ways].to_vec()));
         assert_eq!(
             keys.iter().filter(|key| cache.get(*key).is_some()).count(),
-            WAYS
+            ways
         );
-        assert_eq!(cache.get(&keys[WAYS]).unwrap().as_ref(), keys[WAYS]);
-        let medium = vec![3; TIERS[0].1];
+        assert_eq!(cache.get(&keys[ways]).unwrap().as_ref(), keys[ways]);
+        let medium = vec![3; TIERS[0].record_limit];
         assert!(cache.insert(b"medium", medium.clone()));
         assert_eq!(cache.get(b"medium").unwrap().as_ref(), medium);
         let large = vec![5; 2 * 1024 * 1024];
         assert!(cache.insert(b"large", large.clone()));
         assert_eq!(cache.get(b"large").unwrap().as_ref(), large);
         assert!(cache.get(b"oversized").is_none());
-        assert!(!cache.insert(b"oversized", vec![0; TIERS.last().unwrap().1]));
+        assert!(!cache.insert(b"oversized", vec![0; TIERS.last().unwrap().record_limit]));
         assert!(cache.get(b"oversized").is_none());
         assert_eq!(cache.report().unwrap().evictions, 1);
         assert_eq!(cache.report().unwrap().oversized_values, 1);
         assert_eq!(
             TIERS
                 .iter()
-                .map(|(sets, bytes)| WAYS * sets * bytes)
+                .map(|tier| tier.sets * tier.ways * tier.record_limit)
                 .sum::<usize>(),
             2 * 1024 * 1024 * 1024
         );
@@ -558,7 +622,7 @@ mod tests {
             .iter()
             .find(|event| event["result"]["kind"] == "oversized")
             .unwrap();
-        assert_eq!(oversized["valueBytes"], TIERS.last().unwrap().1);
+        assert_eq!(oversized["valueBytes"], TIERS.last().unwrap().record_limit);
         assert_eq!(oversized["compileInterval"]["kind"], "matched");
         assert_eq!(oversized["compileInterval"]["precedingLookup"], "miss");
         assert!(oversized["compileInterval"]["threadCpuNanoseconds"].is_u64());
@@ -571,7 +635,7 @@ mod tests {
         let root = root("duplicates");
         let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
         let key = b"same-function";
-        for _ in 0..WAYS * 2 {
+        for _ in 0..TIERS[0].ways * 2 {
             assert!(cache.insert(key, b"compiled bytes".to_vec()));
         }
         let occupied = cache
@@ -586,19 +650,88 @@ mod tests {
     }
 
     #[test]
+    fn repeated_scans_retain_a_working_set_below_capacity() {
+        let root = root("repeated-scans");
+        let cache = IncrementalCache::open(root.clone(), [7; 32], None).unwrap();
+        for function in 0..3000_u64 {
+            let mut value = vec![0; 4096];
+            value[..8].copy_from_slice(&function.to_le_bytes());
+            assert!(cache.insert(&function.to_le_bytes(), value));
+        }
+        drop(cache);
+        let cache = IncrementalCache::open(root.clone(), [7; 32], None).unwrap();
+        // A source edit adds a stencil while unchanged functions still reuse
+        // their records. This scan overflowed the old 16-way buckets even
+        // though the size class had more than a thousand spare slots.
+        assert!(cache.insert(&10_000_u64.to_le_bytes(), vec![1; 4096]));
+        for _ in 0..2 {
+            for function in 0..3000_u64 {
+                let value = cache
+                    .get(&function.to_le_bytes())
+                    .expect("retained stencil");
+                assert_eq!(&value[..8], &function.to_le_bytes());
+            }
+        }
+        assert_eq!(cache.report().unwrap().misses, 0);
+        assert_eq!(cache.report().unwrap().evictions, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_tiers_last_lookup_window_retains_all_ways() {
+        let root = root("tier-windows");
+        let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        let mut keys = Vec::new();
+        for (tier, layout) in TIERS.iter().enumerate() {
+            assert!(layout.ways <= MAX_WAYS);
+            for way in 0..layout.ways {
+                let mut key = [0; 32];
+                key[..2].copy_from_slice(&u16::try_from(layout.sets - 1).unwrap().to_le_bytes());
+                key[2] = tier as u8;
+                key[3] = way as u8;
+                // Exercise each physical slot without allocating a full-size
+                // stencil for the large classes. Publication still authenticates it.
+                cache.publish(&key, &key, tier).unwrap();
+                keys.push(key);
+            }
+        }
+        drop(cache);
+        let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        for key in keys {
+            assert_eq!(cache.lookup(&key).unwrap().unwrap(), key);
+        }
+        assert_eq!(cache.report().unwrap().rejected_records, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preceding_layouts_are_not_reinterpreted() {
+        let root = root("legacy-layouts");
+        let legacy = root.join("size-classes-v2");
+        fs::create_dir(&legacy).unwrap();
+        let marker = legacy.join("lookup-index-v1");
+        fs::write(&marker, b"preceding layout").unwrap();
+        let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
+        assert!(cache.insert(b"function", b"compiled bytes".to_vec()));
+        assert_eq!(cache.get(b"function").unwrap().as_ref(), b"compiled bytes");
+        assert_eq!(fs::read(marker).unwrap(), b"preceding layout");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn every_size_class_survives_reopening_and_is_authenticated() {
         let root = root("classes");
         let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
-        for (tier, (_, limit)) in TIERS.iter().enumerate() {
-            let value = vec![tier as u8; limit - HEADER_BYTES];
+        for (tier, layout) in TIERS.iter().enumerate() {
+            let value = vec![tier as u8; layout.record_limit - HEADER_BYTES];
             assert!(cache.insert(&(tier as u64).to_le_bytes(), value));
         }
         drop(cache);
         let cache = IncrementalCache::open(root.clone(), [1; 32], None).unwrap();
-        for (tier, (_, limit)) in TIERS.iter().enumerate() {
+        for (tier, layout) in TIERS.iter().enumerate() {
             let key = (tier as u64).to_le_bytes();
             let value = cache.get(&key).unwrap();
-            assert_eq!(value.len(), limit - HEADER_BYTES);
+            assert_eq!(value.len(), layout.record_limit - HEADER_BYTES);
             assert!(value.iter().all(|byte| *byte == tier as u8));
         }
         assert_eq!(cache.report().unwrap().rejected_records, 0);

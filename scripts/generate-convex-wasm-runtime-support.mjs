@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import esbuild from "esbuild";
@@ -66,6 +67,26 @@ const result = await esbuild.build({
     {
       name: "convex-wasm-object-inspect",
       setup(build) {
+        build.onLoad({ filter: /node_modules\/whatwg-url\/lib\/URL-impl\.js$/ }, async ({ path }) => ({
+          contents: await readFile(new URL(
+            "./vendor/convex-wasm-runtime-support/native-url-impl.js.txt", import.meta.url
+          ), "utf8"),
+          resolveDir: dirname(path),
+          loader: "js",
+        }));
+        // Only the Web IDL constructors are part of the runtime surface.
+        // Importing the package entry also retains the replaced JS parser.
+        build.onLoad({ filter: /node_modules\/whatwg-url\/index\.js$/ }, () => ({
+          contents: `
+            const {URL, URLSearchParams} = require("./webidl2js-wrapper");
+            const globalObject = {Array, Object, Promise, String, TypeError};
+            URL.install(globalObject, ["Window"]);
+            URLSearchParams.install(globalObject, ["Window"]);
+            exports.URL = globalObject.URL;
+            exports.URLSearchParams = globalObject.URLSearchParams;
+          `,
+          loader: "js",
+        }));
         build.onResolve({ filter: /^convex-wasm-intl-subset$/ }, () => ({
           namespace: "convex-wasm-intl-subset",
           path: "convex-wasm-intl-subset",

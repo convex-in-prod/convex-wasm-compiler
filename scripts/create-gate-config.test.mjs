@@ -110,11 +110,23 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     "-Xemit-c-bundle",
     "-Xemit-c-shard-size=2097152",
     "-Xemit-c-layout",
+    "-Xsplit-c-exceptions",
+    "-fguarded-byte-array-loops",
+    "-fnative-integer-registers",
+    "-fguarded-data-property-definitions",
+    "-fscoped-normalization-reuse",
+    "-fasync-frame-arguments",
+    "-fasync-generator-results",
   ]);
   assert.equal(config.toolchain.wasmtime.packageDirectory, "/package");
   assert.equal(config.toolchain.wasmtime.revision, wasmtimeRevision);
   assert.equal(config.command.environment.HOME, "/home/build");
   assert.equal(config.command.environment.PATH, "/usr/bin:/bin");
+  assert.equal(config.command.environment.EM_BINARYEN_ROOT, "/toolchain/binaryen-tools");
+  const toolInputs = new Map(config.toolchain.emscripten.materialInputs.map(({ label, path }) => [label, path]));
+  assert.equal(toolInputs.get("wasm-opt"), "/toolchain/binaryen-tools/bin/wasm-opt");
+  assert.equal(toolInputs.get("wasm-emscripten-finalize"), "/toolchain/binaryen-tools/bin/wasm-emscripten-finalize");
+  assert.equal(toolInputs.get("binaryen-receipt"), "/toolchain/binaryen-tools/toolchain.json");
   assert.equal(config.toolchain.wasmtime.target.cpu, "baseline");
   assert.match(
     config.toolchain.wasmtime.target.triple,
@@ -161,7 +173,7 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
   assert.deepEqual(config.runtime.mainCompileFlags, [
     "-DCONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS=1",
   ]);
-  assert.equal(config.runtime.linkFlags.at(0), "-O1");
+  assert.equal(config.runtime.linkFlags.at(0), "-O2");
   assert.equal(
     config.runtime.linkFlags.includes(
       "-Wl,--export=convex_wasm_udf_prepare_selected_entry",

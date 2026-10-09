@@ -6,5 +6,9 @@ The source archive SHA-256 is
 This directory contains the four headers needed by `flexbuffers.h` and its
 `LICENSE`. One trailing space was removed from `stl_emulation.h` for repository
 whitespace checks.
+Local verifier fixes require NUL-terminated keys and strings and equal map key
+and value counts before exposing references to the native reader. The native
+value fixture covers malformed buffers and valid empty keys, empty strings,
+embedded string NULs and shared keys.
 The native capability runtime uses `flatbuffers/flexbuffers.h` to read packed
 documents returned by the host.

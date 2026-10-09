@@ -13,6 +13,7 @@ import {
 } from "./lib/convex-wasm-artifact-pipeline.mjs";
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
 import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
+import { binaryenHelperNames, verifyBinaryenGate } from "./setup-gate.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -337,6 +338,7 @@ export function createStaticHermesGateArtifactConfig({
   return {
     command: {
       environment: {
+        EM_BINARYEN_ROOT: resolve(gateRoot, "binaryen-tools"),
         EM_CONFIG: resolve(emsdkRoot, ".emscripten"),
         EMSDK: emsdkRoot,
         HOME: normalizedPolicy.command.environment.HOME,
@@ -377,7 +379,7 @@ export function createStaticHermesGateArtifactConfig({
         resolve(gateRoot, "hermes", "public"),
       ],
       linkFlags: [
-        "-O1",
+        "-O2",
         "--profiling-funcs",
         "--no-entry",
         "-fwasm-exceptions",
@@ -422,23 +424,17 @@ export function createStaticHermesGateArtifactConfig({
             path: resolve(gateRoot, "emsdk", "upstream", "bin", "clang"),
           },
           {
-            label: "wasm-emscripten-finalize",
-            path: resolve(
-              gateRoot,
-              "emsdk",
-              "upstream",
-              "bin",
-              "wasm-emscripten-finalize",
-            ),
-          },
-          {
             label: "wasm-ld",
             path: resolve(gateRoot, "emsdk", "upstream", "bin", "wasm-ld"),
           },
           {
-            label: "wasm-opt",
-            path: resolve(gateRoot, "emsdk", "upstream", "bin", "wasm-opt"),
+            label: "binaryen-receipt",
+            path: resolve(gateRoot, "binaryen-tools", "toolchain.json"),
           },
+          ...["wasm-opt", ...binaryenHelperNames].map((name) => ({
+            label: name,
+            path: resolve(gateRoot, "binaryen-tools", "bin", name),
+          })),
         ],
         revision: gateRevisions.emsdk,
       },
@@ -453,6 +449,13 @@ export function createStaticHermesGateArtifactConfig({
           "-Xemit-c-bundle",
           "-Xemit-c-shard-size=2097152",
           "-Xemit-c-layout",
+          "-Xsplit-c-exceptions",
+          "-fguarded-byte-array-loops",
+          "-fnative-integer-registers",
+          "-fguarded-data-property-definitions",
+          "-fscoped-normalization-reuse",
+          "-fasync-frame-arguments",
+          "-fasync-generator-results",
         ],
         materialInputs: [],
         revision: gateRevisions.hermes,
@@ -475,6 +478,7 @@ export function createStaticHermesGateArtifactConfig({
 
 async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
   const normalizedPolicy = normalizeGatePolicy(policy);
+  await verifyBinaryenGate(gateRoot);
   const [hermesRevision, emsdkRevision, precompilerPackage] =
     await Promise.all([
       gitRevision(resolve(gateRoot, "hermes"), "Static Hermes checkout"),
@@ -511,6 +515,7 @@ async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
   // Keep Emscripten's cache identity stable when the gate links to a shared SDK.
   config.command.environment.EM_CONFIG = await fs.realpath(config.command.environment.EM_CONFIG);
   config.command.environment.EMSDK = await fs.realpath(config.command.environment.EMSDK);
+  config.command.environment.EM_BINARYEN_ROOT = await fs.realpath(config.command.environment.EM_BINARYEN_ROOT);
   await Promise.all([
     requireRegularFile(
       config.toolchain.staticHermes.executable,
@@ -528,7 +533,7 @@ async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
     ),
     ...config.toolchain.emscripten.materialInputs.map(({ label, path }) =>
       requireRegularFile(path, `Emscripten material ${label}`, {
-        executable: label !== "emscripten-config",
+        executable: !["emscripten-config", "binaryen-receipt"].includes(label),
       }),
     ),
     ...config.runtime.archives.map((path) =>

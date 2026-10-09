@@ -1827,6 +1827,7 @@ class Verifier FLATBUFFERS_FINAL_CLASS {
 
   bool VerifyKeys(const uint8_t *p, uint8_t byte_width) {
     // The vector part of the map has already been verified.
+    const auto value_count = Sized(p, byte_width).size();
     const size_t num_prefixed_fields = 3;
     if (!VerifyBeforePointer(p, byte_width * num_prefixed_fields)) return false;
     p -= byte_width * num_prefixed_fields;
@@ -1836,13 +1837,14 @@ class Verifier FLATBUFFERS_FINAL_CLASS {
         static_cast<uint8_t>(ReadUInt64(p + byte_width, byte_width));
     if (!VerifyByteWidth(key_byte_with)) return false;
     return VerifyVector(Reference(p, byte_width, key_byte_with, FBT_VECTOR_KEY),
-                        p - off, FBT_KEY);
+                        p - off, FBT_KEY) &&
+           Check(Sized(p - off, key_byte_with).size() == value_count);
   }
 
   bool VerifyKey(const uint8_t *p) {
     FLEX_CHECK_VERIFIED(p, PackedType(BIT_WIDTH_8, FBT_KEY));
     while (p < buf_ + size_)
-      if (*p++) return true;
+      if (!*p++) return true;
     return false;
   }
 
@@ -1850,7 +1852,8 @@ class Verifier FLATBUFFERS_FINAL_CLASS {
 
   bool VerifyTerminator(const String &s) {
     return VerifyFromPointer(reinterpret_cast<const uint8_t *>(s.c_str()),
-                             s.size() + 1);
+                             s.size() + 1) &&
+           Check(s.c_str()[s.size()] == '\0');
   }
 
   bool VerifyRef(Reference r) {

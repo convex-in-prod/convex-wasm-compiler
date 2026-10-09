@@ -1741,16 +1741,39 @@ async function sideEffectFreeApplicationModules({
             `application side-effect proof cannot bind ${candidate.inputPath} import ${JSON.stringify(args.path)}`
           );
         }
-        const [edge] = matchingEdges;
+        let [edge] = matchingEdges;
         if (
           matchingEdges.some(
             ({ external = false, path }) =>
               external !== (edge.external ?? false) || path !== edge.path
           )
         ) {
-          fail(
-            `application side-effect proof found inconsistent resolutions for ${candidate.inputPath} import ${JSON.stringify(args.path)}`
+          // The metafile can retain an erased TypeScript import as an unresolved
+          // external edge alongside a live import of the same specifier. Bind
+          // this actual resolver invocation, including its import attributes,
+          // instead of treating the erased edge as a second runtime dependency.
+          const resolved = await build.resolve(args.path, {
+            importer: resolve(repoRoot, candidate.inputPath),
+            kind: args.kind,
+            resolveDir: args.resolveDir,
+            with: args.with,
+          });
+          if (resolved.errors.length !== 0) return resolved;
+          const resolvedInputPath =
+            resolved.external
+              ? resolved.path
+              : resolved.namespace === "file"
+                ? toPosix(relative(repoRoot, resolve(resolved.path)))
+                : `${resolved.namespace}:${resolved.path}`;
+          edge = matchingEdges.find(
+            ({ external = false, path }) =>
+              external === resolved.external && path === resolvedInputPath
           );
+          if (edge === undefined) {
+            fail(
+              `application side-effect proof resolution ${candidate.inputPath} -> ${resolvedInputPath} disagrees with the recorded imports`
+            );
+          }
         }
         if (edge.external === true) {
           return {
@@ -2530,13 +2553,28 @@ async function computeErasedExternalImportKeys(esbuild, absolutePath, inputPath,
   if (outputs.length !== 1) {
     fail(`TypeScript erasure proof for ${inputPath} emitted an unexpected output set`);
   }
-  const runtimeImportKeys = new Set(
-    (outputs[0].imports ?? []).map((imported) => externalImportKey(imported))
-  );
+  const runtimeImportCounts = new Map();
+  for (const imported of outputs[0].imports ?? []) {
+    const key = externalImportKey(imported);
+    runtimeImportCounts.set(key, (runtimeImportCounts.get(key) ?? 0) + 1);
+  }
+  const resolvedImportCounts = new Map();
+  for (const imported of input.imports ?? []) {
+    if (imported.external === true) continue;
+    const key = externalImportKey({
+      kind: imported.kind,
+      path: imported.original ?? imported.path,
+    });
+    resolvedImportCounts.set(key, (resolvedImportCounts.get(key) ?? 0) + 1);
+  }
   const erased = new Set();
   for (const imported of externalImports) {
     const key = externalImportKey(imported);
-    if (runtimeImportKeys.has(key)) {
+    // A live import and an erased type import may share a specifier. All live
+    // occurrences must be accounted for by resolved edges before classifying
+    // the remaining external markers as erased. A set of specifiers loses this
+    // distinction and rejects valid mixed imports.
+    if ((runtimeImportCounts.get(key) ?? 0) > (resolvedImportCounts.get(key) ?? 0)) {
       fail(`external input import is forbidden: ${inputPath} -> ${imported.path}`);
     }
     erased.add(key);
@@ -2565,6 +2603,7 @@ async function erasedExternalImportKeys({
     absolutePath,
     buildOptions: ERASURE_BUILD_OPTIONS,
     externalImports,
+    resolvedImports: (input.imports ?? []).filter((imported) => imported.external !== true),
     inputPath,
     loader: sourceLoader(absolutePath),
     source: {
@@ -2821,20 +2860,22 @@ function deploymentComparison(graphSession, selectedEntry, inputs, toolchain, mo
         continue;
       }
       if (edge.erased === "esbuild-typescript") {
-        // Esbuild records a fully erased type import as its unresolved external specifier. If the
-        // deployment build retains a value use, it instead records the resolved internal target.
+        // An erased type import and a live import can share a specifier. The
+        // deployment graph may retain both markers; every resolved match must
+        // still belong to the authenticated dependency closure.
         const deploymentMatches = (deploymentInput.imports ?? []).filter(
           ({ external = false, kind, original, path: target }) =>
             kind === edge.kind &&
             ((external === true && original === undefined && target === edge.path) ||
               (external === false && original === edge.path))
         );
-        const deploymentMatch = deploymentMatches[0];
         if (
-          deploymentMatches.length !== 1 ||
-          (deploymentMatch.external !== true &&
-            (!dependencyInputSet.has(deploymentMatch.path) ||
-              deploymentInputs[deploymentMatch.path] === undefined))
+          deploymentMatches.length === 0 ||
+          deploymentMatches.some(
+            (match) =>
+              match.external !== true &&
+              (!dependencyInputSet.has(match.path) || deploymentInputs[match.path] === undefined)
+          )
         ) {
           fail(
             `compile-profile erased import ${path} -> ${edge.path} disagrees with the deployment graph`

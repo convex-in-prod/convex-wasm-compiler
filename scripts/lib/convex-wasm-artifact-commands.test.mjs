@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 import { buildArtifactCommands } from "./convex-wasm-artifact-pipeline.mjs";
+import { buildCoreNormalizationCommand } from "./convex-wasm-artifact-commands.mjs";
 import { convexWasmNativeCommandArguments } from "./convex-wasm-native-launch-scheduling.mjs";
 
 test("constructs argv-safe commands with the proven exception and AOT stages", () => {
@@ -42,6 +43,10 @@ test("constructs argv-safe commands with the proven exception and AOT stages", (
     },
   };
   const commands = buildArtifactCommands(config);
+  assert.deepEqual(buildCoreNormalizationCommand(config), {
+    executable: "/tool chain/precompile",
+    args: ["--package", "/packages/precompiler", "--", "--normalize-core", "module.wasm", "module.normalized.wasm"],
+  });
   assert.deepEqual(commands.staticHermes, {
     executable: resolve("scripts/run-convex-wasm-static-hermes-precompiler.mjs"),
     args: [
@@ -78,6 +83,8 @@ test("constructs argv-safe commands with the proven exception and AOT stages", (
   });
   assert.ok(capabilityCommands.staticHermes.args.includes("-typed"));
   assert.ok(capabilityCommands.staticHermesApplication.args.includes("-fstatic-math-builtins"));
+  assert.ok(capabilityCommands.staticHermesApplication.args.includes("-fstatic-object-prototype"));
+  assert.ok(!capabilityCommands.staticHermes.args.includes("-fstatic-object-prototype"));
   assert.ok(!capabilityCommands.staticHermesApplication.args.includes("-fstatic-builtins"));
   assert.ok(capabilityCommands.staticHermes.args.includes("-Xes6-block-scoping"));
   assert.deepEqual(

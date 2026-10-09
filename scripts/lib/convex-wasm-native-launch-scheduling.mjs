@@ -220,6 +220,10 @@ const nativePhaseSchedulingStages = Object.freeze({
     schedulingClass: "aot",
     workingSetEstimateBytes: 512 * MEBIBYTE,
   }),
+  "core-wasm-normalization": Object.freeze({
+    schedulingClass: "core-wasm-normalization",
+    workingSetEstimateBytes: 1024 * MEBIBYTE,
+  }),
   "module-graph-common-wasmtime-aot": Object.freeze({
     schedulingClass: "module-graph-common-wasmtime-aot",
     workingSetEstimateBytes: AOT_MINIMUM_WORKING_SET_ESTIMATE_BYTES,
@@ -798,7 +802,10 @@ export function createConvexWasmNativePhaseScheduler(launchPolicy) {
 
 export function convexWasmNativeCommandArguments(command, launchPolicy) {
   const configuredWorkerSlots = convexWasmNativeCommandWorkerSlots(command, launchPolicy);
-  if (command.args[0] !== "--package") return command.args;
+  if (
+    command.args[0] !== "--package" ||
+    (command.args[2] === "--" && command.args[3] === "--normalize-core")
+  ) return command.args;
   const operationalWorkerSlots = nativeCommandWorkerSlots.getStore() ?? configuredWorkerSlots;
   if (operationalWorkerSlots > configuredWorkerSlots) {
     fail(
@@ -816,5 +823,8 @@ export function convexWasmNativeCommandWorkerSlots(command, launchPolicy) {
     fail("native command arguments must be an array of strings");
   }
   const normalizedLaunchPolicy = normalizeConvexWasmNativeLaunchPolicy(launchPolicy);
-  return command.args[0] === "--package" ? normalizedLaunchPolicy.aotWorkers : 1;
+  return command.args[0] === "--package" &&
+    !(command.args[2] === "--" && command.args[3] === "--normalize-core")
+    ? normalizedLaunchPolicy.aotWorkers
+    : 1;
 }

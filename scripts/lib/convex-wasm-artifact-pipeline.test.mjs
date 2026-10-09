@@ -20,6 +20,7 @@ import { authenticateConvexWasmOfficialOutputSelectionFixtures } from "../test-f
 import { describeNativeCommandTermination, runBoundedNativeCommand } from "./bounded-native-command.mjs";
 import {
   compileConvexWasmArtifact,
+  compileConvexWasmCapabilityEntryArtifact,
   compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession,
   createConvexWasmCapabilityArtifactMaterialSession,
   finalizeConvexWasmArtifactMaterialSession,
@@ -154,6 +155,20 @@ static const char *option(int argc, char **argv, const char *name) {
 }
 int main(int argc, char **argv) {
   if (argc < 3) return 2;
+  if (strcmp(argv[1], "--normalize-core") == 0) {
+    if (argc != 4) return 2;
+    FILE *input = fopen(argv[2], "rb");
+    FILE *output = fopen(argv[3], "wb");
+    if (input == NULL || output == NULL) return 3;
+    char buffer[4096];
+    size_t size;
+    while ((size = fread(buffer, 1, sizeof(buffer), input)) > 0) fwrite(buffer, 1, size, output);
+    const unsigned char marker[] = {0, 11, 10, 'n', 'o', 'r', 'm', 'a', 'l', 'i', 'z', 'e', 'd'};
+    fwrite(marker, 1, sizeof(marker), output);
+    fclose(input);
+    fclose(output);
+    return 0;
+  }
   option(argc, argv, "--parallel-compilation-workers");
   FILE *input = fopen(argv[1], "rb");
   FILE *output = fopen(argv[2], "wb");
@@ -1100,7 +1115,7 @@ function scheduledCohortEntriesForCompilerOutput(compilerOutput) {
   });
 }
 
-async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKind = "query") {
+async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKind = "query", physicalOptions = {}) {
   const modulePath = basename(entryPath, ".ts");
   const entry = {
     ...capabilityEntryFixture(),
@@ -1109,7 +1124,7 @@ async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKin
     modulePath,
     routes: [{ exportName: "sharedHandler", udfKind, visibility: "public" }],
   };
-  const physical = await physicalChunkApplicationFixture([entry]);
+  const physical = await physicalChunkApplicationFixture([entry], physicalOptions);
   const { applicationJavascript, bridgeJavascript, formatterJavascript } =
     renderNativeDbGetCapabilityTargetUnits({
       argumentFields: [],
@@ -1150,6 +1165,7 @@ async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKin
 
 test("public artifact pipeline constructs and reuses a complete package", async (t) => {
   const fixture = await createFixture(t);
+  fixture.options.command.environment.EM_BINARYEN_ROOT = "/toolchain/original-binaryen";
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
   let launchedStaticHermesWithNode = false;
   fixture.options.resourceGuard = {
@@ -1157,6 +1173,7 @@ test("public artifact pipeline constructs and reuses a complete package", async 
     launchPolicy,
     released: false,
     runCommand: async (options) => {
+      assert.equal(options.environment.EM_BINARYEN_ROOT, "/toolchain/original-binaryen");
       const launcher = options.arguments.find((argument) =>
         argument.endsWith("/run-convex-wasm-static-hermes-precompiler.mjs")
       );
@@ -1191,6 +1208,8 @@ test("public artifact pipeline constructs and reuses a complete package", async 
     join(fixture.options.cacheLayout.cacheRoot, "incremental-functions")
   );
   const initialCommandCount = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
+  // Tool bytes are authenticated as material; their physical directory is not semantic.
+  fixture.options.command.environment.EM_BINARYEN_ROOT = "/toolchain/relocated-binaryen";
   const second = await compileConvexWasmArtifact(fixture.options);
   assert.equal(first.buildReport.package.cache, "miss");
   assert.equal(second.buildReport.package.cache, "hit");
@@ -1199,6 +1218,67 @@ test("public artifact pipeline constructs and reuses a complete package", async 
   assert.deepEqual(second.executionManifest, first.executionManifest);
   assert.equal(second.package.cacheKey, first.package.cacheKey);
   assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, initialCommandCount);
+});
+
+test("capability builds link native URL objects and reuse them across application edits", async (t) => {
+  const fixture = await createFixture(t);
+  fixture.options.resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy: { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 },
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  fixture.options.runtime.mainSourcePath = join(repositoryRoot, "scripts/lib/convex-wasm-native-capability-runtime-main.cpp");
+  const entryPath = "convex/sampleRoute.ts";
+  const options = await moduleGraphMaterialSessionInputFixture(fixture, entryPath, "query", {
+    dependencyImporterEntryPath: entryPath,
+    dependencySource: "module.exports = 1;\n",
+  });
+  const first = await compileConvexWasmCapabilityEntryArtifact(options);
+  const urlPhases = first.buildReport.phases.filter(({ stage }) => stage.startsWith("native-url-"));
+  assert.deepEqual(urlPhases.map(({ stage, cache }) => [stage, cache]), [
+    ["native-url-parser-object", "miss"],
+    ["native-url-binding-object", "miss"],
+  ]);
+  const commands = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").map(JSON.parse);
+  for (const name of ["parser", "binding"]) {
+    const compile = commands.find(({ args }) => args.includes(`native-url-${name}.cpp`));
+    assert.ok(compile.args.includes("-std=c++20"));
+    assert.equal(compile.args.some((argument) => argument.startsWith("-I")), name === "binding");
+  }
+  const link = commands.find(({ tool, args }) => tool === "emcc" && args.includes("module.wasm"));
+  for (const index of [0, 1]) {
+    assert.ok(link.args.includes(`native-url-${index}.o`));
+    assert.ok(link.workingNames.includes(`native-url-${index}.o`));
+  }
+  const repeated = await compileConvexWasmCapabilityEntryArtifact(options);
+  assert.equal(repeated.package.cacheKey, first.package.cacheKey);
+  assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, commands.length);
+
+  const editedOptions = await moduleGraphMaterialSessionInputFixture(fixture, entryPath, "query", {
+    dependencyImporterEntryPath: entryPath,
+    dependencySource: "module.exports = 2;\n",
+  });
+  const edited = await compileConvexWasmCapabilityEntryArtifact(editedOptions);
+  assert.notEqual(edited.package.cacheKey, first.package.cacheKey);
+  for (const { stage, cacheKey } of urlPhases) {
+    const reused = edited.buildReport.phases.find((phase) => phase.stage === stage);
+    assert.equal(reused.cache, "hit");
+    assert.equal(reused.cacheKey, cacheKey);
+  }
+  assert.ok(edited.buildReport.phases.some(({ stage, cache }) => stage === "generated-c" && cache === "miss"));
+
+  // Reusing the final package must still authenticate the retained native inputs.
+  const bindingPhase = urlPhases.find(({ stage }) => stage === "native-url-binding-object");
+  const cacheDirectory = join(fixture.options.cacheLayout.immutable.artifacts, bindingPhase.stage, bindingPhase.cacheKey);
+  const objectName = (await fs.readdir(cacheDirectory)).find((name) => name.endsWith(".o"));
+  assert.ok(objectName);
+  const objectPath = join(cacheDirectory, objectName);
+  const bytes = await fs.readFile(objectPath);
+  bytes[0] ^= 1;
+  await fs.writeFile(objectPath, bytes);
+  await assert.rejects(compileConvexWasmCapabilityEntryArtifact(editedOptions), /cache artifact digest or size does not match metadata/u);
 });
 
 test("bundle coverage renumbering reuses byte-identical C objects", async (t) => {
@@ -1391,11 +1471,36 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   const fixture = await createFixture(t, { moduleGraphWasm: true, staticHermesCBundle: true });
   fixture.options.toolchain.staticHermes.flags.push("-Xemit-c-layout");
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  const normalizedHashes = [];
+  const aotInputHashes = new Set();
+  const packageDirectory = fixture.options.toolchain.wasmtime.packageDirectory;
+  const hiddenPackageDirectory = `${packageDirectory}.retained`;
+  let removeOriginalPackageOnNormalization = true;
   fixture.options.resourceGuard = {
     kind: convexWasmBuildResourceGuardKind,
     launchPolicy,
     released: false,
-    runCommand: runBoundedNativeCommand,
+    runCommand: async (command) => {
+      const normalizing = command.arguments.includes("--normalize-core");
+      if (normalizing) {
+        assert.equal(command.arguments.includes("--parallel-compilation-workers"), false);
+        if (removeOriginalPackageOnNormalization) {
+          await fs.rename(packageDirectory, hiddenPackageDirectory);
+          removeOriginalPackageOnNormalization = false;
+        }
+      }
+      if (command.arguments.includes("--engine-identity")) {
+        aotInputHashes.add(createHash("sha256").update(await fs.readFile(join(command.cwd, "module.wasm"))).digest("hex"));
+      }
+      const result = await runBoundedNativeCommand(command);
+      if (normalizing && result.code === 0) {
+        const original = await fs.readFile(join(command.cwd, "module.wasm"));
+        const normalized = await fs.readFile(join(command.cwd, "module.normalized.wasm"));
+        assert.notDeepEqual(normalized, original);
+        normalizedHashes.push(createHash("sha256").update(normalized).digest("hex"));
+      }
+      return result;
+    },
     describeTermination: describeNativeCommandTermination,
   };
   const options = await moduleGraphMaterialSessionInputFixture(fixture, "convex/sampleRoute.ts");
@@ -1407,6 +1512,16 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   });
   const compilerOutput = await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(session, [options], { packageReceiptTopologyOnly: true });
   await finalizeConvexWasmArtifactMaterialSession(session);
+  const baseCommands = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").map(JSON.parse);
+  for (const name of ["parser", "binding"]) {
+    const compile = baseCommands.find(({ args }) => args.includes(`native-url-${name}.cpp`));
+    assert.ok(compile.args.includes("-std=c++20"));
+    assert.equal(compile.args.includes("-fPIC"), false);
+  }
+  const baseLink = baseCommands.find(({ tool, args }) => tool === "emcc" && args.includes("-sMAIN_MODULE=2"));
+  assert.ok(normalizedHashes.length > 0, "base preactivation must normalize with retained material");
+  await fs.rename(hiddenPackageDirectory, packageDirectory);
+  const preactivationNormalizations = normalizedHashes.length;
   const compilerCalls = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
   const repeatedSession = await createConvexWasmCapabilityArtifactMaterialSession(options, {
     launchPolicy, nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
@@ -1417,6 +1532,8 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     await finalizeConvexWasmArtifactMaterialSession(repeatedSession);
   }
   assert.equal((await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length, compilerCalls);
+  assert.equal(normalizedHashes.length, preactivationNormalizations);
+  await fs.rename(packageDirectory, hiddenPackageDirectory);
   const entries = scheduledCohortEntriesForCompilerOutput(compilerOutput);
   const cohort = { cohortId: fingerprintJson({ entries }), entries };
   const packageOptions = {
@@ -1438,6 +1555,39 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   assert.equal(artifact.buildReport.package.cache, "miss");
   assert.ok(artifact.package.path);
   await artifact.verifyMaterials();
+  assert.ok(normalizedHashes.length > preactivationNormalizations, "package construction must normalize with retained material after session finalization");
+  for (const module of artifact.graphManifest.modules) {
+    assert.ok(normalizedHashes.includes(module.artifacts.coreWasm.sha256));
+    assert.ok(aotInputHashes.has(module.artifacts.coreWasm.sha256));
+  }
+  const prelinkReports = artifact.buildReport.sharedPhases
+    .filter(({ stage }) => stage.startsWith("module-graph-prelink-"));
+  const baseReport = prelinkReports.find(({ stage }) => stage === "module-graph-prelink-base");
+  const baseEntry = JSON.parse(await fs.readFile(join(
+    fixture.options.cacheLayout.immutable.artifacts, baseReport.stage, baseReport.cacheKey, "entry.json"
+  ), "utf8"));
+  for (const index of [0, 1]) {
+    const objectIndex = baseEntry.identity.objects.findIndex(({ name }) => name === `native-url-${index}`);
+    assert.ok(objectIndex >= 0);
+    const objectName = `object-${String(objectIndex).padStart(4, "0")}.o`;
+    assert.ok(baseLink.args.includes(objectName));
+    assert.ok(baseLink.workingNames.includes(objectName));
+  }
+  assert.ok(prelinkReports.some(({ cache }) => cache === "miss"));
+  for (const { timing } of prelinkReports.filter(({ cache }) => cache === "miss")) {
+    assert.equal(timing.kind, "convex-wasm-normalized-core-timing-v1");
+    assert.ok(timing.normalization.command.args.includes("--normalize-core"));
+    assert.equal(timing.normalization.command.args[0], "--package");
+    for (const field of ["systemCpuMilliseconds", "userCpuMilliseconds", "wallMilliseconds"]) {
+      assert.equal(timing[field], timing.link[field] + timing.normalization[field]);
+    }
+    assert.equal(timing.maxRssKiB, Math.max(timing.link.maxRssKiB, timing.normalization.maxRssKiB));
+  }
+  const normalizationsAfterConstruction = normalizedHashes.length;
+  const repeatedArtifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts(packageOptions);
+  assert.equal(repeatedArtifact.buildReport.package.cache, "hit");
+  assert.equal(normalizedHashes.length, normalizationsAfterConstruction);
+  await fs.rename(hiddenPackageDirectory, packageDirectory);
   const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
     cacheLayout: fixture.options.cacheLayout,
     cacheRoot: fixture.options.cacheRoot,
@@ -1465,6 +1615,43 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   await restoredArtifact.verifyMaterials();
   assert.equal(restoredArtifact.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256);
   assert.equal(restoredArtifact.buildReport.package.cache, "hit");
+  assert.equal(normalizedHashes.length, normalizationsAfterConstruction);
+  // A new authenticated normalizer invalidates prelink even when the native linker
+  // and object bytes are unchanged. Preserve the old package for the retained output.
+  const changedBinary = join(fixture.root, "fixture-graph-precompiler");
+  await fs.appendFile(changedBinary, Buffer.from([0]));
+  const updatedPackage = await writeFixturePrecompilerPackage({
+    binaryPath: changedBinary,
+    identitySeed: "artifact-pipeline-fixture-2",
+    root: join(fixture.root, "updated-precompiler-packages"),
+  });
+  const updatedOptions = {
+    ...options,
+    toolchain: {
+      ...options.toolchain,
+      wasmtime: { ...options.toolchain.wasmtime, packageDirectory: updatedPackage.packageDirectory },
+    },
+  };
+  const updatedSession = await createConvexWasmCapabilityArtifactMaterialSession(updatedOptions, {
+    launchPolicy,
+    nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
+  });
+  let updatedCompilerOutput;
+  try {
+    updatedCompilerOutput = await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(updatedSession, [updatedOptions], { packageReceiptTopologyOnly: true });
+  } finally {
+    await finalizeConvexWasmArtifactMaterialSession(updatedSession);
+  }
+  const updatedArtifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts({
+    ...packageOptions,
+    compilerOutputs: [updatedCompilerOutput],
+  });
+  assert.ok(normalizedHashes.length > normalizationsAfterConstruction);
+  const previousBasePrelink = prelinkReports.find(({ stage }) => stage === "module-graph-prelink-base");
+  const updatedBasePrelink = updatedArtifact.buildReport.sharedPhases.find(({ stage }) => stage === "module-graph-prelink-base");
+  assert.notEqual(updatedBasePrelink.cacheKey, previousBasePrelink.cacheKey);
+  assert.equal(updatedBasePrelink.cache, "miss");
+  assert.notDeepEqual(updatedArtifact.graphManifest.toolchain.core.normalization, artifact.graphManifest.toolchain.core.normalization);
 });
 
 test("builds a module-graph package from a separate application's source graph", async (t) => {

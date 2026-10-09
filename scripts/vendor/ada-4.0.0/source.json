@@ -1,0 +1,45 @@
+{
+  "package": "ada-url@4.0.0",
+  "archive": "https://static.crates.io/crates/ada-url/ada-url-4.0.0.crate",
+  "archiveSha256": "c153db7a5a9f8a92a313dff0fecbbb28198542fc98bf024b961baf9896408347",
+  "patch": "retained-capacity.patch",
+  "patchSha256": "7e31227ce5eb4ee234ef758d78e5d18bd029435c52049bc84e75ce8b29175788",
+  "files": {
+    "ada.h": {
+      "archivePath": "deps/ada.h",
+      "upstreamSha256": "0010b17b3ff489e13998e86d921b16e1643e370ee3276c584f1b0c4b72bdf628",
+      "sha256": "82cb3c7e0a96358159806e2bd869ca4f212709d27c28aa5deabbc4e3aee4ff53",
+      "size": 426578
+    },
+    "ada.cpp": {
+      "archivePath": "deps/ada.cpp",
+      "upstreamSha256": "1c722f8f5355d6bf2bf3601870684edc875aa8f56b4d4735440d96263dd0207c",
+      "sha256": "1c722f8f5355d6bf2bf3601870684edc875aa8f56b4d4735440d96263dd0207c",
+      "size": 723345
+    },
+    "LICENSE-MIT": {
+      "archivePath": "LICENSE-MIT",
+      "upstreamSha256": "af0d7d2cef91fc243cf4ad98570b03d1f26f5e0227cad0f5f4a7376e2feb3160",
+      "sha256": "af0d7d2cef91fc243cf4ad98570b03d1f26f5e0227cad0f5f4a7376e2feb3160",
+      "size": 1071
+    },
+    "LICENSE-APACHE": {
+      "archivePath": "LICENSE-APACHE",
+      "upstreamSha256": "508d4676d4083e874df706f302d9d42e5e7f9aed3f5a7ea614dc6d2b2252a22f",
+      "sha256": "508d4676d4083e874df706f302d9d42e5e7f9aed3f5a7ea614dc6d2b2252a22f",
+      "size": 11342
+    },
+    "urltestdata.json": {
+      "archivePath": "tests/wpt/urltestdata.json",
+      "upstreamSha256": "355c9f1e5f34aae66ba8adfabf3c853f5cd30ea22964ef7a53eb292e7975d81e",
+      "sha256": "355c9f1e5f34aae66ba8adfabf3c853f5cd30ea22964ef7a53eb292e7975d81e",
+      "size": 228373
+    },
+    "setters_tests.json": {
+      "archivePath": "tests/wpt/setters_tests.json",
+      "upstreamSha256": "62e4b14bdaddd66b0f7d99bf066aed1c4a588667f4aa97bf26da212134fc24bf",
+      "sha256": "62e4b14bdaddd66b0f7d99bf066aed1c4a588667f4aa97bf26da212134fc24bf",
+      "size": 82134
+    }
+  }
+}

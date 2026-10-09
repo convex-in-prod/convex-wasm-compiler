@@ -9,6 +9,7 @@ import { resolveConvexWasmApplicationPackageSet } from "./convex-wasm-applicatio
 import {
   authenticateConvexWasmCompileProfile,
   buildConvexWasmCompileProfile,
+  convexWasmCompileProfileBuildOptions,
   convexWasmCompileProfileInstalledBootstrapMode,
   convexWasmCompileProfileTargetAdapterMode,
   convexWasmTargetZodJitlessTransformPolicy,
@@ -73,7 +74,14 @@ test("builds a target profile using the explicit application package root", asyn
     ),
     fs.writeFile(
       join(applicationRoot, "functions", "read.ts"),
-      'import { queryGeneric as query } from "convex/server";\nexport const read = query({ args: {}, handler: () => 42 });\n'
+      'import { queryGeneric as query } from "convex/server";\n' +
+        'import { type Answer } from "./answer";\n' +
+        'import { answer } from "./answer";\n' +
+        'export const read = query({ args: {}, handler: (): Answer => answer });\n'
+    ),
+    fs.writeFile(
+      join(applicationRoot, "functions", "answer.ts"),
+      'export type Answer = number;\nexport const answer = 42;\n'
     ),
     fs.cp(join(compilerRoot, "node_modules"), join(applicationRoot, "node_modules"), {
       dereference: true,
@@ -107,6 +115,12 @@ test("builds a target profile using the explicit application package root", asyn
   };
   const profile = await buildConvexWasmCompileProfile(options);
   authenticateConvexWasmCompileProfile(profile);
+  const answerImports = profile.identity.inputs["functions/read.ts"].imports.filter(
+    ({ path, original }) => (original ?? path) === "./answer"
+  );
+  assert.equal(answerImports.length, 2);
+  assert.equal(answerImports.filter(({ erased }) => erased === "esbuild-typescript").length, 1);
+  assert.equal(answerImports.filter(({ external }) => external === false).length, 1);
   const packageSet = resolveConvexWasmApplicationPackageSet(applicationRoot);
   assert.deepEqual(profile.identity.toolchain.versions, {
     convex: packageSet.convex.version,
@@ -121,6 +135,60 @@ test("builds a target profile using the explicit application package root", asyn
   });
   authenticateConvexWasmCompileProfile(bootstrap);
   assert.notEqual(bootstrap.sha256, profile.sha256);
+  const inputMaterials = Object.fromEntries(
+    Object.entries(bootstrap.identity.inputs)
+      .filter(([, input]) => !input.virtual)
+      .map(([path, input]) => [
+        path,
+        {
+          sha256: input.sha256,
+          size: input.size,
+          virtual: false,
+          imports: input.imports
+            .filter((edge) => edge.synthetic !== "esbuild-runtime")
+            .map(({ external, kind, original, path: target }) => ({
+              external,
+              kind,
+              ...(original === undefined ? {} : { original }),
+              path: target,
+            })),
+        },
+      ])
+  );
+  const deploymentGraphSession = {
+    dependencyGraphByEntry: new Map([
+      [options.entryPath, { inputPaths: Object.keys(inputMaterials), sha256: "1".repeat(64) }],
+    ]),
+    deploymentOutputMetafileSha256: "2".repeat(64),
+    graphSha256: "3".repeat(64),
+    graphTemplate: {
+      assumptions: {
+        conditions: convexWasmCompileProfileBuildOptions.conditions,
+        platform: convexWasmCompileProfileBuildOptions.platform,
+        target: convexWasmCompileProfileBuildOptions.target,
+      },
+    },
+    inputMaterials,
+    toolchain: bootstrap.identity.toolchain.versions,
+  };
+  const boundBootstrap = await buildConvexWasmCompileProfile({
+    ...options,
+    mode: convexWasmCompileProfileInstalledBootstrapMode,
+    deploymentGraphSession,
+  });
+  assert.deepEqual(boundBootstrap.javascript, bootstrap.javascript);
+  await boundBootstrap.verifyMaterials();
+  const deployedImports = inputMaterials[options.entryPath].imports;
+  assert.equal(deployedImports.filter((edge) => (edge.original ?? edge.path) === "./answer").length, 2);
+  const liveAnswer = deployedImports.find((edge) => edge.original === "./answer");
+  assert.ok(liveAnswer);
+  deployedImports.push({ ...liveAnswer, path: "functions/missing.ts" });
+  await assert.rejects(
+    boundBootstrap.verifyMaterials(),
+    /compile-profile erased import functions\/read\.ts -> \.\/answer disagrees/u
+  );
+  deployedImports.pop();
+  await boundBootstrap.verifyMaterials();
   const copiedRoot = join(await fs.realpath(tmpdir()), `convex-wasm-profile-copy-${process.pid}-${Date.now()}`);
   context.after(() => fs.rm(copiedRoot, { force: true, recursive: true }));
   await fs.cp(applicationRoot, copiedRoot, { recursive: true });

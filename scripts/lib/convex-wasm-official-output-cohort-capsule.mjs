@@ -49,7 +49,7 @@ const COMPILER_OUTPUT_TOPOLOGY_KIND =
 const OFFICIAL_COHORT_GENERATED_JAVASCRIPT_MAX_BYTES = 16 * 1024 * 1024;
 const PIPELINE_KIND = "convex-wasm-artifact-pipeline-v9";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
-const MATERIAL_LOCATION_ENVIRONMENT_KEYS = new Set(["EM_CONFIG", "EMSDK", "HOME", "PATH"]);
+const MATERIAL_LOCATION_ENVIRONMENT_KEYS = new Set(["EM_BINARYEN_ROOT", "EM_CONFIG", "EMSDK", "HOME", "PATH"]);
 const PHYSICAL_FIELDS = new Set([
   "artifactPath",
   "archives",

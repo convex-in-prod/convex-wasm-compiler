@@ -287,6 +287,10 @@ async function buildPrecompiler(targetTriple, buildInputs, source, cargoBuildJob
   );
   let binaryPath;
   for (const [operation, argumentsList] of [
+    [
+      "Convex Wasm frontend Cargo test",
+      ["test", "--locked", "--release", "--target", targetTriple, "--workspace", "--lib"],
+    ],
     ["Convex Wasm precompiler Cargo test", cargoTestArguments],
     ["Convex Wasm precompiler Cargo build", cargoArguments],
     ["Convex Wasm matrix runner Cargo build", runnerCargoArguments],

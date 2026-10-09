@@ -4,13 +4,14 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import { nodeUrlService } from "../test-fixtures/native-url/node-service.mjs";
 
 import {
   convexWasmRuntimeSupportIdentity,
   renderConvexWasmRuntimeSupportUnit,
 } from "./convex-wasm-runtime-support.mjs";
 
-test("runtime support is reproducible and works without host web globals", () => {
+test("runtime support is reproducible with its required native URL service", () => {
   execFileSync(
     process.execPath,
     [fileURLToPath(new URL("../generate-convex-wasm-runtime-support.mjs", import.meta.url))],
@@ -27,6 +28,7 @@ test("runtime support is reproducible and works without host web globals", () =>
   runInNewContext(source, {
     TextDecoder,
     TextEncoder,
+    __convexWasmNativeUrl: nodeUrlService(),
     __convexWasmApplicationInstallRuntimeSupport(value) {
       installed = value;
     },
@@ -37,4 +39,13 @@ test("runtime support is reproducible and works without host web globals", () =>
     new installed.Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric" }).format(0),
     "1970"
   );
+});
+
+test("runtime support rejects a missing native URL service", () => {
+  assert.throws(() => runInNewContext(renderConvexWasmRuntimeSupportUnit(), {
+    TextDecoder, TextEncoder,
+    __convexWasmApplicationInstallRuntimeSupport() {
+      assert.fail("Support must not install without its native service");
+    },
+  }), /Native URL bootstrap is unavailable/u);
 });

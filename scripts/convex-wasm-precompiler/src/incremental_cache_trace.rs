@@ -11,7 +11,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::incremental_cache::{HEADER_BYTES, TIERS, WAYS};
+use crate::incremental_cache::{HEADER_BYTES, TIERS};
 
 const MAX_TRACE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -103,8 +103,8 @@ impl CacheTrace {
             "kind": "convex-wasm-incremental-cache-trace-v1",
             "namespace": namespace.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
             "recordHeaderBytes": HEADER_BYTES,
-            "tiers": TIERS.iter().map(|(sets, limit)| serde_json::json!({
-                "sets": sets, "ways": WAYS, "recordLimitBytes": limit,
+            "tiers": TIERS.iter().map(|tier| serde_json::json!({
+                "sets": tier.sets, "ways": tier.ways, "recordLimitBytes": tier.record_limit,
             })).collect::<Vec<_>>(),
         }))?;
         Ok(Self {

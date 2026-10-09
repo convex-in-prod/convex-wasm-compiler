@@ -11,6 +11,7 @@ use std::{
 
 mod incremental_cache;
 mod incremental_cache_trace;
+mod linkage_normalization;
 
 use incremental_cache::IncrementalCache;
 use serde::Serialize;
@@ -26,7 +27,8 @@ const USAGE: &str = "usage: convex-wasm-precompiler INPUT.wasm OUTPUT.cwasm \
     --target-triple TARGET_TRIPLE \
     --target-cpu baseline \
     --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS \
-    [--incremental-cache-trace ABSOLUTE_NEW_JSONL]";
+    [--incremental-cache-trace ABSOLUTE_NEW_JSONL]\n\
+    or: convex-wasm-precompiler --normalize-core INPUT.wasm OUTPUT.wasm";
 const MAX_CORE_WASM_BYTES: usize = 320 * 1024 * 1024;
 const MAX_AOT_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -151,7 +153,30 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
-    let input = PathBuf::from(required_argument(arguments.next(), "input Core Wasm path")?);
+    let first = required_argument(arguments.next(), "input Core Wasm path or --normalize-core")?;
+    if first == "--normalize-core" {
+        let input = PathBuf::from(required_argument(arguments.next(), "input Core Wasm path")?);
+        let output = PathBuf::from(required_argument(
+            arguments.next(),
+            "normalized Core Wasm path",
+        )?);
+        if arguments.next().is_some() {
+            return Err(USAGE.into());
+        }
+        let bytes = read_bounded_file(&input, MAX_CORE_WASM_BYTES, "Core Wasm input")?;
+        let normalized = linkage_normalization::normalize_linkage(&bytes)?;
+        if normalized.len() > MAX_CORE_WASM_BYTES {
+            return Err("normalized Core Wasm exceeds input size limit".into());
+        }
+        write_and_sync_new_file(&output, &normalized)?;
+        println!(
+            "normalized {} bytes of Core Wasm into {} bytes",
+            bytes.len(),
+            normalized.len()
+        );
+        return Ok(());
+    }
+    let input = PathBuf::from(first);
     let output = PathBuf::from(required_argument(
         arguments.next(),
         "output precompiled artifact path",

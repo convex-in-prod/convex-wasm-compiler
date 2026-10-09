@@ -24,9 +24,24 @@ export function capabilityApplicationStaticHermesFlags(flags) {
   if (applicationFlags.length !== flags.length - 1) {
     fail("capability application compilation requires exactly one -typed flag");
   }
-  // The hardened application runtime retains native Math methods except random.
+  // Hardening retains native Math methods except random and validates the
+  // nonextensible intrinsic Object.prototype key set before application code.
   // Do not enable all static builtins: other globals have host replacements.
-  return [...new Set([...applicationFlags, "-fstatic-math-builtins"])];
+  return [...new Set([...applicationFlags, "-fstatic-math-builtins", "-fstatic-object-prototype"])];
+}
+
+export function buildCoreNormalizationCommand(config) {
+  return {
+    executable: config.toolchain.wasmtime.executable,
+    args: [
+      "--package",
+      config.toolchain.wasmtime.packageDirectory,
+      "--",
+      "--normalize-core",
+      "module.wasm",
+      "module.normalized.wasm",
+    ],
+  };
 }
 
 export function buildArtifactCommands(config) {

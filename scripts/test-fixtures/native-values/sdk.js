@@ -1,12 +1,13 @@
 import { setupReader } from "sdk-database";
 
-globalThis.captureSdkQuery = (compact, sourceKind) => {
+globalThis.captureSdkQuery = (compact, sourceKind, combined = false) => {
   let query;
   let records = 0;
   globalThis.Convex = {
     typedQueryArgs: true,
     queryCollect: true,
     captureQueryValue: (value) => {
+      if (combined) throw new Error("Combined SDK path materialized a captured buffer");
       if (value !== null) throw new Error("Unexpected query literal");
       const bytes = new ArrayBuffer(5);
       new Uint8Array(bytes).set([67, 86, 65, 49, 0]);
@@ -20,6 +21,10 @@ globalThis.captureSdkQuery = (compact, sourceKind) => {
           },
         }
       : {}),
+    ...(combined ? { queryValueRecord: (...args) => {
+      records += 1;
+      return valueRecord(...args);
+    } } : {}),
     asyncSyscallTyped: (op, args) => {
       if (op !== 7) throw new Error("Expected collection operation");
       query = args[0];

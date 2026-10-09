@@ -8,8 +8,13 @@ import { fileURLToPath } from "node:url";
 
 import { emscriptenVersion, gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
 import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
+import binaryenSource from "./vendor/binaryen/source.json" with { type: "json" };
 
 const sources = Object.freeze({
+  binaryen: {
+    revision: binaryenSource.revision,
+    url: "https://github.com/WebAssembly/binaryen.git",
+  },
   emsdk: {
     revision: gateRevisions.emsdk,
     url: "https://github.com/emscripten-core/emsdk.git",
@@ -32,6 +37,16 @@ const staticHermesRuntimeCmakeFlags = [
 const staticHermesWasmExceptionFlags = "-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const runnerCrate = join(scriptDirectory, "convex-wasm-precompiler");
+const binaryenVendor = join(scriptDirectory, "vendor", "binaryen");
+const binaryenCmakeFlags = [
+  "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=OFF", "-DBUILD_SHARED_LIBS=OFF",
+  "-DBUILD_LLVM_DWARF=ON", "-DBYN_ENABLE_ASSERTIONS=ON",
+];
+// Only wasm-opt is replaced. Other Emscripten tools retain their SDK binaries.
+export const binaryenHelperNames = Object.freeze([
+  "wasm-as", "wasm-ctor-eval", "wasm-dis", "wasm-emscripten-finalize",
+  "wasm-metadce", "wasm-split", "wasm2js",
+]);
 
 function parseArguments(argumentsList) {
   const values = new Map();
@@ -181,13 +196,27 @@ async function fileIdentity(path) {
   return { sha256: hash.digest("hex"), size };
 }
 
-async function runnerInputSha256() {
+export async function runnerInputSha256(crateDirectory = runnerCrate) {
   const hash = createHash("sha256");
+  // The runner shares WASI code and uses a local Cranelift dependency. Cargo.lock
+  // does not hash path dependencies, so their source must also invalidate the gate.
+  const vendorRoot = join(crateDirectory, "src", "vendor");
+  const vendorSources = [];
+  for (const entry of await fs.readdir(vendorRoot, { recursive: true, withFileTypes: true })) {
+    if (entry.isDirectory()) continue;
+    if (!entry.isFile()) throw new Error("Wasmtime runner vendor source must be a regular file");
+    const path = join(entry.parentPath, entry.name);
+    vendorSources.push(path.slice(vendorRoot.length + 1));
+  }
+  vendorSources.sort();
   for (const [name, path] of [
-    ["Cargo.lock", join(runnerCrate, "Cargo.lock")],
-    ["Cargo.toml", join(runnerCrate, "Cargo.toml")],
-    ["rust-toolchain.toml", join(runnerCrate, "rust-toolchain.toml")],
-    ["runner.rs", join(runnerCrate, "src", "bin", `${runnerName}.rs`)],
+    ["Cargo.lock", join(crateDirectory, "Cargo.lock")],
+    ["Cargo.toml", join(crateDirectory, "Cargo.toml")],
+    ["rust-toolchain.toml", join(crateDirectory, "rust-toolchain.toml")],
+    ["runner.rs", join(crateDirectory, "src", "bin", `${runnerName}.rs`)],
+    ["lib.rs", join(crateDirectory, "src", "lib.rs")],
+    ["wasmtime_wasi.rs", join(crateDirectory, "src", "wasmtime_wasi.rs")],
+    ...vendorSources.map((name) => [`vendor/${name}`, join(vendorRoot, name)]),
   ]) {
     const bytes = await fs.readFile(path);
     if (name === "Cargo.lock") {
@@ -287,6 +316,155 @@ async function buildTargetsPending(buildRoot, targets) {
   return !output.endsWith("ninja: no work to do.");
 }
 
+export async function binaryenInputSha256(vendor = binaryenVendor) {
+  const sourceBytes = await fs.readFile(join(vendor, "source.json"));
+  const source = JSON.parse(sourceBytes);
+  if (!/^[0-9a-f]{40}$/u.test(source.revision) || !/^[0-9a-f]{40}$/u.test(source.patchedTree) ||
+      !Array.isArray(source.patches) || source.patches.length === 0) {
+    throw new Error("Binaryen source recipe is invalid");
+  }
+  const hash = createHash("sha256").update(sourceBytes).update(JSON.stringify(binaryenCmakeFlags));
+  const seen = new Set();
+  for (const patch of source.patches) {
+    if (!/^[a-z0-9-]+\.patch$/u.test(patch.file) || seen.has(patch.file) ||
+        !/^[0-9a-f]{64}$/u.test(patch.sha256)) {
+      throw new Error("Binaryen patch recipe is invalid");
+    }
+    seen.add(patch.file);
+    const bytes = await fs.readFile(join(vendor, patch.file));
+    if (createHash("sha256").update(bytes).digest("hex") !== patch.sha256) {
+      throw new Error(`Binaryen patch differs from its pinned digest: ${patch.file}`);
+    }
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+}
+
+export async function verifyBinaryenSource(sourceRoot, expected = binaryenSource) {
+  const options = { cwd: sourceRoot, timeoutMs: 30_000, capture: true };
+  const revision = await run("git", ["rev-parse", "HEAD"], options);
+  const tree = await run("git", ["write-tree"], options);
+  if (revision !== expected.revision || tree !== expected.patchedTree) {
+    throw new Error("Binaryen checkout differs from the pinned patched source");
+  }
+  // The staged patch tree is intentional; additional staged, unstaged, ignored,
+  // or untracked files must not silently enter a native tool build.
+  await run("git", ["diff-files", "--quiet", "--ignore-submodules=none"], options);
+  if (await run("git", ["ls-files", "--others"], options)) {
+    throw new Error("Binaryen checkout has untracked source files");
+  }
+}
+
+export async function binaryenStatus(gateRoot, inputSha256) {
+  const root = join(gateRoot, "binaryen-tools");
+  let receipt;
+  try {
+    receipt = JSON.parse(await fs.readFile(join(root, "toolchain.json"), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return "missing";
+    throw error;
+  }
+  const names = ["wasm-opt", ...binaryenHelperNames].sort();
+  if (receipt.kind !== "convex-wasm-binaryen-toolchain-v1" ||
+      !receipt.binaries || JSON.stringify(Object.keys(receipt.binaries).sort()) !== JSON.stringify(names)) {
+    throw new Error("Binaryen toolchain receipt is invalid");
+  }
+  if (receipt.inputSha256 !== inputSha256 || receipt.platform !== process.platform ||
+      receipt.arch !== process.arch) return "stale";
+  for (const name of names) {
+    try {
+      const path = join(root, "bin", name);
+      await requireFile(path, `Binaryen ${name}`, true);
+      const actual = await fileIdentity(path);
+      const recorded = receipt.binaries[name];
+      if (actual.sha256 !== recorded.sha256 || actual.size !== recorded.size) return "stale";
+      const original = name === "wasm-opt"
+        ? join(gateRoot, "build-binaryen", "bin", name)
+        : join(gateRoot, "emsdk", "upstream", "bin", name);
+      const current = await fileIdentity(original);
+      if (current.sha256 !== actual.sha256 || current.size !== actual.size) return "stale";
+    } catch (error) {
+      if (error?.code === "ENOENT") return "missing";
+      throw error;
+    }
+  }
+  return "verified";
+}
+
+export async function verifyBinaryenGate(gateRoot) {
+  const inputSha256 = await binaryenInputSha256();
+  await verifyBinaryenSource(join(gateRoot, "binaryen"));
+  const status = await binaryenStatus(gateRoot, inputSha256);
+  if (status !== "verified" || await buildTargetsPending(join(gateRoot, "build-binaryen"), ["wasm-opt"])) {
+    throw new Error("Binaryen tools are missing or stale; rerun convex-wasm-setup-gate without --check-only");
+  }
+  const cache = join(gateRoot, "build-binaryen", "CMakeCache.txt");
+  const configuredSource = await cmakeCacheValue(cache, "CMAKE_HOME_DIRECTORY");
+  if (configuredSource === null ||
+      await fs.realpath(configuredSource) !== await fs.realpath(join(gateRoot, "binaryen"))) {
+    throw new Error("Binaryen build does not use the authenticated source checkout");
+  }
+  for (const flag of binaryenCmakeFlags) {
+    const [key, value] = flag.slice(2).split("=");
+    if (await cmakeCacheValue(cache, key) !== value) {
+      throw new Error(`Binaryen build does not use the pinned ${key} setting`);
+    }
+  }
+}
+
+export async function buildBinaryen(gateRoot, jobs) {
+  const inputSha256 = await binaryenInputSha256();
+  const sourceRoot = join(gateRoot, "binaryen");
+  const options = { cwd: sourceRoot, timeoutMs: 30_000, capture: true };
+  const tree = await run("git", ["write-tree"], options);
+  const originalTree = await run("git", ["rev-parse", "HEAD^{tree}"], options);
+  if (tree === originalTree) {
+    await run("git", ["apply", "--index", ...binaryenSource.patches.map(({ file }) => join(binaryenVendor, file))], options);
+  }
+  await verifyBinaryenSource(sourceRoot);
+  const build = join(gateRoot, "build-binaryen");
+  if (await binaryenStatus(gateRoot, inputSha256) !== "verified") {
+    // Ninja tracks dependency timestamps, not the published tool's digest.
+    // Relink a stale output from retained objects instead of signing it again.
+    await fs.rm(join(build, "bin", "wasm-opt"), { force: true });
+  }
+  await run("cmake", ["-S", sourceRoot, "-B", build, "-G", "Ninja", ...binaryenCmakeFlags], {
+    cwd: gateRoot, timeoutMs: 10 * 60 * 1000,
+  });
+  await run("cmake", ["--build", build, "--target", "wasm-opt", "--parallel", String(jobs)], {
+    cwd: gateRoot, timeoutMs: buildTimeoutMs,
+  });
+  if (await binaryenStatus(gateRoot, inputSha256) === "verified") return;
+  const destination = join(gateRoot, "binaryen-tools");
+  await fs.mkdir(join(destination, "bin"), { recursive: true });
+  const stage = await fs.mkdtemp(join(gateRoot, ".binaryen-publication-"));
+  try {
+    const binaries = {};
+    for (const name of ["wasm-opt", ...binaryenHelperNames]) {
+      const staged = join(stage, name);
+      if (name === "wasm-opt") {
+        await fs.copyFile(join(build, "bin", name), staged);
+        await fs.chmod(staged, 0o755);
+      } else {
+        await fs.symlink(await fs.realpath(join(gateRoot, "emsdk", "upstream", "bin", name)), staged);
+      }
+      await requireFile(staged, `Binaryen ${name}`, true);
+      binaries[name] = await fileIdentity(staged);
+    }
+    await fs.writeFile(join(stage, "toolchain.json"), `${JSON.stringify({
+      kind: "convex-wasm-binaryen-toolchain-v1", inputSha256,
+      platform: process.platform, arch: process.arch, binaries,
+    })}\n`);
+    for (const name of Object.keys(binaries)) {
+      await fs.rename(join(stage, name), join(destination, "bin", name));
+    }
+    // Publishing the receipt last makes an interrupted replacement detectable.
+    await fs.rename(join(stage, "toolchain.json"), join(destination, "toolchain.json"));
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true });
+  }
+}
+
 async function checkGate(root) {
   for (const name of Object.keys(sources)) {
     const actual = await run("git", ["-C", join(root, name), "rev-parse", "HEAD"], {
@@ -298,6 +476,7 @@ async function checkGate(root) {
       throw new Error(`${name} checkout must be at pinned revision ${sources[name].revision}`);
     }
   }
+  await verifyBinaryenGate(root);
   await Promise.all([
     requireFile(join(root, "emsdk", ".emscripten"), "Emscripten configuration"),
     requireFile(join(root, "emsdk", "upstream", "emscripten", "emcc"), "Emscripten compiler", true),
@@ -413,6 +592,8 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
     });
   }
 
+  await buildBinaryen(gateRoot, jobs);
+
   const hermes = join(gateRoot, "hermes");
   const host = join(gateRoot, "build-host");
   const wasm = join(gateRoot, "build-wasm");
@@ -453,6 +634,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   );
   const wasmBuildEnv = {
     ...process.env,
+    EM_BINARYEN_ROOT: join(gateRoot, "binaryen-tools"),
     EM_CONFIG: join(emsdk, ".emscripten"),
     EMSDK: emsdk,
     PATH: [

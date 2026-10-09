@@ -1,278 +1,200 @@
 use std::error::Error as StdError;
-use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{BufRead, Write};
 
-use wasmtime::{Caller, Config, Engine, Error, Extern, Linker, Memory, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store};
+
+#[path = "../wasmtime_wasi.rs"]
+mod wasmtime_wasi;
+use wasmtime_wasi::{WasiState, add_wasi_imports};
 
 type RunnerResult<T> = Result<T, Box<dyn StdError>>;
 
-struct State {
-    args: Vec<Vec<u8>>,
-    stderr: Vec<u8>,
-    stdout: Vec<u8>,
-}
-
-fn memory(caller: &mut Caller<'_, State>) -> Result<Memory, Error> {
-    caller
-        .get_export("memory")
-        .and_then(Extern::into_memory)
-        .ok_or_else(|| Error::msg("guest did not export memory"))
-}
-
-fn checked_offset(value: i32) -> Result<usize, Error> {
-    usize::try_from(value).map_err(|_| Error::msg("negative guest memory offset"))
-}
-
-fn write_u32(caller: &mut Caller<'_, State>, offset: i32, value: u32) -> Result<(), Error> {
-    memory(caller)?
-        .write(caller, checked_offset(offset)?, &value.to_le_bytes())
-        .map_err(Error::from)
-}
-
-fn write_u64(caller: &mut Caller<'_, State>, offset: i32, value: u64) -> Result<(), Error> {
-    memory(caller)?
-        .write(caller, checked_offset(offset)?, &value.to_le_bytes())
-        .map_err(Error::from)
-}
-
-fn read_u32(caller: &mut Caller<'_, State>, offset: usize) -> Result<u32, Error> {
-    let mut bytes = [0_u8; 4];
-    memory(caller)?
-        .read(caller, offset, &mut bytes)
-        .map_err(Error::from)?;
-    Ok(u32::from_le_bytes(bytes))
-}
-
-fn add_wasi_imports(linker: &mut Linker<State>) -> Result<(), Error> {
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "args_sizes_get",
-        |mut caller: Caller<'_, State>, argc_ptr: i32, size_ptr: i32| {
-            let argc = u32::try_from(caller.data().args.len())
-                .map_err(|_| Error::msg("too many guest arguments"))?;
-            let byte_count = caller.data().args.iter().try_fold(0_u32, |total, arg| {
-                let len = u32::try_from(arg.len() + 1)
-                    .map_err(|_| Error::msg("guest argument too long"))?;
-                total
-                    .checked_add(len)
-                    .ok_or_else(|| Error::msg("guest arguments exceed u32"))
-            })?;
-            write_u32(&mut caller, argc_ptr, argc)?;
-            write_u32(&mut caller, size_ptr, byte_count)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "args_get",
-        |mut caller: Caller<'_, State>, argv_ptr: i32, argv_buf_ptr: i32| {
-            let args = caller.data().args.clone();
-            let argv_base = checked_offset(argv_ptr)?;
-            let mut buffer_offset = checked_offset(argv_buf_ptr)?;
-            let guest_memory = memory(&mut caller)?;
-            for (index, arg) in args.iter().enumerate() {
-                let guest_pointer = u32::try_from(buffer_offset)
-                    .map_err(|_| Error::msg("guest argument pointer exceeds u32"))?;
-                guest_memory
-                    .write(
-                        &mut caller,
-                        argv_base + index * 4,
-                        &guest_pointer.to_le_bytes(),
-                    )
-                    .map_err(Error::from)?;
-                guest_memory
-                    .write(&mut caller, buffer_offset, arg)
-                    .map_err(Error::from)?;
-                buffer_offset += arg.len();
-                guest_memory
-                    .write(&mut caller, buffer_offset, &[0])
-                    .map_err(Error::from)?;
-                buffer_offset += 1;
-            }
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "environ_sizes_get",
-        |mut caller: Caller<'_, State>, count_ptr: i32, size_ptr: i32| {
-            write_u32(&mut caller, count_ptr, 0)?;
-            write_u32(&mut caller, size_ptr, 0)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "environ_get",
-        |_caller: Caller<'_, State>, _environ_ptr: i32, _buffer_ptr: i32| 0_i32,
-    )?;
-    linker.func_wrap(
-        "env",
-        "emscripten_notify_memory_growth",
-        |_caller: Caller<'_, State>, _memory_index: i32| {},
-    )?;
-    linker.func_wrap(
-        "env",
-        "__syscall_unlinkat",
-        |_caller: Caller<'_, State>, _directory_fd: i32, _path_ptr: i32, _flags: i32| -2_i32,
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_close",
-        |_caller: Caller<'_, State>, fd: i32| if (0..=2).contains(&fd) { 0_i32 } else { 8_i32 },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_fdstat_get",
-        |mut caller: Caller<'_, State>, fd: i32, stat_ptr: i32| {
-            if !(0..=2).contains(&fd) {
-                return Ok::<i32, Error>(8);
-            }
-            let mut stat = [0_u8; 24];
-            stat[0] = 2;
-            memory(&mut caller)?
-                .write(&mut caller, checked_offset(stat_ptr)?, &stat)
-                .map_err(Error::from)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_seek",
-        |mut caller: Caller<'_, State>, _fd: i32, _offset: i64, _whence: i32, result_ptr: i32| {
-            write_u64(&mut caller, result_ptr, 0)?;
-            Ok::<i32, Error>(8)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_read",
-        |mut caller: Caller<'_, State>, _fd: i32, _iov_ptr: i32, _iov_count: i32, read_ptr: i32| {
-            write_u32(&mut caller, read_ptr, 0)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_pread",
-        |mut caller: Caller<'_, State>,
-         _fd: i32,
-         _iov_ptr: i32,
-         _iov_count: i32,
-         _offset: i64,
-         read_ptr: i32| {
-            write_u32(&mut caller, read_ptr, 0)?;
-            Ok::<i32, Error>(8)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "fd_write",
-        |mut caller: Caller<'_, State>, fd: i32, iov_ptr: i32, iov_count: i32, written_ptr: i32| {
-            let count = usize::try_from(iov_count)
-                .map_err(|_| Error::msg("negative fd_write iovec count"))?;
-            let iov_base = checked_offset(iov_ptr)?;
-            let guest_memory = memory(&mut caller)?;
-            let mut bytes = Vec::new();
-            for index in 0..count {
-                let entry = iov_base + index * 8;
-                let data_ptr = usize::try_from(read_u32(&mut caller, entry)?)
-                    .map_err(|_| Error::msg("iovec pointer exceeds usize"))?;
-                let data_len = usize::try_from(read_u32(&mut caller, entry + 4)?)
-                    .map_err(|_| Error::msg("iovec length exceeds usize"))?;
-                let start = bytes.len();
-                bytes.resize(start + data_len, 0);
-                guest_memory
-                    .read(&caller, data_ptr, &mut bytes[start..])
-                    .map_err(Error::from)?;
-            }
-            match fd {
-                1 => caller.data_mut().stdout.extend_from_slice(&bytes),
-                2 => caller.data_mut().stderr.extend_from_slice(&bytes),
-                _ => return Ok::<i32, Error>(8),
-            }
-            let written = u32::try_from(bytes.len())
-                .map_err(|_| Error::msg("fd_write byte count exceeds u32"))?;
-            write_u32(&mut caller, written_ptr, written)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "clock_time_get",
-        |mut caller: Caller<'_, State>, _clock_id: i32, _precision: i64, result_ptr: i32| {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| Error::msg("system time predates Unix epoch"))?
-                .as_nanos();
-            write_u64(
-                &mut caller,
-                result_ptr,
-                u64::try_from(nanos).map_err(|_| Error::msg("system time exceeds u64"))?,
-            )?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "random_get",
-        |mut caller: Caller<'_, State>, buffer_ptr: i32, buffer_len: i32| {
-            let len = usize::try_from(buffer_len)
-                .map_err(|_| Error::msg("negative random_get length"))?;
-            memory(&mut caller)?
-                .write(&mut caller, checked_offset(buffer_ptr)?, &vec![0x5a; len])
-                .map_err(Error::from)?;
-            Ok::<i32, Error>(0)
-        },
-    )?;
-    linker.func_wrap(
-        "wasi_snapshot_preview1",
-        "proc_exit",
-        |_caller: Caller<'_, State>, status: i32| -> Result<(), Error> {
-            Err(Error::msg(format!("guest exited with status {status}")))
-        },
-    )?;
-    Ok(())
-}
-
-fn main() -> RunnerResult<()> {
-    let mut arguments = std::env::args_os();
-    let _program = arguments.next();
-    let module_path = arguments.next().ok_or("missing Wasm module path")?;
-    let runner_export = match arguments.next() {
-        Some(value) => value
-            .into_string()
-            .map_err(|_| "runner export name must be valid UTF-8")?,
-        None => "convex_wasm_static_hermes_global_probe_run".to_owned(),
-    };
-    if arguments.next().is_some() {
-        return Err("expected a Wasm module path and an optional runner export name".into());
-    }
-    let mut config = Config::new();
-    config.wasm_exceptions(true);
-    let engine = Engine::new(&config)?;
-    let module = Module::from_file(&engine, module_path)?;
-    let mut linker = Linker::new(&engine);
-    add_wasi_imports(&mut linker)?;
+fn execute(
+    engine: &Engine,
+    linker: &Linker<WasiState>,
+    module: &Module,
+    runner_export: &str,
+) -> RunnerResult<(WasiState, i32)> {
     let mut store = Store::new(
-        &engine,
-        State {
+        engine,
+        WasiState {
             args: vec![b"convex-wasm-static-hermes-runner".to_vec()],
             stderr: Vec::new(),
             stdout: Vec::new(),
         },
     );
-    let instance = linker.instantiate(&mut store, &module)?;
+    let instance = linker.instantiate(&mut store, module)?;
     instance
         .get_typed_func::<(), ()>(&mut store, "_initialize")?
         .call(&mut store, ())?;
     let status = instance
-        .get_typed_func::<(), i32>(&mut store, &runner_export)?
+        .get_typed_func::<(), i32>(&mut store, runner_export)?
         .call(&mut store, ())?;
-    std::io::stdout().write_all(&store.data().stdout)?;
-    std::io::stderr().write_all(&store.data().stderr)?;
-    if status != 0 {
-        return Err(format!("{runner_export} returned status {status}").into());
+    Ok((store.into_data(), status))
+}
+
+fn main() -> RunnerResult<()> {
+    let mut arguments = std::env::args_os().skip(1);
+    let first = arguments.next().ok_or("missing Wasm module path")?;
+    let mut config = Config::new();
+    config.wasm_exceptions(true);
+    let engine = Engine::new(&config)?;
+    let mut linker = Linker::new(&engine);
+    add_wasi_imports(&mut linker)?;
+
+    if first == "--serve" {
+        let runner_export = arguments
+            .next()
+            .ok_or("missing runner export name")?
+            .into_string()
+            .map_err(|_| "runner export name must be valid UTF-8")?;
+        let modules: Vec<_> = arguments
+            .map(|path| Module::from_file(&engine, path))
+            .collect::<Result<_, _>>()?;
+        if modules.is_empty() {
+            return Err("serve mode requires at least one Wasm module".into());
+        }
+        let mut output = std::io::stdout().lock();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"kind": "ready", "modules": modules.len()})
+        )?;
+        output.flush()?;
+        // Reuse compiled code, but give every request independent guest state.
+        // Output is encoded as bytes so arbitrary WASI output remains lossless.
+        for line in std::io::stdin().lock().lines() {
+            let index: usize = line?.parse()?;
+            let module = modules.get(index).ok_or("module index is out of bounds")?;
+            let (state, status) = execute(&engine, &linker, module, &runner_export)?;
+            writeln!(
+                output,
+                "{}",
+                serde_json::json!({
+                    "kind": "result", "module": index, "status": status,
+                    "stdout": state.stdout, "stderr": state.stderr,
+                })
+            )?;
+            output.flush()?;
+            if status != 0 {
+                return Err(format!("{runner_export} returned status {status}").into());
+            }
+        }
+    } else {
+        let runner_export = match arguments.next() {
+            Some(value) => value
+                .into_string()
+                .map_err(|_| "runner export name must be valid UTF-8")?,
+            None => "convex_wasm_static_hermes_global_probe_run".to_owned(),
+        };
+        if arguments.next().is_some() {
+            return Err("expected a Wasm module path and an optional runner export name".into());
+        }
+        let module = Module::from_file(&engine, first)?;
+        let (state, status) = execute(&engine, &linker, &module, &runner_export)?;
+        std::io::stdout().write_all(&state.stdout)?;
+        std::io::stderr().write_all(&state.stderr)?;
+        if status != 0 {
+            return Err(format!("{runner_export} returned status {status}").into());
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_encoder::{
+        CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
+        FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, MemArg,
+        MemorySection, MemoryType, TypeSection, ValType,
+    };
+
+    fn output_module(engine: &Engine, marker: u8) -> Module {
+        let mut wasm = wasm_encoder::Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32; 4], [ValType::I32]);
+        types.ty().function([], []);
+        types.ty().function([], [ValType::I32]);
+        wasm.section(&types);
+        let mut imports = ImportSection::new();
+        imports.import(
+            "wasi_snapshot_preview1",
+            "fd_write",
+            EntityType::Function(0),
+        );
+        wasm.section(&imports);
+        let mut functions = FunctionSection::new();
+        functions.function(1).function(2);
+        wasm.section(&functions);
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: Some(1),
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        wasm.section(&memories);
+        let mut globals = GlobalSection::new();
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+        wasm.section(&globals);
+        let mut exports = ExportSection::new();
+        exports.export("memory", ExportKind::Memory, 0);
+        exports.export("_initialize", ExportKind::Func, 1);
+        exports.export("probe", ExportKind::Func, 2);
+        wasm.section(&exports);
+        let mut code = CodeSection::new();
+        let mut init = Function::new([]);
+        init.instruction(&Instruction::End);
+        code.function(&init);
+        let mut run = Function::new([]);
+        run.instruction(&Instruction::GlobalGet(0));
+        run.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        run.instruction(&Instruction::Unreachable);
+        run.instruction(&Instruction::End);
+        run.instruction(&Instruction::I32Const(1));
+        run.instruction(&Instruction::GlobalSet(0));
+        for (address, value) in [(0, 16), (4, 3)] {
+            run.instruction(&Instruction::I32Const(address));
+            run.instruction(&Instruction::I32Const(value));
+            run.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+        }
+        for value in [1, 0, 1, 8] {
+            run.instruction(&Instruction::I32Const(value));
+        }
+        run.instruction(&Instruction::Call(0));
+        run.instruction(&Instruction::End);
+        code.function(&run);
+        wasm.section(&code);
+        let mut data = DataSection::new();
+        data.active(0, &ConstExpr::i32_const(16), [marker, 0, 255]);
+        wasm.section(&data);
+        Module::new(engine, wasm.finish()).unwrap()
+    }
+
+    #[test]
+    fn reused_modules_have_fresh_state_and_lossless_output() {
+        let engine = Engine::default();
+        let mut linker = Linker::new(&engine);
+        add_wasi_imports(&mut linker).unwrap();
+        let modules = [output_module(&engine, b'A'), output_module(&engine, b'B')];
+        for index in [0, 1, 1, 0] {
+            let (state, status) = execute(&engine, &linker, &modules[index], "probe").unwrap();
+            assert_eq!(status, 0);
+            assert_eq!(state.stdout, [b'A' + index as u8, 0, 255]);
+            assert!(state.stderr.is_empty());
+        }
+    }
 }

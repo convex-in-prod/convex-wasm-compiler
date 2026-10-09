@@ -84,6 +84,28 @@ The repository currently provides:
   with operational files reported separately from artifact semantics; and
 - compiler regression and invariant-validation corpora.
 
+The guest `URL` implementation uses pinned Ada 4.0.0 native state behind the
+`whatwg-url@14.2.0` Web IDL wrappers. `URLSearchParams` retains its JavaScript
+implementation and live association with its URL. Native state charges retained
+buffer capacity to the runtime. The parser and binding compile as separate,
+authenticated C++20 objects; application edits reuse them, and only the binding
+depends on runtime headers. The owner adapter remains C++17. The source manifest,
+licenses and retained-capacity patch are in `scripts/vendor/ada-4.0.0/`.
+
+`npm run test:native-url` checks source identities. With
+`CONVEX_HERMES_TEST_SOURCE_ROOT` and `CONVEX_HERMES_TEST_BUILD_ROOT` set to a
+compatible host Hermes source/build pair, it also compiles the same self-contained
+support sources used by the artifact pipeline and runs URL coercion, corpus,
+live-parameter, GC and retained-memory checks.
+
+The default gate uses the pinned runtime's native Promise core and direct async
+driver, together with guarded byte-array loops, native integer registers,
+guarded data-property definitions, scoped normalization reuse and async frame
+lowering. Split C exception emission preserves the ordinary exception behavior.
+Experimental record forwarding and late materialization remain outside these
+defaults. Builds authenticate the complete compiler/runtime support sources and
+retain normal fuel and epoch checks.
+
 The context-reuse analyzer embeds reusable reviewed dispositions for public
 dependencies. Its optional `--third-party-policy <path>` input lets a downstream
 application provide exact package fingerprints and imported names without
@@ -136,10 +158,15 @@ Before the first build, install the pinned Static Hermes and Emscripten gate:
 npx convex-wasm-setup-gate --gate-root .local/convex-wasm-gate --jobs 2
 ```
 
-This command checks out pinned Hermes and Emscripten SDK sources, installs
-Emscripten 6.0.5, and builds the host Static Hermes compiler,
+This command checks out pinned Hermes, Binaryen, and Emscripten SDK sources, installs
+Emscripten 6.0.5, and builds the patched Binaryen optimizer, host Static Hermes compiler,
 the Wasm runtime archives, and the Wasmtime runner used by the codec and request
 matrices.
+The [Binaryen patches](scripts/vendor/binaryen/README.md) bound temporary writer
+memory and correct cumulative inlining limits. Setup authenticates their source
+tree and tool identities, retains the native build for reuse, and installs the
+optimizer separately from the SDK. Generated configurations select and authenticate
+that toolchain through `EM_BINARYEN_ROOT` and explicit material inputs.
 The runner's Cargo dependency and the verified precompiler package both pin
 the same Wasmtime revision; setup does not need a second Wasmtime source checkout.
 It requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
@@ -632,12 +659,35 @@ The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 1 GiB, matching the self-hosted runtime artifact contract.
 Its AOT and engine-identity output paths must not already exist.
 
+The precompiler retains a pinned Cranelift frontend source patch within its
+authenticated Rust source tree. Safepoint liveness collects only relevant
+reference events once per function and reuses those summaries across block
+visits. When no reference survives a safepoint, it skips the empty rewrite pass.
+GC rules and native-code optimization settings remain intact. The retained
+upstream provenance and license are in
+`scripts/convex-wasm-precompiler/src/vendor/cranelift-frontend/`; native packaging
+runs its library tests on each supported host architecture.
+
+Module-graph builds normalize linked Core Wasm before publication and AOT. The
+precompiler's `--normalize-core INPUT.wasm OUTPUT.wasm` mode orders function
+imports and function signatures consistently and remaps their references. Both
+input and output are validated, and the output must be a new file. This mode
+supports nonrecursive function signatures and the linked modules' `name`,
+`dylink.0`, `producers`, and `target_features` metadata; unsupported types or
+metadata are rejected. Ordinary AOT mode remains available for other inputs.
+Normalization uses one worker, and its CPU and wall time are included in prelink
+reports. Its command and authenticated package materials participate in Core
+artifact identity, so unchanged prelink hits skip it and package changes
+invalidate it. Published Core bytes are the exact inputs to AOT.
+
 The precompiler also reuses authenticated Cranelift function results across
 processes and changed Wasm modules, with the same optimization settings. Records
 bind the precompiler executable, engine compatibility and Cranelift function key.
-Thirteen bounded size classes retain at most 2 GiB of records, with sixteen ways
-per set and records up to 16 MiB. Repeated insertion of the same function replaces
-its existing slot. The fixed `size-classes-v2` directory is shared across source
+Thirteen bounded size classes retain at most 2 GiB of records, with up to 64 ways
+per set and records up to 16 MiB. Wider sets reduce collision-driven eviction
+without increasing any class's slot count or byte budget. Repeated insertion of
+the same function replaces its existing slot. The fixed `size-classes-v3`
+directory is shared across source
 and compiler revisions; it does not create a directory for every namespace.
 A fixed lookup index smaller than 2 MiB skips unrelated records with one bounded
 read per size class instead of opening every possible slot. Writers update the
@@ -645,9 +695,10 @@ index under the existing shard lock after publishing the record. Index entries
 are hints: matching records still require the exact function key, private-file
 checks and authentication before deserialization. A stale or interrupted index
 update can cause a miss, but cannot authorize other compiled code.
-The preceding layout's slots remain separate and bounded at 1 GiB, allowing
-older and newer executables to share the root safely. An operator can remove
-those legacy slots once no older executable uses the cache.
+The preceding layouts remain separate, bounded at 1 GiB for version 1 and
+2 GiB for version 2, allowing older and newer executables to share the root
+safely. An operator can remove those legacy layouts once no older executable
+uses them.
 Oversized functions still compile normally. Atomic writes use one temporary file
 per active insertion shard, at most another 256 MiB. Cache misses, replacements,
 oversized results and rejected corrupt records are reported with hits and inserts
@@ -697,6 +748,116 @@ stage timings, cache results and scheduling report. These reports distinguish
 unchanged warm builds from builds that invalidate source or native artifacts.
 
 This is not an official Convex project.
+
+## Standalone Wasm runner
+
+`convex-wasm-wasmtime-runner MODULE.wasm [EXPORT]` initializes a standalone WASI
+module and calls its `() -> i32` export. The default export is
+`convex_wasm_static_hermes_global_probe_run`. Guest stdout and stderr are forwarded
+as bytes; a nonzero result fails the command.
+
+For repeated local comparisons, use
+`convex-wasm-wasmtime-runner --serve EXPORT MODULE.wasm [MODULE.wasm ...]`.
+It compiles the modules once and writes `{"kind":"ready","modules":N}`.
+Send a zero-based module index on each stdin line. Every request creates a fresh
+store and instance, calls `_initialize`, then calls the selected export. Each
+flushed response contains `kind: "result"`, `module`, `status`, and `stdout` and
+`stderr` byte arrays, preserving arbitrary WASI output. EOF exits; malformed
+requests, guest errors, and nonzero statuses fail the command. This amortizes
+compilation without retaining guest state. This diagnostic uses the runner's
+unmetered engine configuration, not a backend invocation policy.
+
+## SDK syscall replay diagnostic
+
+`scripts/lib/convex-wasm-syscall-replay.mjs` prepares a captured JSON syscall
+trace and supplies a replacement `Convex` syscall object for local diagnostics.
+Each call records `sequence`, `channel`, `operation`, serialized `arguments` and
+`result`, and globally ordered `startedEvent`/`completedEvent` positions. The
+capture must retain completed reads, query cleanup and every write.
+
+Call `prepareConvexWasmSyscallReplay(calls)` once, then
+`createConvexWasmSyscallReplay(prepared)` for each invocation. Install its `Convex`
+object and call `assertComplete()` after checking the handler's expected output.
+Independent reads may reorder between writes; request values, result order within
+each query, write order and read/write boundaries remain checked. Unsupported
+operations and overlapping reads/writes fail. Freeze time and replay observed
+entropy separately. Keep private captures outside this repository.
+
+This diagnostic includes the SDK's JSON transport and replay bookkeeping. It
+does not establish typed capability-bridge performance, reproduce provider waits
+or replace paired backend correctness checks. Run its focused tests with
+`npm run test:replay`.
+
+For a guest linked with the native typed bridge, the optional Rust runner keeps
+trace matching, fixture values and result checks on the host:
+
+```sh
+cargo build --locked --release --manifest-path scripts/convex-wasm-precompiler/Cargo.toml --features capability-replay --bin convex-wasm-capability-replay
+convex-wasm-capability-replay trace.json baseline.wasm candidate.wasm
+npm run test:replay:native
+```
+
+For interleaved comparisons with an external engine, set `paced: true`. After
+preparation and CPU pinning, the runner emits `{"ready":true}`. Write exactly
+`run\n` to its stdin for each invocation, in the usual iteration/case/variant
+order, and read its result line before advancing. Instances remain warm; command
+waiting and result transfer are outside the measured interval. Invalid commands
+and early EOF fail. The driving process must impose an overall timeout. Without
+`paced`, the runner retains its ordinary automatic loop and output format.
+
+The input contains `environment` (a map of strings or null), `cases`, `warmup`,
+`repetitions` and `fuel`. Optional `cpu` pins the execution thread to a Linux CPU
+after compilation and preparation; omission preserves the existing affinity.
+An explicit CPU on another platform is rejected.
+Optional `perf_map: true` emits Wasmtime symbols to `/tmp/perf-PID.map` on Unix
+and permits up to 1,024 repetitions for local sampling; the ordinary comparison
+limit is 256. Start sampling after the first warmup output to exclude compilation
+and preparation. Profiling is disabled when the option is omitted.
+Each case has a numeric `selector`, `timestamp_ms`,
+`args`, `expected`, the prepared `replay` trace, and an ordered `entropy` array of
+`{kind, value}` records (`uuid` or `random`). Absent environment keys produce the
+SDK's absent-variable response. The guest must export `_initialize`,
+`convex_wasm_select_entry`, `convex_wasm_udf_prepare_selected_entry` and
+`convex_wasm_udf_run`. A single module argument runs correctness checks; two
+alternate retained instances in the same process. This optional diagnostic
+binary is built from source and is not included in portable release archives.
+
+The runner uses CVA1 requests/results and packed FlexBuffers documents and
+collections. It converts a captured stream into a bulk result only when the
+capture includes an explicit end-of-query result. Partial streams remain streams.
+All expected reads, writes, outputs and entropy must be consumed, and writes
+cannot pass pending read completions. Unsupported capabilities, pending commit
+timestamps and pagination fail explicitly. The engine enables fuel accounting
+and epoch interruption; an invocation has a bounded epoch deadline.
+Async-operation and stream handles restart after invocation cleanup, matching
+the backend's retained-instance lifecycle. Opaque value handles retain their
+separate numbering. Reusing an instance must not make the guest allocate or scan
+arrays sized by the number of operations in earlier invocations.
+
+Output distinguishes total handler elapsed time from time inside the Convex host
+import bodies. `guestIncludingWasiMs` subtracts those bodies and still includes
+WASI, host-call transitions and measurement overhead; it is not pure guest CPU.
+Compilation, preparation and final comparison are outside that interval. Fixed
+responses omit provider execution and I/O waits, so these measurements do not
+replace production latency or paired-backend correctness evidence. Keep the
+source/toolchain identities and local replay inputs with each comparison.
+
+## Guarded callable specialization
+
+Source preparation can expose a small arrow function passed to an annotation or
+decorator without assuming that the decorator returns its input. The original
+function remains at its original evaluation position. Direct calls compare the
+returned value with that function and retain the original call when they differ.
+Known targets can then inline before property and type simplification. Annotation
+effects, function identity, anonymous names and non-call uses remain observable.
+
+The source summary admits at most 64 targets, 256 call sites and a conservative
+64 KiB allowance for added call source per module. Only immutable module bindings
+with small arrow bodies qualify. Calls with source-site-sensitive arguments stay
+generic, and nested guarded argument copies are excluded to bound code growth.
+Target names depend on the original binding, preserving unrelated names after an
+edit. These facts use the existing persistent source-summary cache and its
+authenticated implementation identity.
 
 ## Versioning
 

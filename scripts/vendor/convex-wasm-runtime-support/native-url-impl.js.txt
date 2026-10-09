@@ -1,0 +1,71 @@
+"use strict";
+const urlencoded = require("./urlencoded");
+const URLSearchParams = require("./URLSearchParams");
+const URL = require("./URL");
+
+const native = globalThis.__convexWasmNativeUrl;
+if (native === undefined || !Object.isFrozen(native) ||
+    typeof native.parse !== "function" || typeof native.get !== "function" ||
+    typeof native.set !== "function") {
+  throw new Error("Native URL bootstrap is unavailable or invalid");
+}
+delete globalThis.__convexWasmNativeUrl;
+if (Object.hasOwn(globalThis, "__convexWasmNativeUrl")) {
+  throw new Error("Native URL bootstrap was not removed");
+}
+
+exports.implementation = class URLImpl {
+  constructor(globalObject, [url, base], privateData) {
+    this._handle = privateData.nativeHandle === undefined
+      ? native.parse(url, base) : privateData.nativeHandle;
+    if (this._handle === null) throw new TypeError("Invalid URL or base URL");
+    this._query = URLSearchParams.createImpl(globalObject,
+      [native.get(this._handle, 9).slice(1)], { doNotStripQMark: true });
+    this._query._url = this;
+    // The pinned URLSearchParams implementation updates this query slot. Keep
+    // the association live without retaining JavaScript values in native state.
+    const owner = this;
+    this._url = {
+      set query(value) {
+        native.set(owner._handle, 9, value === null ? "" : "?" + value);
+      }
+    };
+  }
+
+  static parse(globalObject, url, base) {
+    const nativeHandle = native.parse(url, base);
+    return nativeHandle === null ? null : URL.createImpl(globalObject, [url, base], { nativeHandle });
+  }
+
+  static canParse(url, base) { return native.parse(url, base) !== null; }
+
+  get href() { return native.get(this._handle, 0); }
+  set href(value) {
+    if (!native.set(this._handle, 0, value)) throw new TypeError("Invalid URL");
+    this._query._list = urlencoded.parseUrlencodedString(native.get(this._handle, 9).slice(1));
+  }
+  get origin() { return native.get(this._handle, 1); }
+  get protocol() { return native.get(this._handle, 2); }
+  set protocol(value) { native.set(this._handle, 2, value); }
+  get username() { return native.get(this._handle, 3); }
+  set username(value) { native.set(this._handle, 3, value); }
+  get password() { return native.get(this._handle, 4); }
+  set password(value) { native.set(this._handle, 4, value); }
+  get host() { return native.get(this._handle, 5); }
+  set host(value) { native.set(this._handle, 5, value); }
+  get hostname() { return native.get(this._handle, 6); }
+  set hostname(value) { native.set(this._handle, 6, value); }
+  get port() { return native.get(this._handle, 7); }
+  set port(value) { native.set(this._handle, 7, value); }
+  get pathname() { return native.get(this._handle, 8); }
+  set pathname(value) { native.set(this._handle, 8, value); }
+  get search() { return native.get(this._handle, 9); }
+  set search(value) {
+    native.set(this._handle, 9, value);
+    this._query._list = urlencoded.parseUrlencodedString(native.get(this._handle, 9).slice(1));
+  }
+  get hash() { return native.get(this._handle, 10); }
+  set hash(value) { native.set(this._handle, 10, value); }
+  get searchParams() { return this._query; }
+  toJSON() { return this.href; }
+};

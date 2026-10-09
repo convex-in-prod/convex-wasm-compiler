@@ -570,7 +570,7 @@ ${convexWasmApplicationGlobalThisBinding}.console.warn("facade");
   }
   assert.deepEqual(convexWasmTargetRuntimeSurfacePolicy.console, {
     formatting: {
-      browserBundleSha256: "b2fc88e4e9d5c776bca6384c7d7a1411ba7350866d9974055bc10dcfc423e190",
+      browserBundleSha256: "d0f14730c84f853d6e1f262ff82f9e7b3f9f29bcc0eb049a3d841650cb3d5a0c",
       customInspect: true,
       implementation: "shared-untyped-runtime-support-bundle",
       indent: 2,

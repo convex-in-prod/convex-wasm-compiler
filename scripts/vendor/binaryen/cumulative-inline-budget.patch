@@ -1,0 +1,473 @@
+--- a/src/passes/Inlining.cpp
++++ b/src/passes/Inlining.cpp
+@@ -1428,6 +1428,7 @@
+       if (inlinedUses.contains(func->name)) {
+         continue;
+       }
++      uint64_t estimatedSize = infos[func->name].size;
+       for (auto& action : state.actionsForFunction[name]) {
+         auto* inlinedFunction = action.contents;
+         // if we've inlined into a function, don't inline it in this iteration,
+@@ -1438,9 +1439,13 @@
+           continue;
+         }
+         Name inlinedName = inlinedFunction->name;
+-        if (!isUnderSizeLimit(func->name, inlinedName)) {
++        if (!isUnderSizeLimit(estimatedSize, inlinedName)) {
+           continue;
+         }
++
++        // All actions for this caller are chosen before its IR is changed.
++        // Charge earlier choices so each call cannot reuse the original budget.
++        estimatedSize += infos[inlinedName].size;
+ 
+         // Success - we can inline.
+ #if INLINING_DEBUG
+@@ -1542,9 +1547,9 @@
+ 
+   // Checks if the combined size of the code after inlining is under the
+   // absolute size limit.
+-  bool isUnderSizeLimit(Name target, Name source) {
++  bool isUnderSizeLimit(uint64_t targetSize, Name source) {
+     // Estimate the combined binary size from the number of instructions.
+-    auto combinedSize = infos[target].size + infos[source].size;
++    auto combinedSize = targetSize + infos[source].size;
+     auto estimatedBinarySize = Measurer::BytesPerExpr * combinedSize;
+     auto& options = getPassRunner()->options;
+     return estimatedBinarySize < options.inlining.maxCombinedBinarySize;
+--- a/test/lit/passes/inlining-max-combined-size.wat
++++ b/test/lit/passes/inlining-max-combined-size.wat
+@@ -5,7 +5,8 @@
+ ;; The expected behavior:
+ ;;
+ ;;   for $main,
+-;;     DEFAULT and IMCBS96 inline call-bar and call-foo.
++;;     DEFAULT inlines call-bar and call-foo.
++;;     IMCBS96 inlines call-bar, then its cumulative budget stops call-foo.
+ ;;     IMCBS90 and IMCBS0 don't inline them because inlining would make
+ ;;     the (inliner's estimate of) size of $main exceed the specified limit.
+ ;;
+@@ -20,6 +21,8 @@
+ 
+ (module
+  ;; DEFAULT:      (type $0 (func (param i32 i32 i32)))
++ ;; IMCBS96:      (type $1 (func))
++
+  ;; IMCBS96:      (type $0 (func (param i32 i32 i32)))
+  ;; IMCBS90:      (type $1 (func))
+ 
+@@ -30,7 +33,6 @@
+  (type $0 (func (param i32 i32 i32)))
+ 
+  ;; DEFAULT:      (type $1 (func))
+- ;; IMCBS96:      (type $1 (func))
+  (type $1 (func))
+ 
+  (type $2 (func))
+@@ -59,6 +61,13 @@
+  ;; IMCBS0:      (export "small-main" (func $small-main))
+  (export "small-main" (func $small-main))
+ 
++ ;; IMCBS96:      (func $call-foo
++ ;; IMCBS96-NEXT:  (call $imported-foo
++ ;; IMCBS96-NEXT:   (i32.const 1)
++ ;; IMCBS96-NEXT:   (i32.const 2)
++ ;; IMCBS96-NEXT:   (i32.const 3)
++ ;; IMCBS96-NEXT:  )
++ ;; IMCBS96-NEXT: )
+  ;; IMCBS90:      (func $call-foo
+  ;; IMCBS90-NEXT:  (call $imported-foo
+  ;; IMCBS90-NEXT:   (i32.const 1)
+@@ -79,6 +88,13 @@
+    (i32.const 2)
+    (i32.const 3)))
+ 
++ ;; IMCBS96:      (func $call-bar
++ ;; IMCBS96-NEXT:  (call $imported-bar
++ ;; IMCBS96-NEXT:   (i32.const 1)
++ ;; IMCBS96-NEXT:   (i32.const 2)
++ ;; IMCBS96-NEXT:   (i32.const 3)
++ ;; IMCBS96-NEXT:  )
++ ;; IMCBS96-NEXT: )
+  ;; IMCBS90:      (func $call-bar
+  ;; IMCBS90-NEXT:  (call $imported-bar
+  ;; IMCBS90-NEXT:   (i32.const 1)
+@@ -267,161 +283,37 @@
+  ;; IMCBS96-NEXT:   (i32.const 2)
+  ;; IMCBS96-NEXT:   (i32.const 3)
+  ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-bar
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
++ ;; IMCBS96-NEXT:  (call $call-bar)
+  ;; IMCBS96-NEXT: )
+  ;; IMCBS90:      (func $main
+  ;; IMCBS90-NEXT:  (call $call-foo)
+@@ -645,56 +537,16 @@
+  ;; IMCBS96-NEXT:   (i32.const 2)
+  ;; IMCBS96-NEXT:   (i32.const 3)
+  ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
+- ;; IMCBS96-NEXT:  (call $imported-foo
+- ;; IMCBS96-NEXT:   (i32.const 1)
+- ;; IMCBS96-NEXT:   (i32.const 2)
+- ;; IMCBS96-NEXT:   (i32.const 3)
+- ;; IMCBS96-NEXT:  )
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
++ ;; IMCBS96-NEXT:  (call $call-foo)
+  ;; IMCBS96-NEXT: )
+  ;; IMCBS90:      (func $small-main
+  ;; IMCBS90-NEXT:  (call $imported-foo
+@@ -722,61 +574,17 @@
+  ;; IMCBS90-NEXT:   (i32.const 2)
+  ;; IMCBS90-NEXT:   (i32.const 3)
+  ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
+- ;; IMCBS90-NEXT:  (call $imported-foo
+- ;; IMCBS90-NEXT:   (i32.const 1)
+- ;; IMCBS90-NEXT:   (i32.const 2)
+- ;; IMCBS90-NEXT:   (i32.const 3)
+- ;; IMCBS90-NEXT:  )
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
++ ;; IMCBS90-NEXT:  (call $call-foo)
+  ;; IMCBS90-NEXT: )
+  ;; IMCBS0:      (func $small-main
+  ;; IMCBS0-NEXT:  (call $call-foo)
+--- /dev/null
++++ b/test/lit/passes/inlining-cumulative-size.wat
+@@ -0,0 +1,43 @@
++;; Every individual call fits the limit. Their sum does not. Charge chosen
++;; actions before the next call is considered, even within one iteration.
++;; RUN: wasm-opt %s --inlining --inline-max-combined-binary-size=50 -S -o - | filecheck %s --check-prefix=BOUNDED
++;; RUN: wasm-opt %s --inlining --inline-max-combined-binary-size=250 -S -o - | filecheck %s --check-prefix=LARGE
++;; BOUNDED-LABEL: (func $main
++;; BOUNDED: (call $observe
++;; BOUNDED: (call $b)
++;; BOUNDED: (call $c)
++;; BOUNDED: (call $d)
++;; LARGE-LABEL: (func $main
++;; LARGE-NOT: (call $a)
++;; LARGE-NOT: (call $b)
++;; LARGE-NOT: (call $c)
++;; LARGE-NOT: (call $d)
++
++(module
++ (import "env" "observe" (func $observe (param i32)))
++ (func $a
++  (call $observe (i32.const 0))
++  (call $observe (i32.const 1))
++  (call $observe (i32.const 2))
++  (call $observe (i32.const 3)))
++ (func $b
++  (call $observe (i32.const 4))
++  (call $observe (i32.const 5))
++  (call $observe (i32.const 6))
++  (call $observe (i32.const 7)))
++ (func $c
++  (call $observe (i32.const 8))
++  (call $observe (i32.const 9))
++  (call $observe (i32.const 10))
++  (call $observe (i32.const 11)))
++ (func $d
++  (call $observe (i32.const 12))
++  (call $observe (i32.const 13))
++  (call $observe (i32.const 14))
++  (call $observe (i32.const 15)))
++ (func $main (export "main")
++  (call $a)
++  (call $b)
++  (call $c)
++  (call $d))
++)

@@ -72,7 +72,8 @@ async function loadModules(sources, entry, reads = new Map(), functionPlans = ne
     const module = { exports: {} };
     modules.set(name, module);
     vm.runInNewContext(
-      code.get(name),
+      // Production wraps every module in a strict chunk function.
+      `"use strict";\n${code.get(name)}`,
       {
         module,
         require: (target) =>
@@ -379,6 +380,493 @@ test("body duplication stays bounded and reuses identical closed implementations
   assert.equal(plan.bodies.length, 32);
   assert.equal(plan.calls.length, 33);
   assert.equal(plan.rejectedBindings, 8);
+});
+
+test("private local bodies preserve annotation identity, live captures and escaping closures", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./names.js": `const define = Object.defineProperty;
+        export const registered = [];
+        export function name(fn, label) {
+          registered.push(fn); define(fn, "name", { value: label, configurable: true });
+          fn.offset = 3;
+        }`,
+      "./entry.js": `import { name, registered } from "./names.js";
+        let increment = 1;
+        function read(record) {
+          return () => [record.left + record.right + record.left + record.right + increment,
+            read, read.offset, this, new.target];
+        }
+        name(read, "namedReader");
+        export { read, registered };
+        export function change() { increment += 10; read.offset += 2; }
+        export function result(effect) { return read({ left: effect(2), right: effect(4) }); }
+        export function shadow(read) { return read({ left: 7, right: 8 }); }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  const trace = [];
+  const closure = entry.result((value) => (trace.push(value), value));
+  assert.deepEqual(trace, [2, 4]);
+  assert.deepEqual(Array.from(closure()), [13, entry.read, 3, undefined, undefined]);
+  assert.equal(entry.registered[0], entry.read);
+  assert.equal(entry.read.name, "namedReader");
+  assert.equal(entry.read.length, 1);
+  entry.change();
+  assert.deepEqual(Array.from(closure()), [23, entry.read, 5, undefined, undefined]);
+  const receiver = {};
+  assert.deepEqual(Array.from(entry.read.call(receiver, { left: 1, right: 2 })()), [
+    17,
+    entry.read,
+    5,
+    receiver,
+    undefined,
+  ]);
+  assert.equal(
+    entry.shadow((record) => record.left * record.right),
+    56
+  );
+  const sentinel = {};
+  assert.throws(
+    () =>
+      entry.result(() => {
+        throw sentinel;
+      }),
+    (error) => error === sentinel
+  );
+  assert.equal(plans.get("./entry.js").localBodies.length, 1);
+});
+
+test("guarded callable targets preserve annotation identity, replacement and exports", async () => {
+  const plans = new Map();
+  const entry = await loadModules({
+    "./entry.js": `
+      const names = [], retained = [];
+      let offset = 3;
+      function annotate(fn, label) {
+        names.push(fn.name); retained.push(fn);
+        Object.defineProperty(fn, "name", { value: label, configurable: true });
+        return fn;
+      }
+      function replace(fn) { return value => fn(value) + 10; }
+      let early;
+      try { helper(1); } catch (error) { early = error.name; }
+      export const helper = annotate(value => value + offset, "named");
+      const replacement = replace(value => value * 2);
+      export function result(effect) {
+        const a = helper(effect(4)); offset = 5;
+        return [a, helper(4), replacement(4), helper === retained[0], helper.name,
+          names[0], helper.length, early];
+      }`,
+  }, "./entry.js", new Map(), plans);
+  const effects = [];
+  assert.deepEqual(Array.from(entry.result((value) => (effects.push(value), value))),
+    [7, 9, 18, true, "named", "", 1, "ReferenceError"]);
+  assert.deepEqual(effects, [4]);
+  assert.deepEqual(Object.keys(entry).sort(), ["helper", "result"]);
+  assert.equal(plans.get("./entry.js").callableTargets.length, 2);
+  const sentinel = {};
+  assert.throws(() => entry.result(() => { throw sentinel; }), (error) => error === sentinel);
+});
+
+test("guarded property helpers preserve own-field definition and proxy effects", async () => {
+  const plans = new Map();
+  const entry = await loadModules({
+    "./entry.js": `
+      function annotate(fn) { return fn; }
+      const define = Object.defineProperty;
+      var normal = annotate((object, key, value) => key in object
+        ? define(object, key, { value, enumerable: true, configurable: true, writable: true })
+        : object[key] = value);
+      var field = annotate((object, key, value) => normal(object,
+        typeof key !== "symbol" ? key + "" : key, value));
+      export function result(object, key, value) { field(object, key, value); return object; }`,
+  }, "./entry.js", new Map(), plans);
+  const object = Object.create({ set field(_) { assert.fail("inherited setter ran"); } });
+  assert.equal(entry.result(object, "field", 3), object);
+  assert.equal(object.field, 3);
+  Object.defineProperty(object, "field", { value: 7, configurable: true, writable: false });
+  entry.result(object, "field", 8);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(object, "field"), {
+    value: 8, enumerable: true, configurable: true, writable: true,
+  });
+  const key = Symbol("field");
+  entry.result(object, key, 5);
+  assert.equal(object[key], 5);
+  const effects = [];
+  const proxy = new Proxy({}, {
+    has() { effects.push("has"); return false; },
+    set(object, key, value) { effects.push("set"); object[key] = value; return true; },
+  });
+  entry.result(proxy, "field", 9);
+  assert.deepEqual(effects, ["has", "set"]);
+  assert.equal(proxy.field, 9);
+  assert.throws(() => entry.result(Object.freeze({}), "field", 1), { name: "TypeError" });
+  assert.equal(plans.get("./entry.js").callableTargets.length, 2);
+});
+
+test("guarded calls compose nested arguments, imported bodies and private record bodies", async () => {
+  const plans = new Map();
+  const entry = await loadModules({
+    "./dep.js": "export function twice(x) { return x * 2; }",
+    "./entry.js": `import { twice } from "./dep.js";
+      function identity(fn) { return fn; }
+      const first = identity(value => value + 1);
+      const second = identity(value => first(value) + 3);
+      function read(record) {
+        return second(first(twice(record.left))) + record.right + record.left + record.right;
+      }
+      identity(read);
+      export function result(effect) { return read({left: effect(2), right: effect(4)}); }`,
+  }, "./entry.js", new Map(), plans);
+  const effects = [];
+  assert.equal(entry.result((x) => (effects.push(x), x)), 19);
+  assert.deepEqual(effects, [2, 4]);
+  assert.equal(plans.get("./entry.js").callableTargets.length, 2);
+  assert.equal(plans.get("./entry.js").localBodies.length, 1);
+  assert.equal(plans.get("./entry.js").bodies.length, 1);
+});
+
+test("guarded calls retain source-site arguments and reject mutable bindings", async () => {
+  const plans = new Map();
+  const entry = await loadModules({
+    "./entry.js": `
+      function identity(fn) { return fn; }
+      const fn = identity(value => value);
+      let mutable = identity(value => value); mutable = value => value + 10;
+      function tag(strings) { return strings; }
+      export function result() { return [fn(tag\`constant\`), fn(4), (fn /*callee*/)(6), mutable(5)]; }
+      export function indirect() { return fn.call(undefined, 6); }
+      export function construct() { return new fn(1); }`,
+  }, "./entry.js", new Map(), plans);
+  const first = entry.result(), second = entry.result();
+  assert.equal(first[0], second[0]);
+  assert.deepEqual(Array.from(first).slice(1), [4, 6, 15]);
+  assert.equal(entry.indirect(), 6);
+  assert.throws(() => entry.construct(), { name: "TypeError" });
+  const targets = plans.get("./entry.js").callableTargets;
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].calls.length, 2);
+});
+
+test("guarded callable selection is bounded and keeps names stable across additions", () => {
+  const summarize = (source) => {
+    const module = { identity: { path: "entry.js" }, source };
+    return convexWasmModuleLinkage.planConvexWasmFunctionImports(module, new Map(), []);
+  };
+  const base = "function identity(fn) { return fn; } const target = identity(x => x + 1); target(1);";
+  const original = summarize(base).callableTargets[0];
+  const next = summarize("const earlier = identity(x => x); earlier(1);" + base);
+  assert.equal(next.callableTargets.find((x) => x.local === "target").name, original.name);
+  const oversized = summarize(base + "target(2);".repeat(256));
+  assert.equal(oversized.callableTargets.length, 0);
+  const opaque = summarize(base + "eval('');");
+  assert.equal(opaque.callableTargets.length, 0);
+  const nested = base + "target(".repeat(100) + "0" + ")".repeat(100) + ";";
+  const nestedPlan = summarize(nested);
+  const rendered = convexWasmModuleLinkage.renderConvexWasmSpecializedModuleSource(
+    nested, [], nestedPlan
+  );
+  assert.ok(rendered.length < nested.length * 4);
+  assert.equal(vm.runInNewContext(rendered), vm.runInNewContext(nested));
+});
+
+test("guarded callable summaries persist and invalidate changed annotation bodies", async (t) => {
+  const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-callable-summary-"));
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const cacheLayout = deriveConvexWasmCacheLayout({
+    buildId: "callable-summary", cacheRoot, repositoryRoot: cacheRoot, scope: "isolated-test",
+  });
+  const cache = { cacheRoot, cacheLayout };
+  const make = (offset) => ({
+    identity: { path: "entry.js" },
+    source: `function identity(fn) { return fn; }
+      const target = identity(value => value + ${offset});
+      export function result() { return target(3); }`,
+  });
+  const initial = make(1);
+  assert.equal((await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization(
+    [initial], cache
+  )).cacheMisses, 1);
+  const fresh = make(1);
+  assert.equal((await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization(
+    [fresh], cache
+  )).cacheHits, 1);
+  const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(fresh, new Map(), []);
+  assert.equal(plan.callableTargets.length, 1);
+  assert.equal(plan.callableTargets[0].calls.length, 1);
+  assert.equal((await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization(
+    [make(2)], cache
+  )).cacheMisses, 1);
+});
+
+test("local specialization preserves optional-field prototype effects and field evaluation order", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./entry.js": `
+        export function read(record) {
+          const before = record.left + record.right;
+          const optional = record.optional;
+          return [before, optional, record.left + record.right];
+        }
+        export function result(effect) {
+          let saved;
+          Object.defineProperty(Object.prototype, "optional", {
+            configurable: true,
+            get() { saved = this; this.left = 20; return 9; },
+          });
+          try {
+            const absent = read({ left: effect(2), right: effect(4) });
+            const own = read({ left: effect(3), right: effect(5), optional: undefined });
+            return [absent, own, saved.left];
+          } finally { delete Object.prototype.optional; }
+        }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  const trace = [];
+  const result = entry.result((value) => (trace.push(value), value));
+  assert.deepEqual(trace, [2, 4, 3, 5]);
+  assert.deepEqual(Array.from(result[0]), [6, 9, 24]);
+  assert.deepEqual(Array.from(result[1]), [8, undefined, 8]);
+  assert.equal(result[2], 20);
+  assert.equal(plans.get("./entry.js").localBodies.length, 1);
+});
+
+test("local cloning rejects source-site identity and unresolved mutable bindings", async () => {
+  const cases = [
+    "return tag`site` + record.a + record.b + record.c + record.d;",
+    'return eval("record.a") + record.a + record.b + record.c + record.d;',
+    "return arguments.length + record.a + record.b + record.c + record.d;",
+    'return import("./dep.js").then(() => record.a + record.b + record.c + record.d);',
+  ];
+  for (const body of cases) {
+    const module = {
+      identity: { path: "entry.js" },
+      source: `export function read(record) { ${body} }
+        export function result() { return read({ a: 1, b: 2, c: 3, d: 4 }); }`,
+    };
+    const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(module, new Map(), []);
+    assert.deepEqual(plan.localBodies, [], body);
+  }
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./entry.js": `export function read(record) { return record.a + record.b + record.c + record.d; }
+        export function change() { read = () => 99; }
+        export function result() { return read({ a: 1, b: 2, c: 3, d: 4 }); }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.equal(entry.result(), 10);
+  entry.change();
+  assert.equal(entry.result(), 99);
+  assert.deepEqual(plans.get("./entry.js").localBodies, []);
+});
+
+test("bounded local bodies preserve recursion and nested imported substitutions", async () => {
+  const plans = new Map();
+  const names = Array.from({ length: 6 }, (_, i) => `read${i}`);
+  const entry = await loadModules(
+    {
+      "./dep.js": "export function twice(value) { return value * 2; }",
+      "./entry.js": `import { twice } from "./dep.js";
+        const __convexLocalBody0 = 7;
+        ${names
+          .map(
+            (name) => `export function ${name}(record, depth) {
+          if (depth > 0) return ${name}({ a: record.a, b: record.b, c: record.c, d: record.d }, depth - 1);
+          return twice(record.a + record.b + record.c + record.d) + __convexLocalBody0;
+        }`
+          )
+          .join("\n")}
+        export function result() { return [${names
+          .map((name) => `${name}({ a: 1, b: 2, c: 3, d: 4 }, 2)`)
+          .join(", ")}]; }`,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(Array.from(entry.result()), [27, 27, 27, 27, 27, 27]);
+  assert.equal(plans.get("./entry.js").localBodies.length, 4);
+  assert.ok(
+    plans.get("./entry.js").localBodies.every((body) => body.name !== "__convexLocalBody0")
+  );
+});
+
+test("private local summaries survive warm reuse and invalidate edited bodies", async (t) => {
+  const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-local-summary-"));
+  t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
+  const cacheLayout = deriveConvexWasmCacheLayout({
+    buildId: "local-summary",
+    cacheRoot,
+    repositoryRoot: cacheRoot,
+    scope: "isolated-test",
+  });
+  const prepare = async (operator) => {
+    const module = {
+      identity: { path: "entry.js" },
+      source: `export function read(record) { return record.a ${operator} record.b + record.c + record.d; }
+        export function result() { return read({ a: 1, b: 2, c: 3, d: 4 }); }`,
+    };
+    const report = await convexWasmModuleLinkage.prepareConvexWasmFunctionSpecialization([module], {
+      cacheRoot,
+      cacheLayout,
+    });
+    const plan = convexWasmModuleLinkage.planConvexWasmFunctionImports(module, new Map(), []);
+    const source = convexWasmModuleLinkage.renderConvexWasmSpecializedModuleSource(
+      module.source,
+      [],
+      plan
+    );
+    return { report, plan, source };
+  };
+  const cold = await prepare("+");
+  assert.equal(cold.plan.localBodies.length, 1);
+  const warm = await prepare("+");
+  assert.equal(warm.report.cacheHits, 1);
+  assert.deepEqual(warm.plan, cold.plan);
+  assert.equal(warm.source, cold.source);
+  const edited = await prepare("-");
+  assert.equal(edited.report.cacheMisses, 1);
+  assert.notEqual(edited.source, cold.source);
+});
+
+test("local selection does not score records beyond native promotion limits", async () => {
+  const fields = Array.from({ length: 17 }, (_, i) => `field${i}`);
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./entry.js": `
+      export function wide(record) { return ${fields
+        .slice(0, 9)
+        .map((key) => `record.${key}`)
+        .join(" + ")}; }
+      export function narrow(record) { return record.field0 + record.field1 + record.field2 + record.field3; }
+      export function result() { return [
+        wide({ ${fields
+          .slice(0, 9)
+          .map((key, i) => `${key}: ${i}`)
+          .join(", ")} }),
+        narrow({ ${fields.map((key, i) => `${key}: ${i}`).join(", ")} }),
+        narrow({ field0: 1, field1: 2, field2: 3, field3: 4 })
+      ]; }
+    `,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(Array.from(entry.result()), [36, 6, 10]);
+  const plan = plans.get("./entry.js");
+  assert.deepEqual(
+    plan.localBodies.map((body) => body.local),
+    ["narrow"]
+  );
+  assert.equal(plan.localBodies[0].calls.length, 1);
+});
+
+test("local selection rejects destructuring and loop-target record writes", async () => {
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./entry.js": `
+        export function destructured(record) {
+          ({value: record.a} = {value: 10});
+          return record.a + record.b + record.c + record.d;
+        }
+        export function loopTarget(record) {
+          for (record.a of [10, 20]) {}
+          return record.a + record.b + record.c + record.d;
+        }
+        export function result() {
+          return [destructured({a:1,b:2,c:3,d:4}), loopTarget({a:1,b:2,c:3,d:4})];
+        }
+      `,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(Array.from(entry.result()), [19, 29]);
+  assert.deepEqual(plans.get("./entry.js").localBodies, []);
+});
+
+test("local specialization retains helper names and order when edited reads change ranking", async () => {
+  const prepare = async (extraRead) => {
+    const plans = new Map();
+    const entry = await loadModules(
+      {
+        "./entry.js": `
+          const __convexLocalBody_first = 3;
+          const __convexLocalBody_second = 5;
+          export function first(record) { return record.a + record.b + record.c + record.d + __convexLocalBody_first; }
+          export function second(record) { return record.a + record.b + record.c + record.d + __convexLocalBody_second ${extraRead}; }
+          export function result() {
+            return [first({ a: 1, b: 2, c: 3, d: 4 }), second({ a: 1, b: 2, c: 3, d: 4 })];
+          }`,
+      },
+      "./entry.js",
+      new Map(),
+      plans
+    );
+    return { plan: plans.get("./entry.js"), result: Array.from(entry.result()) };
+  };
+  const initial = await prepare("");
+  const edited = await prepare("+ record.a + record.b");
+  assert.deepEqual(initial.result, [13, 15]);
+  assert.deepEqual(edited.result, [13, 18]);
+  const initialNames = initial.plan.localBodies.map(({ local, name }) => ({ local, name }));
+  assert.deepEqual(initialNames.map(({ local }) => local), ["first", "second"]);
+  assert.deepEqual(
+    edited.plan.localBodies.map(({ local, name }) => ({ local, name })),
+    initialNames
+  );
+  assert.equal(initial.plan.localBodies[0].benefit, initial.plan.localBodies[1].benefit);
+  assert.ok(edited.plan.localBodies[1].benefit > edited.plan.localBodies[0].benefit);
+  assert.equal(initialNames[0].name, "__convexLocalBody_first_0");
+  assert.equal(initialNames[1].name, "__convexLocalBody_second_0");
+});
+
+test("large bundled modules retain bounded specialization across distinct helpers", async () => {
+  const names = Array.from({ length: 12 }, (_, i) => `read${i}`);
+  const plans = new Map();
+  const entry = await loadModules(
+    {
+      "./entry.js": `
+      export const retainedMaterial = ${JSON.stringify("x".repeat(512 * 1024))};
+      ${names
+        .map(
+          (name, i) => `export function ${name}(record) {
+        return record.a + record.b + record.c + record.d + ${i};
+      }`
+        )
+        .join("\n")}
+      export function result() { return [${names
+        .map((name) => `${name}({ a: 1, b: 2, c: 3, d: 4 })`)
+        .join(", ")}]; }
+    `,
+    },
+    "./entry.js",
+    new Map(),
+    plans
+  );
+  assert.deepEqual(
+    Array.from(entry.result()),
+    names.map((_, i) => 10 + i)
+  );
+  const bodies = plans.get("./entry.js").localBodies;
+  assert.ok(bodies.length > 4 && bodies.length <= 64);
+  assert.ok(bodies.reduce((bytes, body) => bytes + body.bytes, 0) <= 128 * 1024);
 });
 
 test("source-local summaries reuse warm work and invalidate only incorporated body changes", async (t) => {

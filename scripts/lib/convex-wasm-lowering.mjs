@@ -5284,6 +5284,11 @@ function __convexSdkQueryRecord(kind: number, first: any, second: any): any {
   return __convexNativeQueryRecord(kind, first, second);
 }
 Object.freeze(__convexSdkQueryRecord);
+function __convexSdkQueryValueRecord(kind: number, field: any, value: any): any {
+  if (typeof __convexNativeQueryRecord !== "function") throw new Error("Native query record adapter is unavailable");
+  return __convexNativeQueryRecord(kind, field, value, __convexCommitTsPlaceholder);
+}
+Object.freeze(__convexSdkQueryValueRecord);
 const __convexSdkFacade: any = Object.freeze({
   asyncSyscall: __convexSdkAsyncSyscall,
   asyncSyscallObjectArgs: __convexSdkAsyncSyscallObjectArgs,
@@ -5292,6 +5297,7 @@ const __convexSdkFacade: any = Object.freeze({
   syscallTyped: __convexSdkSyscallTyped,
   captureQueryValue: __convexSdkCaptureQueryValue,
   queryRecord: __convexSdkQueryRecord,
+  queryValueRecord: __convexSdkQueryValueRecord,
   queryCollect: true,
   typedQueryArgs: true,
   jsSyscall: __convexSdkJsSyscall,

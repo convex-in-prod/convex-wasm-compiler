@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { buildSync } from "esbuild";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { nodeUrlService } from "../test-fixtures/native-url/node-service.mjs";
 import { version as convexSdkVersion } from "convex";
 import { CommitTsPlaceholder, compareValues, convexToJson, jsonToConvex } from "convex/values";
 import ts from "typescript";
@@ -227,6 +228,9 @@ function nativeCapabilityHarness({
   now = 1_700_000_000_250,
   typedQueryArgs = false,
   sdkPackageVersion = convexSdkVersion,
+  createQueryRecord = () => {
+    throw new Error("Query records require the native adapter fixture");
+  },
 } = {}) {
   const rendered = renderNativeDbGetCapabilityTargetProduction({
     sdkPackageVersion,
@@ -533,9 +537,7 @@ function nativeCapabilityHarness({
       capturedQueryValues.push({ value: structuredClone(value), buffer });
       return buffer;
     },
-    () => {
-      throw new Error("Query records require the native adapter fixture");
-    }
+    createQueryRecord
   );
   assert.equal(bridge.length, 11);
   assert.equal(typeof bridge[10], "object");
@@ -606,6 +608,7 @@ function nativeCapabilityHarness({
     asyncSyscallTyped: undefined,
     syscallTyped: undefined,
     queryRecord: undefined,
+    queryValueRecord: undefined,
     asyncSyscallObjectArgs: (operation, argumentsObject) =>
       sandbox.Convex.asyncSyscallObjectArgs(operation, guestArguments(argumentsObject)),
     asyncSyscallValueArgs: (operation, argumentsObject) =>
@@ -747,6 +750,7 @@ function nativeConsoleHarness({
   const capabilityLookups = [];
   const freedPointers = [];
   const sandbox = {
+    __convexWasmNativeUrl: nodeUrlService(),
     Map,
     Set,
     TextDecoder,
@@ -3762,9 +3766,9 @@ var __convexWasmCompileProfile = {
   assert.equal(formatterJavascript, renderNativeRuntimeSupportUnit());
   assert.equal(
     sha256(formatterJavascript),
-    "33a6237a6eb39828f1bc200687363aa087fb36f46bc8744391c21ebbb847ac4e"
+    "f28595267678618f45ae6a378541f2b5d222efb07f6db6945dc91efcd9677ba1"
   );
-  assert.equal(Buffer.byteLength(formatterJavascript), 609_458);
+  assert.equal(Buffer.byteLength(formatterJavascript), 353_208);
   assert.match(
     formatterJavascript,
     /globalThis\.__convexWasmApplicationInstallRuntimeSupport\(Object\.freeze\(\{consoleFormatter:/u
@@ -3916,6 +3920,7 @@ test("runtime support rejects extra string and symbol surface keys before bridge
     assert.throws(
       () =>
         runInNewContext(invalidRuntimeSupport, {
+          __convexWasmNativeUrl: nodeUrlService(),
           TextDecoder,
           TextEncoder,
           __convexWasmApplicationInstallRuntimeSupport: () => {
@@ -7271,6 +7276,32 @@ test("canonical SDK query facade rejects open-field and lifecycle violations bef
   assert.equal(harness.cleanup(), 0);
 });
 
+test("SDK query records preserve raw values and the invocation timestamp identity", () => {
+  const calls = [];
+  const record = Object.freeze({});
+  const harness = nativeCapabilityHarness({
+    typedQueryArgs: true,
+    createQueryRecord: (...args) => {
+      calls.push(args);
+      return record;
+    },
+  });
+  harness.activateSdk("query");
+  const value = harness.guestValue("({ nested: [1n] })");
+  const placeholder = harness.guestValue("__convexCommitTsPlaceholder");
+  const facade = harness.rawSdkFacade;
+  assert.ok(Object.isFrozen(facade.queryValueRecord));
+  assert.equal(facade.queryValueRecord(21, "field", value), record);
+  assert.equal(facade.queryValueRecord(1, undefined, undefined), record);
+  assert.equal(facade.queryRecord(21, "field", value), record);
+  assert.deepEqual(calls, [
+    [21, "field", value, placeholder],
+    [1, undefined, undefined, placeholder],
+    [21, "field", value],
+  ]);
+  assert.equal(harness.capturedQueryValues.length, 0);
+});
+
 test("typed SDK query stream uses captured operands and the direct query start", () => {
   const harness = nativeCapabilityHarness({ typedQueryArgs: true });
   harness.activateSdk("query");
@@ -8543,7 +8574,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /js_error_phase = JSErrorPhase::ValidateRuntimeSupportInstaller;\s*validate_runtime_support_installer\(js\);\s*js_error_phase = JSErrorPhase::InitializeFormatterUnit;[\s\S]*?if \(!_sh_initialize_units\(runtime, 1,\s*CONVEX_WASM_FORMATTER_EXPORTED_UNIT\)\) \{\s*reset_runtime_state\(\);\s*return static_cast<int32_t>\(js_error_phase\);\s*\}[\s\S]*?formatter_unit_initialization_count \+= 1;[\s\S]*?js_error_phase = JSErrorPhase::VerifyRuntimeSupportInstallation;\s*verify_runtime_support_installation\(js\);[\s\S]*?js_error_phase = JSErrorPhase::RetainBridgeBootstrap;\s*retain_bridge_bootstrap_and_application_bindings\(js\);/u
+    /js_error_phase = JSErrorPhase::ValidateRuntimeSupportInstaller;\s*validate_runtime_support_installer\(js\);\s*convex_wasm::installNativeUrl\(js\);\s*js_error_phase = JSErrorPhase::InitializeFormatterUnit;[\s\S]*?if \(!_sh_initialize_units\(runtime, 1,\s*CONVEX_WASM_FORMATTER_EXPORTED_UNIT\)\) \{\s*reset_runtime_state\(\);\s*return static_cast<int32_t>\(js_error_phase\);\s*\}[\s\S]*?formatter_unit_initialization_count \+= 1;[\s\S]*?js_error_phase = JSErrorPhase::VerifyRuntimeSupportInstallation;\s*verify_runtime_support_installation\(js\);[\s\S]*?js_error_phase = JSErrorPhase::RetainBridgeBootstrap;\s*retain_bridge_bootstrap_and_application_bindings\(js\);/u
   );
   assert.match(
     source,
@@ -8691,7 +8722,7 @@ test("native capability runtime isolates and retains split bridge and applicatio
   );
   assert.match(
     source,
-    /void verify_runtime_support_installation\(Runtime &js\) \{\s*if \(js\.global\(\)\.hasProperty\(js, kRuntimeSupportInstallerBinding\)\) \{\s*throw JSError\(js, "Runtime-support installer was retained after installation"\);/u
+    /void verify_runtime_support_installation\(Runtime &js\) \{\s*if \(js\.global\(\)\.hasProperty\(js, kRuntimeSupportInstallerBinding\) \|\|\s*js\.global\(\)\.hasProperty\(js, "__convexWasmNativeUrl"\)\) \{\s*throw JSError\(js, "Runtime-support installer was retained after installation"\);/u
   );
   assert.match(
     source,

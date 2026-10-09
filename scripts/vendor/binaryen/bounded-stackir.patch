@@ -1,0 +1,176 @@
+--- a/src/wasm-stack.h
++++ b/src/wasm-stack.h
+@@ -572,10 +572,22 @@
+   bool sourceMap;
+ };
+ 
++// Temporary stack instructions belong to the function being emitted. Keep the
++// source Expressions in the module arena: debug locations can outlive StackIR.
++class FunctionStackIR {
++  MixedArena allocator;
++
++public:
++  StackIR stackIR;
++
++  FunctionStackIR(Module& wasm, Function* func, const PassOptions& options);
++};
++
+ // Binaryen IR to stack IR converter for an entire module. Generates all the
+ // StackIR in parallel, and then allows querying for the StackIR of individual
+ // functions.
+ class ModuleStackIR {
++  MixedArena allocator;
+   ModuleUtils::ParallelFunctionAnalysis<StackIR> analysis;
+ 
+ public:
+--- a/src/wasm/wasm-stack.cpp
++++ b/src/wasm/wasm-stack.cpp
+@@ -3582,8 +3582,9 @@
+ // Queues the expressions linearly in Stack IR (SIR)
+ class StackIRGenerator : public BinaryenIRWriter<StackIRGenerator> {
+ public:
+-  StackIRGenerator(Module& module, Function* func)
+-    : BinaryenIRWriter<StackIRGenerator>(func), module(module) {}
++  StackIRGenerator(Module& module, Function* func, MixedArena& allocator)
++    : BinaryenIRWriter<StackIRGenerator>(func), module(module),
++      allocator(allocator) {}
+ 
+   void emit(Expression* curr);
+   void emitScopeEnd(Expression* curr);
+@@ -3622,6 +3623,7 @@
+   }
+ 
+   Module& module;
++  MixedArena& allocator;
+   StackIR stackIR; // filled in write()
+ };
+ 
+@@ -3663,7 +3665,7 @@
+ 
+ StackInst* StackIRGenerator::makeStackInst(StackInst::Op op,
+                                            Expression* origin) {
+-  auto* ret = module.allocator.alloc<StackInst>();
++  auto* ret = allocator.alloc<StackInst>();
+   ret->op = op;
+   ret->origin = origin;
+   auto stackType = origin->type;
+@@ -3686,19 +3688,31 @@
+   return ret;
+ }
+ 
++static StackIR generateStackIR(Module& wasm,
++                               Function* func,
++                               const PassOptions& options,
++                               MixedArena& allocator) {
++  assert(!func->imported());
++  StackIRGenerator stackIRGen(wasm, func, allocator);
++  stackIRGen.write();
++  auto stackIR = std::move(stackIRGen.getStackIR());
++
++  if (options.optimizeStackIR) {
++    StackIROptimizer optimizer(func, stackIR, options, wasm.features);
++    optimizer.run();
++  }
++  return stackIR;
++}
++
++FunctionStackIR::FunctionStackIR(Module& wasm,
++                                 Function* func,
++                                 const PassOptions& options)
++  : stackIR(generateStackIR(wasm, func, options, allocator)) {}
++
+ ModuleStackIR::ModuleStackIR(Module& wasm, const PassOptions& options)
+   : analysis(wasm, [&](Function* func, StackIR& stackIR) {
+-      if (func->imported()) {
+-        return;
+-      }
+-
+-      StackIRGenerator stackIRGen(wasm, func);
+-      stackIRGen.write();
+-      stackIR = std::move(stackIRGen.getStackIR());
+-
+-      if (options.optimizeStackIR) {
+-        StackIROptimizer optimizer(func, stackIR, options, wasm.features);
+-        optimizer.run();
++      if (!func->imported()) {
++        stackIR = generateStackIR(wasm, func, options, allocator);
+       }
+     }) {}
+ 
+--- a/src/wasm/wasm-binary.cpp
++++ b/src/wasm/wasm-binary.cpp
+@@ -27,6 +27,7 @@
+ #include "support/bits.h"
+ #include "support/stdckdint.h"
+ #include "support/string.h"
++#include "support/threads.h"
+ #include "support/utilities.h"
+ #include "wasm-annotations.h"
+ #include "wasm-binary.h"
+@@ -517,15 +518,10 @@
+     return;
+   }
+ 
+-  std::optional<ModuleStackIR> moduleStackIR;
+-  if (options.generateStackIR) {
+-    moduleStackIR.emplace(*wasm, options);
+-  }
+-
+   auto sectionStart = startSection(BinaryConsts::Section::Code);
+   o << U32LEB(importInfo->getNumDefinedFunctions());
+   bool DWARF = Debug::hasDWARFSections(*getModule());
+-  ModuleUtils::iterDefinedFunctions(*wasm, [&](Function* func) {
++  auto writeFunction = [&](Function* func, StackIR* stackIR) {
+     assert(binaryLocationTrackedExpressionsForFunc.empty());
+     // Do not smear any debug location from the previous function.
+     writeNoDebugLocation();
+@@ -533,10 +529,6 @@
+     size_t sizePos = writeU32LEBPlaceholder();
+     size_t start = o.size();
+     // Emit Stack IR if present.
+-    StackIR* stackIR = nullptr;
+-    if (moduleStackIR) {
+-      stackIR = moduleStackIR->getStackIROrNull(func);
+-    }
+     if (stackIR) {
+       StackIRToBinaryWriter writer(*this, o, func, *stackIR, sourceMap, DWARF);
+       writer.write();
+@@ -605,7 +597,37 @@
+       std::cerr << "Some VMs may not accept this binary because it has a large "
+                 << "number of locals in function " << func->name << ".\n";
+     }
+-  });
++  };
++  if (options.generateStackIR) {
++    std::vector<Function*> functions;
++    ModuleUtils::iterDefinedFunctions(
++      *wasm, [&](Function* func) { functions.push_back(func); });
++    auto* pool = ThreadPool::get();
++    auto batchSize = pool->size();
++    for (size_t begin = 0; begin < functions.size(); begin += batchSize) {
++      auto count = std::min(batchSize, functions.size() - begin);
++      std::vector<std::unique_ptr<FunctionStackIR>> batch(count);
++      std::atomic<size_t> next{0};
++      std::vector<std::function<ThreadWorkState()>> workers(batchSize, [&]() {
++        auto index = next.fetch_add(1, std::memory_order_relaxed);
++        if (index >= count) {
++          return ThreadWorkState::Finished;
++        }
++        batch[index] = std::make_unique<FunctionStackIR>(
++          *wasm, functions[begin + index], options);
++        return ThreadWorkState::More;
++      });
++      pool->work(workers);
++      // Preserve function order and debug offsets, but release temporary
++      // instructions before generating the next batch.
++      for (size_t i = 0; i < count; ++i) {
++        writeFunction(functions[begin + i], &batch[i]->stackIR);
++      }
++    }
++  } else {
++    ModuleUtils::iterDefinedFunctions(
++      *wasm, [&](Function* func) { writeFunction(func, nullptr); });
++  }
+   finishSection(sectionStart);
+ 
+   // Code annotations must come before the code section (see comment on

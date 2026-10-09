@@ -63,8 +63,26 @@ export const convexWasmIntrinsicHardeningPolicy = deepFreeze({
     globalObject: "extensible",
     intrinsicInheritanceParticipants:
       "Object.preventExtensions for prototypes and constructor functions to preserve descendant shadowing",
+    objectPrototype: {
+      extensible: false,
+      parent: null,
+      allowedStringKeys: [
+        "constructor",
+        "toString",
+        "toLocaleString",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+      ],
+    },
   },
-  kind: "convex-wasm-effective-intrinsic-hardening-policy-v4",
+  kind: "convex-wasm-effective-intrinsic-hardening-policy-v5",
   lifecycle: "after-target-global-prelude-before-application-evaluation",
 });
 
@@ -426,6 +444,32 @@ for (
     if (!__convexIntrinsicIsFrozen(__convexIntrinsicValue)) {
       throw new Error("Convex Wasm intrinsic object remained mutable");
     }
+  }
+}
+
+// Application compilation can remove missing reads from fresh ordinary records.
+// Nonextensibility alone is insufficient if the prelude already added a getter.
+const __convexIntrinsicObjectPrototype: any = __convexIntrinsicGetPrototypeOf({});
+const __convexIntrinsicObjectPrototypeKeys: Array<string> = ${JSON.stringify(
+    convexWasmIntrinsicHardeningPolicy.enforcement.objectPrototype.allowedStringKeys
+  )};
+if (
+  __convexIntrinsicObjectPrototype !== __convexIntrinsicObject.prototype ||
+  __convexIntrinsicGetPrototypeOf(__convexIntrinsicObjectPrototype) !== null ||
+  __convexIntrinsicIsExtensible(__convexIntrinsicObjectPrototype)
+) {
+  throw new Error("Convex Wasm Object prototype shape contract is unavailable");
+}
+// Reflect returns an ordinary JS array, not a Static Hermes typed array.
+const __convexIntrinsicObjectOwnKeys: any =
+  __convexIntrinsicOwnKeys(__convexIntrinsicObjectPrototype);
+for (let __convexIntrinsicKeyIndex = 0;
+     __convexIntrinsicKeyIndex < __convexIntrinsicObjectOwnKeys.length;
+     __convexIntrinsicKeyIndex += 1) {
+  const __convexIntrinsicKey: any = __convexIntrinsicObjectOwnKeys[__convexIntrinsicKeyIndex];
+  if (typeof __convexIntrinsicKey === "string" &&
+      __convexIntrinsicObjectPrototypeKeys.indexOf(__convexIntrinsicKey) === -1) {
+    throw new Error("Convex Wasm Object prototype has an unsupported string key");
   }
 }
 
