@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "private": true,
   "type": "module",
   "bin": {
@@ -95,6 +95,6 @@
     "test:native-url": "node --test scripts/lib/convex-wasm-native-url.test.mjs"
   },
   "devDependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/b03666b089d57dff09da1ccbf152e8f5771d1400/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/4db6c17b89a8215d9cb3b07336967a0d460cc16f/convex.tgz"
   }
 }

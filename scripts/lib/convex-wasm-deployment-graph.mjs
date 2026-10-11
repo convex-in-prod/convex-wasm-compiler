@@ -379,18 +379,25 @@ async function loadGraphToolchain(repoRoot) {
   }
   const bundlerDirectory = resolve(dirname(convexPackageJson), "dist", "esm", "bundler");
   const cliDirectory = resolve(dirname(convexPackageJson), "dist", "esm", "cli", "lib");
-  const [{ serverOnlyPlugin }, { wasmPlugin }] = await settleParallelVerification([
-    () => import(pathToFileURL(join(bundlerDirectory, "serverOnly.js")).href),
-    () => import(pathToFileURL(join(bundlerDirectory, "wasm.js")).href),
-  ]);
+  const bundlerMaterialPaths = await convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory });
+  const groupingPath = bundlerMaterialPaths.get("contextReuseGroups.js");
+  const [{ serverOnlyPlugin }, { wasmPlugin }, { contextReuseGroups }] =
+    await settleParallelVerification([
+      () => import(pathToFileURL(join(bundlerDirectory, "serverOnly.js")).href),
+      () => import(pathToFileURL(join(bundlerDirectory, "wasm.js")).href),
+      () => groupingPath === undefined
+        ? { contextReuseGroups: undefined }
+        : import(pathToFileURL(groupingPath).href),
+    ]);
   return {
     bundlerDirectory,
     cliDirectory,
+    contextReuseGroups,
     esbuild,
     inputMaterialPaths: Object.freeze([
       convexPackageJson,
       esbuildPackageJson,
-      ...convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }),
+      ...bundlerMaterialPaths.values(),
     ]),
     serverOnlyPlugin,
     toolchain: {
@@ -401,20 +408,30 @@ async function loadGraphToolchain(repoRoot) {
   };
 }
 
-function convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }) {
-  return CONVEX_BUNDLER_MATERIALS.map((name) =>
+async function convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }) {
+  const materials = new Map(CONVEX_BUNDLER_MATERIALS.map((name) => [
+    name,
     name.startsWith("cli/")
       ? join(dirname(cliDirectory), name.slice("cli/".length))
-      : join(bundlerDirectory, name)
-  );
+      : join(bundlerDirectory, name),
+  ]));
+  const groupingPath = join(bundlerDirectory, "contextReuseGroups.js");
+  try {
+    await fs.access(groupingPath);
+    materials.set("contextReuseGroups.js", groupingPath);
+  } catch (error) {
+    // Older SDKs have no grouping pass. A present helper joins the authenticated
+    // material set, so adding, removing or changing it invalidates graph reuse.
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return materials;
 }
 
 async function authenticateConvexBundlerMaterials({ bundlerDirectory, cliDirectory }) {
-  const materialPaths = convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory });
+  const materialPaths = await convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory });
   return Object.fromEntries(
     await settleParallelVerification(
-      CONVEX_BUNDLER_MATERIALS.map((name, index) => async () => {
-        const materialPath = materialPaths[index];
+      [...materialPaths].map(([name, materialPath]) => async () => {
         const sha256 = (await hashFile(materialPath)).sha256;
         return [name, { sha256 }];
       })
@@ -1172,9 +1189,11 @@ function applyPinnedDefaultContextReusePolicy(source, policy) {
   if (!policy.enabled) {
     return source;
   }
-  const contextReuseExport = policy.httpActions
-    ? DEFAULT_DATABASE_AND_HTTP_ACTION_CONTEXT_REUSE_EXPORT
-    : DEFAULT_DATABASE_CONTEXT_REUSE_EXPORT;
+  const contextReuseExport = policy.initializationModule !== undefined
+    ? `export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: ${policy.httpActions}, initializationModule: ${JSON.stringify(policy.initializationModule)} };\n`
+    : policy.httpActions
+      ? DEFAULT_DATABASE_AND_HTTP_ACTION_CONTEXT_REUSE_EXPORT
+      : DEFAULT_DATABASE_CONTEXT_REUSE_EXPORT;
   const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
   if (sourceMapComment === null || sourceMapComment.index === undefined) {
     return `${source.endsWith("\n") ? source : `${source}\n`}${contextReuseExport}`;
@@ -1845,6 +1864,7 @@ function freezeAuthenticatedJsonTree(value) {
 }
 
 async function bundledModulesFromResult({
+  contextReuseGroups,
   entryPoints,
   environment = "isolate",
   functionsDirectory,
@@ -1897,6 +1917,48 @@ async function bundledModulesFromResult({
           httpActions: contextReuse.httpActions,
         });
       }
+    }
+  }
+  if (contextReuse !== undefined && contextReuseGroups !== undefined) {
+    // The SDK helper resolves labels against cwd. Rebase labels only so a graph
+    // for another application can use the installed helper without changing cwd.
+    const sdkOutputPath = (path) => resolve(relative(repoRoot, path));
+    const { initializers, initializerByOutput } = await contextReuseGroups(
+      { crash: async ({ printedMessage }) => fail(printedMessage) },
+      outputFiles.map((file) => ({ path: sdkOutputPath(file.path), text: file.text })),
+      metafile,
+      new Set(
+        [...contextReuseOutputPolicy]
+          .filter(([, policy]) => policy.enabled)
+          .map(([path]) => sdkOutputPath(path))
+      ),
+      "_deps"
+    );
+    for (const [output, initializationModule] of initializerByOutput) {
+      const outputPath = resolve(repoRoot, relative(process.cwd(), output));
+      contextReuseOutputPolicy.get(outputPath).initializationModule = initializationModule;
+    }
+    for (const module of initializers) {
+      const outputPath = resolve(repoRoot, "out", module.path);
+      sources.push({ ...module, outputPath });
+      sourceMaps.set(
+        `${module.path}.map`,
+        JSON.stringify({ version: 3, sources: [], names: [], mappings: "" })
+      );
+      // Synthetic imports are part of the deployed graph, despite having no
+      // original source membership or esbuild-generated metafile record.
+      const ast = parseBabelAst(module.source, { sourceType: "module" });
+      metafile.outputs[toPosix(relative(repoRoot, outputPath))] = {
+        bytes: Buffer.byteLength(module.source),
+        exports: [],
+        imports: ast.program.body.map((statement) => ({
+          path: posix.normalize(
+            posix.join("out", posix.dirname(module.path), statement.source.value)
+          ),
+          kind: "import-statement",
+        })),
+        inputs: {},
+      };
     }
   }
   const modulesByPath = new Map();
@@ -2918,6 +2980,7 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
   const {
     bundlerDirectory,
     cliDirectory,
+    contextReuseGroups,
     esbuild,
     inputMaterialPaths: toolchainInputPaths,
     serverOnlyPlugin,
@@ -3245,6 +3308,7 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
         );
       }
       const isolateBundle = await bundledModulesFromResult({
+        contextReuseGroups,
         entryPoints: isolateEntryPoints,
         functionsDirectory,
         metafile: isolateResult.metafile,
