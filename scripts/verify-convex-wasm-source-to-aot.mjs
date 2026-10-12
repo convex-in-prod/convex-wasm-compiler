@@ -218,6 +218,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
   const archiveInputs = await Promise.all([
     fingerprintInput("libhermesvm_a.a", join(config.wasmBuild, "lib/libhermesvm_a.a")),
     fingerprintInput("libjsi.a", join(config.wasmBuild, "jsi/libjsi.a")),
+    fingerprintInput("libhermesStaticIcu.a", join(config.wasmBuild, "external/icu-small/libhermesStaticIcu.a")),
   ]);
   const nativeOptions = {
     cacheLayout,
@@ -231,7 +232,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
           "-sSTANDALONE_WASM=1", "-sALLOW_MEMORY_GROWTH=1", "-sSTACK_SIZE=2MB",
           "-Wl,--export=convex_wasm_static_hermes_global_probe_run",
           ...(bundle ? ["-Wl,--whole-archive", linkInputName, "-Wl,--no-whole-archive"] : [linkInputName]),
-          "runtime_main.o", "libhermesvm_a.a", "libjsi.a", "-o", "module.wasm",
+          "runtime_main.o", "libhermesvm_a.a", "libjsi.a", "libhermesStaticIcu.a", "-o", "module.wasm",
         ],
       },
       precompile: {

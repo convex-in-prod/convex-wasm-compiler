@@ -64,6 +64,25 @@ Full native-memory accounting, host fuel/cancellation behavior, trapped-instance
 discard and adopting-host comparisons are separate integration acceptance checks.
 A formatter corpus does not establish those properties.
 
+Consumers can run their own formatting cases with
+`scripts/lib/convex-wasm-native-runtime-probe.mjs`. Its
+`runNativeRuntimeProbe` function takes typed JavaScript defining
+`globalThis.__convexNativeRuntimeProbe` and a configuration returned by
+`nativeRuntimeProbeConfiguration`. The synchronous probe returns a
+JSON-serializable value. It runs three times in each of three runtimes, with GC
+between calls and native intrinsic validation before and after each call. The
+builder returns all nine results and hashes of the generated program, linked
+Wasm, runtime archives and C++ fixture. Input cases remain with the consumer.
+
+The caller runs native compilation under its resource guard and configures
+`CONVEX_HERMES_TEST_SOURCE_ROOT`, `CONVEX_HERMES_TEST_BUILD_ROOT`,
+`CONVEX_HERMES_TEST_WASM_BUILD_ROOT`, `CONVEX_WASM_EMCC` and
+`CONVEX_WASM_RUNNER`. The probe uses a 128 MiB linear-memory maximum, a 512 KiB
+stack, and a 2 MiB initial heap. It rejects capability and randomness requests.
+This diagnostic uses the actual runtime initializer and descriptor validator;
+it does not execute a backend capability package or establish host admission,
+fuel accounting, cancellation or instance-discard behavior.
+
 ## Application responsibilities
 
 Keep exact paired-result comparisons. Review locale-sensitive operations that

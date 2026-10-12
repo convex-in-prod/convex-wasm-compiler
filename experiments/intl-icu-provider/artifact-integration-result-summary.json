@@ -1,0 +1,64 @@
+{
+  "kind": "native-icu-artifact-integration-result-v1",
+  "hermesRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
+  "nativeDescriptorProbe": {
+    "runtimeLifecycles": 3,
+    "invocationsPerRuntime": 3,
+    "result": "pass",
+    "gcBeforeEachInvocation": true,
+    "validOffsetFormsPerInvocation": 648,
+    "invalidOffsetFormsPerInvocation": 11,
+    "maximumLinearMemoryBytes": 134217728,
+    "stackBytes": 524288,
+    "initialHeapBytes": 2097152,
+    "checks": [
+      "retained date/number/collator results",
+      "native method and accessor descriptor replacement/restoration",
+      "constructor and prototype extension rejection",
+      "offset normalization and formatted clock values",
+      "malformed offset rejection"
+    ]
+  },
+  "sourceToAotBeforeOffsetCorrection": {
+    "hermesRevision": "1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117",
+    "mode": "bundle",
+    "generatedLinkInput": [
+      "miss",
+      "hit"
+    ],
+    "runtimeObject": [
+      "miss",
+      "hit"
+    ],
+    "coreWasm": [
+      "miss",
+      "hit"
+    ],
+    "aot": [
+      "miss",
+      "hit"
+    ],
+    "coreWasmBytes": 40710892,
+    "aotBytes": 62115216,
+    "engineCompatibilitySha256": "89880ad9de64f2bc9e218bf19bac3fb9963b23c56f02b302f1bf1f69d48606f8"
+  },
+  "requestEnvelopeEvidence": {
+    "reportSchemaVersion": 5,
+    "authoritySchemaVersion": 2,
+    "icuArchiveOmissionRejected": true,
+    "icuArchiveSubstitutionRejected": true,
+    "scope": "report validation and archive wiring; full codec and request matrices were not rerun"
+  },
+  "sourceSha256": {
+    "scripts/lib/convex-wasm-native-runtime-probe.mjs": "96eafbf63f399bbe903f4e3c23711b2a499cfd1c01bec9bc9f3294e532072e53",
+    "scripts/lib/convex-wasm-native-intl.test.mjs": "f4025a7eaa286752994f6ba3e1a816bc600b297f5ca4744951c60a54b43dfd13",
+    "scripts/test-fixtures/native-values/runtime-probe.cpp": "08deebabff9e22725050ca6792ccd0246b19c90d9ce1f990ea9a1fa654fd81e6",
+    "scripts/test-fixtures/native-values/intl.js": "5fc3d8fccc3d304bd57bc2dd4b953d5f79aac6bbd524dca74cf5d4958718f2df",
+    "experiments/intl-icu-provider/timezone-offsets.patch": "99ce2e9ec40e56069a44b92e1d2e55ec86d57babb925d4992a0ccaa55696cc10"
+  },
+  "limitations": [
+    "Diagnostic Wasmtime execution does not establish backend package admission, memory accounting, fuel, cancellation or trapped-instance discard.",
+    "No adopting-backend V8 comparison or performance result is claimed.",
+    "Earlier conformance evidence retains its original source-stage identities."
+  ]
+}

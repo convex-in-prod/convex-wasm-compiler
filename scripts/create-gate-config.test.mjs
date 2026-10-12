@@ -170,6 +170,11 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     "/toolchain/hermes/public",
   ]);
   assert.equal(config.runtime.compileFlags.at(0), "-O2");
+  assert.deepEqual(config.runtime.archives, [
+    "/toolchain/build-wasm/lib/libhermesvm_a.a",
+    "/toolchain/build-wasm/jsi/libjsi.a",
+    "/toolchain/build-wasm/external/icu-small/libhermesStaticIcu.a",
+  ]);
   assert.deepEqual(config.runtime.mainCompileFlags, [
     "-DCONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS=1",
   ]);

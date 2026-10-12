@@ -483,8 +483,27 @@ The date-range-stage original-corpus Wasm is 38,938,617 bytes (about 37.13 MiB),
 That earlier Wasm used 128 MiB initial memory and a 512 MiB cap. No performance or incremental
 backend-cost claim follows from this correctness experiment.
 
+The native runtime probe now uses the compiler's actual runtime initializer and
+native descriptor snapshots. Retained DateTimeFormat, NumberFormat and Collator
+instances survive nine invocations across three runtimes with forced GC. Method
+and accessor replacement is detected, restored descriptors validate, and
+constructor/prototype extensions are rejected. The linked probe has a 128 MiB
+linear-memory cap, 512 KiB stack and 2 MiB initial heap.
+
+`timezone-offsets.patch` follows the provider-bootstrap stage. It accepts the
+hour-only offset grammar, processes the Unicode minus sign before named-zone
+ASCII validation, and canonicalizes negative zero to a positive zero offset.
+The native probe checks 648 valid forms across all hours and 11 invalid forms on
+each invocation. `timezone-offsets-source.json` authenticates the correction.
+The earlier single colon-separated offset profile did not cover these gaps.
+
+The source-to-AOT pipeline also links and fingerprints the ICU archive. The
+request-envelope report and evidence authority now authenticate it explicitly;
+omission or replacement is rejected. See
+[artifact integration evidence](artifact-integration-result-summary.json).
+
 Remaining integration acceptance covers the complete compiler/host artifact
-path, native descriptor snapshots, non-ICU/native-memory accounting, actual host
+path, non-ICU/native-memory accounting, actual host
 memory limits, trapped-instance discard, and cancellation/fuel behavior.
 Explicit final GC and the bounded repeated-runtime lifecycle check pass.
 Forced mid-initialization collection with deferred numeric values also passes.

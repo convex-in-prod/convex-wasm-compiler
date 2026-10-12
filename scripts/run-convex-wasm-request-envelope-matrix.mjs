@@ -28,7 +28,7 @@ import {
 } from "./lib/convex-wasm-committed-value-codec-matrix.mjs";
 import { renderOpaqueAbiHeader } from "./lib/convex-wasm-lowering.mjs";
 
-const kind = "convex-wasm-request-envelope-matrix-report-v4";
+const kind = "convex-wasm-request-envelope-matrix-report-v5";
 const runnerExport = convexWasmRequestEnvelopeMatrixRunnerExport;
 const target = convexWasmRequestEnvelopeMatrixTarget;
 const unitExport = "sh_export_convex_wasm_request_envelope_matrix_optimized";
@@ -165,6 +165,7 @@ async function compileWasmtimeTarget({
   const archives = [
     resolve(wasmBuildPath, "lib/libhermesvm_a.a"),
     resolve(wasmBuildPath, "jsi/libjsi.a"),
+    resolve(wasmBuildPath, "external/icu-small/libhermesStaticIcu.a"),
   ];
   const hermesHeaders = {
     jsi: resolve(hermesSourcePath, "API/jsi/jsi/jsi.h"),
@@ -209,6 +210,7 @@ async function compileWasmtimeTarget({
     wasmArchives: {
       hermesVm: await fileIdentity(archives[0]),
       jsi: await fileIdentity(archives[1]),
+      icu: await fileIdentity(archives[2]),
     },
     wasmConfigHeader: await fileIdentity(wasmConfigHeader),
   });
@@ -375,7 +377,7 @@ export async function runConvexWasmRequestEnvelopeMatrix(options) {
         runnerExport,
       },
       runtimeInputs: targets[target].runtimeInputs,
-      schemaVersion: 4,
+      schemaVersion: 5,
       targets,
       tools: {
         emcc: await fileIdentity(options.emccPath),

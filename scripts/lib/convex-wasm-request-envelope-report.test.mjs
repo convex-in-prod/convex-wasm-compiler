@@ -52,6 +52,7 @@ function runtimeInputsFixture() {
     wasmArchives: {
       hermesVm: artifactIdentity("3"),
       jsi: artifactIdentity("4"),
+      icu: artifactIdentity("6"),
     },
     wasmConfigHeader: artifactIdentity("5"),
   };
@@ -73,10 +74,10 @@ function evidenceOutputIdentity(target) {
 
 function evidenceAuthorityFixture(report) {
   return {
-    kind: "convex-wasm-request-envelope-evidence-authority-v1",
+    kind: "convex-wasm-request-envelope-evidence-authority-v2",
     reportSha256: report.reportSha256,
     runtimeInputs: structuredClone(report.runtimeInputs),
-    schemaVersion: 1,
+    schemaVersion: 2,
     targets: {
       current: evidenceOutputIdentity(report.targets[targetName]),
       legacyWholeRequestRejector: evidenceOutputIdentity(
@@ -172,7 +173,7 @@ function reportFixture() {
         readFileSync(new URL("../run-convex-wasm-request-envelope-matrix.mjs", import.meta.url))
       ),
     },
-    kind: "convex-wasm-request-envelope-matrix-report-v4",
+    kind: "convex-wasm-request-envelope-matrix-report-v5",
     legacyWholeRequestRejector: {
       executionIdentity: legacyWholeRequestRejector.executionIdentity,
       sourceSha256: legacyWholeRequestRejector.sourceSha256,
@@ -199,7 +200,7 @@ function reportFixture() {
       runnerExport: convexWasmRequestEnvelopeMatrixRunnerExport,
     },
     runtimeInputs,
-    schemaVersion: 4,
+    schemaVersion: 5,
     targets,
     tools: {
       emcc: artifactIdentity("b"),
@@ -286,6 +287,23 @@ test("validates scoped request-envelope evidence and its integrity fingerprint",
   assert.throws(
     () => validateMutatedReport(fabricatedTool, evidenceAuthority),
     /tool or runtime inputs are not approved/u
+  );
+
+  const changedIcu = structuredClone(report);
+  changedIcu.runtimeInputs.wasmArchives.icu = artifactIdentity("f");
+  changedIcu.targets[targetName].runtimeInputs = structuredClone(changedIcu.runtimeInputs);
+  changedIcu.legacyWholeRequestRejector.targets[targetName].runtimeInputs =
+    structuredClone(changedIcu.runtimeInputs);
+  assert.throws(
+    () => validateMutatedReport(changedIcu, evidenceAuthority),
+    /tool or runtime inputs are not approved/u
+  );
+
+  const missingIcu = structuredClone(report);
+  delete missingIcu.runtimeInputs.wasmArchives.icu;
+  assert.throws(
+    () => validateMutatedReport(missingIcu, evidenceAuthority),
+    /wasmArchives has missing or unknown fields/u
   );
 
   const staleOldReport = structuredClone(report);

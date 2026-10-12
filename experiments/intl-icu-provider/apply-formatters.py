@@ -8,7 +8,7 @@ import subprocess
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("root", type=Path)
-parser.add_argument("--stage", choices=["formatters", "bindings", "construction", "locales", "number-ranges", "icu-cleanup", "date-ranges", "collator", "locale-errors", "icu-allocation-errors", "icu-allocation-policy", "provider-bootstrap"], default="formatters")
+parser.add_argument("--stage", choices=["formatters", "bindings", "construction", "locales", "number-ranges", "icu-cleanup", "date-ranges", "collator", "locale-errors", "icu-allocation-errors", "icu-allocation-policy", "provider-bootstrap", "timezone-offsets"], default="formatters")
 args = parser.parse_args()
 source = args.root.resolve() / "hermes"
 scripts = Path(__file__).resolve().parent

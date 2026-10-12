@@ -26,8 +26,8 @@ import {
 } from "./convex-wasm-request-envelope-matrix.mjs";
 import { renderOpaqueAbiHeader } from "./convex-wasm-lowering.mjs";
 
-const REPORT_KIND = "convex-wasm-request-envelope-matrix-report-v4";
-const EVIDENCE_AUTHORITY_KIND = "convex-wasm-request-envelope-evidence-authority-v1";
+const REPORT_KIND = "convex-wasm-request-envelope-matrix-report-v5";
+const EVIDENCE_AUTHORITY_KIND = "convex-wasm-request-envelope-evidence-authority-v2";
 const TARGET_NAME = convexWasmRequestEnvelopeMatrixTarget;
 const MATRIX_REPORT_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -124,13 +124,14 @@ function requireRuntimeInputs(value, description) {
   );
   const wasmArchives = requireExactKeys(
     value.wasmArchives,
-    ["hermesVm", "jsi"],
+    ["hermesVm", "icu", "jsi"],
     `${description}.wasmArchives`
   );
   requireFileIdentity(hermesHeaders.jsi, `${description}.hermesHeaders.jsi`);
   requireFileIdentity(hermesHeaders.staticHermes, `${description}.hermesHeaders.staticHermes`);
   requireFileIdentity(wasmArchives.hermesVm, `${description}.wasmArchives.hermesVm`);
   requireFileIdentity(wasmArchives.jsi, `${description}.wasmArchives.jsi`);
+  requireFileIdentity(wasmArchives.icu, `${description}.wasmArchives.icu`);
   requireFileIdentity(value.wasmConfigHeader, `${description}.wasmConfigHeader`);
 }
 
@@ -151,7 +152,7 @@ function requireEvidenceAuthority(value) {
     ["kind", "reportSha256", "runtimeInputs", "schemaVersion", "targets", "tools"],
     "evidence authority"
   );
-  if (authority.kind !== EVIDENCE_AUTHORITY_KIND || authority.schemaVersion !== 1) {
+  if (authority.kind !== EVIDENCE_AUTHORITY_KIND || authority.schemaVersion !== 2) {
     fail("evidence authority kind or schema version is unsupported");
   }
   requireSha256(authority.reportSha256, "evidence authority.reportSha256");
@@ -269,7 +270,7 @@ function validateConvexWasmRequestEnvelopeMatrixReport(report) {
   if (requireSha256(reportSha256, "report.reportSha256") !== fingerprintJson(payload)) {
     fail("report.reportSha256 integrity fingerprint does not match the report payload");
   }
-  if (report.kind !== REPORT_KIND || report.schemaVersion !== 4) {
+  if (report.kind !== REPORT_KIND || report.schemaVersion !== 5) {
     fail("report kind or schema version is unsupported");
   }
   const harness = requireExactKeys(
@@ -467,7 +468,7 @@ export function createConvexWasmRequestEnvelopeEvidenceAuthorityFromMatrixReport
     kind: EVIDENCE_AUTHORITY_KIND,
     reportSha256: validated.reportSha256,
     runtimeInputs: structuredClone(validated.runtimeInputs),
-    schemaVersion: 1,
+    schemaVersion: 2,
     targets: structuredClone(validated.targets),
     tools: structuredClone(validated.tools),
   };

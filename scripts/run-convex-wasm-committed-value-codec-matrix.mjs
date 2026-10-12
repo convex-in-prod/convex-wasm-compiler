@@ -292,6 +292,7 @@ async function compileWasmtimeTarget({
   const archives = [
     resolve(wasmBuildPath, "lib/libhermesvm_a.a"),
     resolve(wasmBuildPath, "jsi/libjsi.a"),
+    resolve(wasmBuildPath, "external/icu-small/libhermesStaticIcu.a"),
   ];
   await Promise.all(archives.map((path) => requireFile(path, "Static Hermes Wasm archive")));
   run(emccPath, [

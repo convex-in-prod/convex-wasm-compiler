@@ -1,0 +1,79 @@
+diff --git a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+index 7e585a432..80c991c12 100644
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+@@ -510,7 +510,7 @@ bool isAllASCII(const std::u16string &str) {
+ }
+ 
+ /// Parse an offset timezone string. Returns true and sets the canonical
+-/// offset string if valid. Format: [+-]HH:MM or [+-]HHMM
++/// offset string if valid. Format: [+-]HH, [+-]HH:MM or [+-]HHMM.
+ /// Hours: 00-23, Minutes: 00-59.
+ bool parseOffsetTimeZone(
+     const std::u16string &tz,
+@@ -526,18 +526,26 @@ bool parseOffsetTimeZone(
+ 
+   size_t remaining = tz.size() - pos;
+   int hours = -1, minutes = -1;
++  const auto isDigit = [](char16_t value) {
++    return value >= u'0' && value <= u'9';
++  };
+ 
+-  if (remaining == 4) {
++  if (remaining == 2) {
++    if (!isDigit(tz[pos]) || !isDigit(tz[pos + 1]))
++      return false;
++    hours = (tz[pos] - u'0') * 10 + (tz[pos + 1] - u'0');
++    minutes = 0;
++  } else if (remaining == 4) {
+     // +HHMM
+-    if (!std::isdigit(tz[pos]) || !std::isdigit(tz[pos + 1]) ||
+-        !std::isdigit(tz[pos + 2]) || !std::isdigit(tz[pos + 3]))
++    if (!isDigit(tz[pos]) || !isDigit(tz[pos + 1]) ||
++        !isDigit(tz[pos + 2]) || !isDigit(tz[pos + 3]))
+       return false;
+     hours = (tz[pos] - u'0') * 10 + (tz[pos + 1] - u'0');
+     minutes = (tz[pos + 2] - u'0') * 10 + (tz[pos + 3] - u'0');
+   } else if (remaining == 5 && tz[pos + 2] == u':') {
+     // +HH:MM
+-    if (!std::isdigit(tz[pos]) || !std::isdigit(tz[pos + 1]) ||
+-        !std::isdigit(tz[pos + 3]) || !std::isdigit(tz[pos + 4]))
++    if (!isDigit(tz[pos]) || !isDigit(tz[pos + 1]) ||
++        !isDigit(tz[pos + 3]) || !isDigit(tz[pos + 4]))
+       return false;
+     hours = (tz[pos] - u'0') * 10 + (tz[pos + 1] - u'0');
+     minutes = (tz[pos + 3] - u'0') * 10 + (tz[pos + 4] - u'0');
+@@ -549,7 +557,7 @@ bool parseOffsetTimeZone(
+     return false;
+ 
+   // Canonicalize to +HH:MM format
+-  char16_t canonSign = (sign == u'+') ? u'+' : u'-';
++  char16_t canonSign = (sign == u'+' || (hours == 0 && minutes == 0)) ? u'+' : u'-';
+   canonical = std::u16string(1, canonSign);
+   canonical += static_cast<char16_t>(u'0' + hours / 10);
+   canonical += static_cast<char16_t>(u'0' + hours % 10);
+@@ -564,6 +572,11 @@ vm::CallResult<std::u16string> validateAndCanonicalizeTimeZone(
+     vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const std::u16string &timeZone) {
++  // Offset grammar also permits U+2212; named zones remain ASCII-only.
++  std::u16string canonicalOffset;
++  if (parseOffsetTimeZone(timeZone, canonicalOffset)) {
++    return canonicalOffset;
++  }
+   // Reject non-ASCII timezone names.
+   if (!isAllASCII(timeZone)) {
+     return runtime.raiseRangeError("Invalid time zone");
+@@ -580,12 +593,6 @@ vm::CallResult<std::u16string> validateAndCanonicalizeTimeZone(
+     return std::u16string(u"UTC");
+   }
+ 
+-  // Try to parse as offset timezone.
+-  std::u16string canonicalOffset;
+-  if (parseOffsetTimeZone(timeZone, canonicalOffset)) {
+-    return canonicalOffset;
+-  }
+-
+   // Use ICU to validate and canonicalize the timezone.
+   if (icu && icu->ucal_getCanonicalTimeZoneID) {
+     UChar buf[256];

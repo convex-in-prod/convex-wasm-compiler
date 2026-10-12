@@ -1,0 +1,11 @@
+{
+  "base": "provider-bootstrap; excludes the optional icu-allocation-errors diagnostic patch",
+  "patchSha256": "99ce2e9ec40e56069a44b92e1d2e55ec86d57babb925d4992a0ccaa55696cc10",
+  "files": [
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp",
+      "before": "87b813faf76f3a288f8ae54f7244c81bbc896bdef3ab70b7cce5077bcd3bdbb3",
+      "after": "ddf32a463d3fad8a7a5b9eb74f6f47a58487207b99c870fa28c4084817ba2fb5"
+    }
+  ]
+}
