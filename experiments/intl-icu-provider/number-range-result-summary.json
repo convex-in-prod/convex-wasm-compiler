@@ -1,0 +1,524 @@
+{
+  "kind": "native-icu-number-range-result",
+  "patches": {
+    "formatters": {
+      "bytes": 94118,
+      "sha256": "81e44b1c5c61b7e8bd3f1835bbdfd2cf32839a1ef7d163377b572355fcf86667"
+    },
+    "bindings": {
+      "bytes": 52120,
+      "sha256": "4e9cf246614779e1a19ac6578066e8354e09fe2cac5670574985323b98d849fa"
+    },
+    "construction": {
+      "bytes": 10965,
+      "sha256": "b194d06fb000f700b3d488881d2a86e3c2f2c45645108d6d1e786721f7c694ca"
+    },
+    "locales": {
+      "bytes": 24315,
+      "sha256": "cbc75a85e8bae81e8acb4ac184bc2f51f671346330d3ca9ed9d331b0dc81c04d"
+    },
+    "number-ranges": {
+      "bytes": 24685,
+      "sha256": "b533bec5521f5205ec9de408e12a233721ce97013d28ae709406f2216f024cdc"
+    },
+    "icu-cleanup": {
+      "bytes": 1315,
+      "sha256": "08ca3e08d6f97e2d4f69bc466be63e0187a371dcb2127c88837fdedbd8a3fcba"
+    }
+  },
+  "referenceVersions": {
+    "node": "24.15.0",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.8",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.3.1",
+    "merve": "1.2.2",
+    "modules": "137",
+    "napi": "10",
+    "nbytes": "0.1.3",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.68.0",
+    "openssl": "3.5.5",
+    "simdjson": "4.5.0",
+    "simdutf": "6.4.0",
+    "sqlite": "3.51.3",
+    "tz": "2026a",
+    "undici": "7.24.4",
+    "unicode": "17.0",
+    "uv": "1.51.0",
+    "uvwasi": "0.0.23",
+    "v8": "13.6.233.17-node.48",
+    "zlib": "1.3.1-e00f703",
+    "zstd": "1.5.7"
+  },
+  "initialRangeComparison": {
+    "cases": 3342,
+    "matches": 3240
+  },
+  "corporaImplementationStage": "number-ranges",
+  "standaloneImplementationStage": "icu-cleanup",
+  "corpora": {
+    "ranges": {
+      "totals": {
+        "cases": 3342,
+        "matches": 3342
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 5184,
+          "sha256": "1bb82776ffb6d55d99add837b1db84e307fd2892f3d1dc38f52afed9f56c6412"
+        },
+        "wasm": {
+          "bytes": 38908347,
+          "sha256": "1abe055c8eb2967c2942c10300afe4d4e85099c9f1b4333c4756c98585a28da1"
+        }
+      },
+      "output": {
+        "bytes": 2980741,
+        "sha256": "1f137da5d6f9f4c327f9f8d729b9e01c1cdc5414d07012f0bc49d8b9a2d73c4d"
+      },
+      "reference": {
+        "bytes": 2980741,
+        "sha256": "1f137da5d6f9f4c327f9f8d729b9e01c1cdc5414d07012f0bc49d8b9a2d73c4d"
+      }
+    },
+    "contracts": {
+      "totals": {
+        "cases": 4964,
+        "format": 4950,
+        "parts": 4950,
+        "resolved": 4950,
+        "propertyOrder": 4950,
+        "expectedErrors": 14,
+        "matchingErrors": 14,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 665461,
+          "sha256": "8a948b05e1d18b4721006d00ff287f8b1ef51f0f145350463629a8676df2a076"
+        },
+        "wasm": {
+          "bytes": 39329371,
+          "sha256": "f094614131f7c3595fc1cba9f9ff7f1986bb90984e16050050c15fc319fcc937"
+        }
+      },
+      "output": {
+        "bytes": 2499530,
+        "sha256": "d3aa27407f0dad3d65a316b8d12fea414720a221ddcaffc6799c3580a529ccff"
+      },
+      "reference": {
+        "bytes": 2499779,
+        "sha256": "a3e2e189136503380f08349c7c45041816c94548bf0936007dd689164ebe6a34"
+      }
+    },
+    "bindings": {
+      "totals": {
+        "cases": 514,
+        "matches": 514
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 10583,
+          "sha256": "e9ffd385cb9125a859dfa8d2cd5fa5e66c7198873017e172bb740d68518e85ed"
+        },
+        "wasm": {
+          "bytes": 39045722,
+          "sha256": "b2d0a099b77ce1135e4b3c45f8e3b05e3c3f884a5307ddd463fe6fe8e258a3cb"
+        }
+      },
+      "output": {
+        "bytes": 176101,
+        "sha256": "46ca317627b522281c4b2737ab93774de95bcd652924e8c3bf72c74123b039c1"
+      },
+      "reference": {
+        "bytes": 176101,
+        "sha256": "46ca317627b522281c4b2737ab93774de95bcd652924e8c3bf72c74123b039c1"
+      }
+    },
+    "construction": {
+      "totals": {
+        "cases": 149,
+        "matches": 149
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 8217,
+          "sha256": "4f0efa57647b73c3508a20980f84e436ce9f58881d639d1f9fa974d39c4f16da"
+        },
+        "wasm": {
+          "bytes": 38946700,
+          "sha256": "4286872c0341fdd497cdf135e4940a590ee4a7a632f092c0b58a3af0e837c6c1"
+        }
+      },
+      "output": {
+        "bytes": 19044,
+        "sha256": "aa0009508369d0e48ff343b8dc896746187055080d469f7c551e482fe93bb619"
+      },
+      "reference": {
+        "bytes": 19044,
+        "sha256": "aa0009508369d0e48ff343b8dc896746187055080d469f7c551e482fe93bb619"
+      }
+    },
+    "dates": {
+      "totals": {
+        "cases": 1281,
+        "format": 1276,
+        "parts": 1276,
+        "resolved": 1276,
+        "propertyOrder": 1276,
+        "expectedErrors": 5,
+        "matchingErrors": 5,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 175141,
+          "sha256": "4a9216e4d101df7f52c294ee3c88c1886cd5cf6b9e2841bf2e2f3cac9ffef79c"
+        },
+        "wasm": {
+          "bytes": 38915038,
+          "sha256": "1e4d7f67ead1246500cde4359d31300ab3963d7ce47b12495cda8e307b2932db"
+        }
+      },
+      "output": {
+        "bytes": 523498,
+        "sha256": "9a191960cd7af6b7c41e8b791750ac62fa1fef2987f5e486a0b744c21b251b18"
+      },
+      "reference": {
+        "bytes": 523536,
+        "sha256": "2b5f2ec3b4f49039cd0d3fbcbed96e6cfb6466b0485dc5f66680e9640d8f88e3"
+      }
+    },
+    "probe": {
+      "totals": {
+        "cases": 1263,
+        "format": 1263,
+        "parts": 1263,
+        "resolved": 1263,
+        "raw": 1263,
+        "errors": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 213511,
+          "sha256": "cbfd8743477db670b5ee92a06979261fb6bff11721192a52d2888f77d96490eb"
+        },
+        "wasm": {
+          "bytes": 38932283,
+          "sha256": "34359682404cd2491e34e63331099e053ddf8de20f242746398368d537829c97"
+        }
+      },
+      "output": {
+        "bytes": 686554,
+        "sha256": "cf8f711a4359ee73ba5dba1172224ff5a6831b139da6b4a8dbf7d8dbce63ee98"
+      },
+      "reference": {
+        "bytes": 686553,
+        "sha256": "355f4513c27c47d26175b2a04fab521c3066b4c1b87825cd5162f5d2a86184e5"
+      }
+    },
+    "locales": {
+      "totals": {
+        "cases": 6886,
+        "matches": 6886
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 2780,
+          "sha256": "0e1f02416c965ff36925ac367228d077b1c303d6666492d3655dc16a88256e27"
+        },
+        "wasm": {
+          "bytes": 38836231,
+          "sha256": "b47ea7b6130d1f8762a22c24997eaa2885f43014ab00c1f47b39de3a1261ae42"
+        }
+      },
+      "output": {
+        "bytes": 470435,
+        "sha256": "7edc0e40e65168efce230cc975682a7e908af6357ffecfd7e08d266b8d7b1472"
+      },
+      "reference": {
+        "bytes": 470435,
+        "sha256": "7edc0e40e65168efce230cc975682a7e908af6357ffecfd7e08d266b8d7b1472"
+      }
+    }
+  },
+  "standaloneWasmtime": {
+    "wasm": {
+      "bytes": 38910020,
+      "sha256": "ce8f794a53f6e49faf12a036cf0fc6c602898ff553f3b84b84e3b4ee13ae68b8"
+    },
+    "runner": {
+      "bytes": 19669984,
+      "sha256": "8ec673431a74602c52d54866f64cb2c3536d57313f37282bffbdd57f00050f5e"
+    },
+    "imports": [
+      {
+        "module": "env",
+        "name": "emscripten_notify_memory_growth",
+        "params": [
+          "i32"
+        ],
+        "results": []
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "proc_exit",
+        "params": [
+          "i32"
+        ],
+        "results": []
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "environ_sizes_get",
+        "params": [
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "environ_get",
+        "params": [
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_close",
+        "params": [
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "clock_time_get",
+        "params": [
+          "i32",
+          "i64",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_fdstat_get",
+        "params": [
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_seek",
+        "params": [
+          "i32",
+          "i64",
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "env",
+        "name": "__syscall_unlinkat",
+        "params": [
+          "i32",
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_write",
+        "params": [
+          "i32",
+          "i32",
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      },
+      {
+        "module": "wasi_snapshot_preview1",
+        "name": "random_get",
+        "params": [
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      }
+    ],
+    "importAllowlistMatch": true,
+    "importAllowlistSource": {
+      "path": "scripts/lib/convex-wasm-artifact-pipeline.mjs",
+      "bytes": 1157446,
+      "sha256": "41a49aaad2430597ad6adc25ea68cdaa8c0572cb07f0f4e23945701ff3311344"
+    }
+  },
+  "lifecycle": {
+    "cycles": 16,
+    "casesPerCycle": 3342,
+    "matchingExecutions": 53472,
+    "allocatedBytes": [
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968,
+      1003960,
+      1003968
+    ],
+    "allocatorPeriod": 2,
+    "icuRequestedBytes": [
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130,
+      806130
+    ],
+    "icuAllocationCount": [
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986,
+      6986
+    ],
+    "cleanup": {
+      "lifecycleCleanup": true,
+      "icuRequestedBytes": 0,
+      "icuAllocationCount": 0
+    },
+    "output": {
+      "bytes": 47691856,
+      "sha256": "ea1c842afd6387efa5f00e894a4551c7cfe036cd54e001d0e58382d5340c92b3"
+    },
+    "evidence": {
+      "bytes": 3575,
+      "sha256": "5af9a828b01321fa98f94d74c994cc2a0223f0f9bc5c2bdd2307ddeadd94e6d1"
+    }
+  },
+  "expectedRangeErrors": 56,
+  "harnessSources": {
+    "build.py": {
+      "bytes": 5774,
+      "sha256": "6758869f64083304007eb4adf6df0e6e1d40f9d33c50d13388f3d84c1549e975"
+    },
+    "main.cpp": {
+      "bytes": 6700,
+      "sha256": "363ddc14dde846ce4d0b1132dc484bd1a99fa5150b6afe5f15e744d77180ce48"
+    },
+    "run-probe.mjs": {
+      "bytes": 307,
+      "sha256": "f6e2528c3760bf89417a808405c9d1578b7b17919fb114d9306d07809ea08075"
+    },
+    "number-range-contracts.mjs": {
+      "bytes": 5784,
+      "sha256": "d51588c17fce6abfbf9ac44e5b715656923f8261a73ea396116cd2bef6a1daf8"
+    },
+    "compare-bindings.mjs": {
+      "bytes": 1234,
+      "sha256": "99bd39918363a773e4ede92981dfdc857879cb6a4e6e9804975aef725cb0e892"
+    },
+    "compare-lifecycle.mjs": {
+      "bytes": 2769,
+      "sha256": "25bb3bc91f248e5e7920146f222331054edcfea1210486df4a55830f07e3ce89"
+    }
+  },
+  "nodeHarnessSource": {
+    "bytes": 3838,
+    "sha256": "de2c7e0ad4bb4f6eb1b0514110de557dbfcc5c34550d38f6f9829980220b95bb"
+  },
+  "untrackedAllocatorBytes": [
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488,
+    958480,
+    958488
+  ],
+  "cleanupBaseline": {
+    "icuRequestedBytes": 2322,
+    "icuAllocationCount": 5,
+    "cause": "Unified cache destruction recreated locale caches after their cleanup slot"
+  },
+  "limits": [
+    "Standalone experiment, not released runtime integration.",
+    "Bounded differential coverage, not complete ECMA-402 conformance.",
+    "Date ranges, Collator/shared ICU error audit and failure injection remain open.",
+    "ICU 78.2 / CLDR 48 align; guest timezone data 2025c differs from reference 2026a.",
+    "Allocator plateau excludes embedded data and reserved Wasm memory."
+  ]
+}

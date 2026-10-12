@@ -1,0 +1,21 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters and bindings patch stages",
+  "patchSha256": "b194d06fb000f700b3d488881d2a86e3c2f2c45645108d6d1e786721f7c694ca",
+  "files": [
+    {
+      "path": "include/hermes/VM/RuntimeHermesValueFields.def",
+      "before": "db211d25085e46db59841736d83c19f88fa80d9cb9cc771fec773965a16fd697",
+      "after": "e6ce1eb1bcbda8116462d8a7dd4456586e2b6939fd417776240225fa6776483f"
+    },
+    {
+      "path": "lib/VM/JSLib/BigInt.cpp",
+      "before": "562bfd832498f3235cc147fccf202e3017c8d2cde27cc696f21f5de3f0dfd512",
+      "after": "9c46dd0e46d4c43face278029ad3d7bd80af5405948c4e2225825feb91f865d2"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "ab4cb67da4664acb462b592037d1ae6e8b471a4c508e59656051ef786d17ff6c",
+      "after": "a946b889d78dc22273c4bfca86438a996fa707a893390bb5b90eee68d89e72d1"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+--- a/external/icu-small/CMakeLists.txt
++++ b/external/icu-small/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ # Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+-# Experimental static build of the unchanged ICU source and locale dataset.
++# Experimental static build of the pinned ICU source and locale dataset.
+ find_package(Python3 REQUIRED COMPONENTS Interpreter)
+ set(ICU_DAT "${CMAKE_CURRENT_BINARY_DIR}/icudt78l.dat")
+ if(NOT EXISTS "${ICU_DAT}")
+--- a/external/icu-small/source/common/ucln_cmn.h
++++ b/external/icu-small/source/common/ucln_cmn.h
+@@ -37,7 +37,6 @@
+     UCLN_COMMON_RBBI,
+     UCLN_COMMON_SERVICE,
+     UCLN_COMMON_LOCALE_KEY_TYPE,
+-    UCLN_COMMON_LOCALE,
+     UCLN_COMMON_LOCALE_ALIAS,
+     UCLN_COMMON_LOCALE_KNOWN_CANONICALIZED,
+     UCLN_COMMON_LOCALE_AVAILABLE,
+@@ -64,6 +63,10 @@
+        must happen before resource bundle clean up.
+     */
+     UCLN_COMMON_UNIFIED_CACHE,
++    /* Cached formatter destruction can use the default/root locale. Keep the
++       locale cache alive until then, so cleanup cannot recreate it after its
++       cleanup slot has already run and before allocator hooks are reset. */
++    UCLN_COMMON_LOCALE,
+     UCLN_COMMON_URES,
+     UCLN_COMMON_MUTEX,    // Mutexes should be the last to be cleaned up.
+     UCLN_COMMON_COUNT /* This must be last */

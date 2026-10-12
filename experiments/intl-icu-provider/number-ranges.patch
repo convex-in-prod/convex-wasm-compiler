@@ -1,0 +1,526 @@
+--- a/include/hermes/Platform/Intl/PlatformIntl.h
++++ b/include/hermes/Platform/Intl/PlatformIntl.h
+@@ -218,6 +218,8 @@
+ #ifdef HERMES_USE_STATIC_INTL_PROVIDER
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, const NumberFormatValue &value) noexcept;
+   vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, const NumberFormatValue &value) noexcept;
++  vm::CallResult<std::u16string> formatRange(vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept;
++  vm::CallResult<std::vector<Part>> formatRangeToParts(vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept;
+ #else
+   std::u16string format(double jsTimeValue) noexcept;
+   std::vector<Part> formatToParts(double jsTimeValue) noexcept;
+--- a/include/hermes/VM/NativeFunctions.def
++++ b/include/hermes/VM/NativeFunctions.def
+@@ -453,6 +453,9 @@
+ NATIVE_FUNCTION(intlNumberFormatSupportedLocalesOf)
+ NATIVE_FUNCTION(intlNumberFormatPrototypeFormatGetter)
+ NATIVE_FUNCTION(intlNumberFormatPrototypeFormatToParts)
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++NATIVE_FUNCTION(intlNumberFormatPrototypeFormatRange)
++#endif
+ NATIVE_FUNCTION(intlNumberFormatPrototypeResolvedOptions)
+ 
+ NATIVE_FUNCTION(intlDatePrototypeToLocaleDateString)
+--- a/include/hermes/VM/PredefinedStrings.def
++++ b/include/hermes/VM/PredefinedStrings.def
+@@ -558,6 +558,10 @@
+ STR(compare, "compare")
+ STR(format, "format")
+ STR(formatToParts, "formatToParts")
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++STR(formatRange, "formatRange")
++STR(formatRangeToParts, "formatRangeToParts")
++#endif
+ STR(getCanonicalLocales, "getCanonicalLocales")
+ STR(resolvedOptions, "resolvedOptions")
+ STR(supportedLocalesOf, "supportedLocalesOf")
+--- a/lib/Platform/Intl/CMakeLists.txt
++++ b/lib/Platform/Intl/CMakeLists.txt
+@@ -28,6 +28,11 @@
+       impl_icu_provider/IcuProviderStatic.cpp
+       LINK_LIBS hermesStaticIcu
+       LINK_OBJLIBS hermesBCP47Parser hermesPublic)
++    target_include_directories(hermesPlatformIntl_obj BEFORE PRIVATE
++      ${CMAKE_SOURCE_DIR}/external/icu-small/source/common
++      ${CMAKE_SOURCE_DIR}/external/icu-small/source/i18n)
++    target_compile_definitions(hermesPlatformIntl_obj PRIVATE
++      U_STATIC_IMPLEMENTATION=1 U_DISABLE_RENAMING=1)
+   else()
+     add_hermes_library(hermesPlatformIntl
+         PlatformIntlICU.cpp
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -8,11 +8,47 @@
+  *
+  * This file implements the platform_intl interface (Collator, DateTimeFormat,
+  * NumberFormat, getCanonicalLocales, toLocaleLowerCase, toLocaleUpperCase)
+- * by dispatching ICU calls through the hermes_icu_vtable.
++ * using a static ICU provider. The C++ number-range API preserves mixed
++ * binary and exact decimal endpoints; other paths use the provider vtable.
+  *
+  * The ICU provider is required; provider discovery and platform fallbacks are
+  * excluded from this build.
+  */
++
++#include <unicode/localebuilder.h>
++#include "unicode/ubrk.h"
++#include "unicode/uclean.h"
++#include "unicode/ucurr.h"
++#include "unicode/uenum.h"
++#include "unicode/uldnames.h"
++#include "unicode/uloc.h"
++#include "unicode/unorm2.h"
++#include "unicode/ures.h"
++#include "unicode/uset.h"
++#include "unicode/ustring.h"
++#include "unicode/utext.h"
++#include "unicode/utypes.h"
++#include "unicode/uversion.h"
++
++#include "unicode/locid.h"
++
++// ICU i18n headers
++#include "unicode/ucal.h"
++#include "unicode/ucol.h"
++#include "unicode/udat.h"
++#include "unicode/udateintervalformat.h"
++#include "unicode/udatpg.h"
++#include "unicode/ufieldpositer.h"
++#include "unicode/uformattedvalue.h"
++#include "unicode/ulistformatter.h"
++#include "unicode/unum.h"
++#include "unicode/unumberformatter.h"
++#include "unicode/unumberrangeformatter.h"
++#include "unicode/unumsys.h"
++#include "unicode/upluralrules.h"
++#include "unicode/ureldatefmt.h"
++
++#include "unicode/numberrangeformatter.h"
+ 
+ #include "IcuProviderStatic.h"
+ #include "IcuProviderUtils.h"
+@@ -712,26 +748,26 @@
+   err = U_ZERO_ERROR;
+   icu_->ucol_setAttribute(
+       coll_,
+-      UCOL_NUMERIC_COLLATION,
+-      resolvedNumericValue_ ? UCOL_ON : UCOL_OFF,
++      ::UCOL_NUMERIC_COLLATION,
++      resolvedNumericValue_ ? ::UCOL_ON : ::UCOL_OFF,
+       &err);
+ 
+   // caseFirst
+   if (!resolvedCaseFirstValue_.empty()) {
+     err = U_ZERO_ERROR;
+     if (resolvedCaseFirstValue_ == u"upper") {
+-      icu_->ucol_setAttribute(coll_, UCOL_CASE_FIRST, UCOL_UPPER_FIRST, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_CASE_FIRST, ::UCOL_UPPER_FIRST, &err);
+     } else if (resolvedCaseFirstValue_ == u"lower") {
+-      icu_->ucol_setAttribute(coll_, UCOL_CASE_FIRST, UCOL_LOWER_FIRST, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_CASE_FIRST, ::UCOL_LOWER_FIRST, &err);
+     } else {
+-      icu_->ucol_setAttribute(coll_, UCOL_CASE_FIRST, UCOL_OFF, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_CASE_FIRST, ::UCOL_OFF, &err);
+     }
+   } else if (icu_->ucol_getAttribute) {
+     err = U_ZERO_ERROR;
+-    UColAttributeValue val = icu_->ucol_getAttribute(coll_, UCOL_CASE_FIRST, &err);
+-    if (val == UCOL_UPPER_FIRST)
++    UColAttributeValue val = icu_->ucol_getAttribute(coll_, ::UCOL_CASE_FIRST, &err);
++    if (val == ::UCOL_UPPER_FIRST)
+       resolvedCaseFirstValue_ = u"upper";
+-    else if (val == UCOL_LOWER_FIRST)
++    else if (val == ::UCOL_LOWER_FIRST)
+       resolvedCaseFirstValue_ = u"lower";
+     else
+       resolvedCaseFirstValue_ = u"false";
+@@ -743,27 +779,27 @@
+   if (!resolvedSensitivityValue_.empty()) {
+     err = U_ZERO_ERROR;
+     if (resolvedSensitivityValue_ == u"base") {
+-      icu_->ucol_setAttribute(coll_, UCOL_STRENGTH, UCOL_PRIMARY, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_STRENGTH, ::UCOL_PRIMARY, &err);
+     } else if (resolvedSensitivityValue_ == u"accent") {
+-      icu_->ucol_setAttribute(coll_, UCOL_STRENGTH, UCOL_SECONDARY, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_STRENGTH, ::UCOL_SECONDARY, &err);
+     } else if (resolvedSensitivityValue_ == u"case") {
+-      icu_->ucol_setAttribute(coll_, UCOL_STRENGTH, UCOL_PRIMARY, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_STRENGTH, ::UCOL_PRIMARY, &err);
+       err = U_ZERO_ERROR;
+-      icu_->ucol_setAttribute(coll_, UCOL_CASE_LEVEL, UCOL_ON, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_CASE_LEVEL, ::UCOL_ON, &err);
+     } else if (resolvedSensitivityValue_ == u"variant") {
+-      icu_->ucol_setAttribute(coll_, UCOL_STRENGTH, UCOL_TERTIARY, &err);
++      icu_->ucol_setAttribute(coll_, ::UCOL_STRENGTH, ::UCOL_TERTIARY, &err);
+     }
+   } else if (icu_->ucol_getAttribute) {
+     err = U_ZERO_ERROR;
+     UColAttributeValue strengthVal =
+-        icu_->ucol_getAttribute(coll_, UCOL_STRENGTH, &err);
+-    if (strengthVal == UCOL_PRIMARY) {
++        icu_->ucol_getAttribute(coll_, ::UCOL_STRENGTH, &err);
++    if (strengthVal == ::UCOL_PRIMARY) {
+       err = U_ZERO_ERROR;
+       UColAttributeValue caseLevelVal =
+-          icu_->ucol_getAttribute(coll_, UCOL_CASE_LEVEL, &err);
++          icu_->ucol_getAttribute(coll_, ::UCOL_CASE_LEVEL, &err);
+       resolvedSensitivityValue_ =
+-          (caseLevelVal == UCOL_ON) ? u"case" : u"base";
+-    } else if (strengthVal == UCOL_SECONDARY) {
++          (caseLevelVal == ::UCOL_ON) ? u"case" : u"base";
++    } else if (strengthVal == ::UCOL_SECONDARY) {
+       resolvedSensitivityValue_ = u"accent";
+     } else {
+       resolvedSensitivityValue_ = u"variant";
+@@ -776,8 +812,8 @@
+   err = U_ZERO_ERROR;
+   icu_->ucol_setAttribute(
+       coll_,
+-      UCOL_ALTERNATE_HANDLING,
+-      resolvedIgnorePunctuationValue_ ? UCOL_SHIFTED : UCOL_NON_IGNORABLE,
++      ::UCOL_ALTERNATE_HANDLING,
++      resolvedIgnorePunctuationValue_ ? ::UCOL_SHIFTED : ::UCOL_NON_IGNORABLE,
+       &err);
+ }
+ 
+@@ -931,7 +967,7 @@
+ 
+   if (coll_) {
+     err = U_ZERO_ERROR;
+-    icu_->ucol_setAttribute(coll_, UCOL_NORMALIZATION_MODE, UCOL_ON, &err);
++    icu_->ucol_setAttribute(coll_, ::UCOL_NORMALIZATION_MODE, ::UCOL_ON, &err);
+     setAttributes();
+   }
+ 
+@@ -964,9 +1000,9 @@
+       reinterpret_cast<const UChar *>(y.data()),
+       static_cast<int32_t>(y.size()));
+ 
+-  if (result == UCOL_LESS)
++  if (result == ::UCOL_LESS)
+     return -1;
+-  if (result == UCOL_GREATER)
++  if (result == ::UCOL_GREATER)
+     return 1;
+   return 0;
+ }
+@@ -1548,7 +1584,8 @@
+   const auto zone = !timeZone_.empty() && (timeZone_[0] == u'+' || timeZone_[0] == u'-')
+       ? u"GMT" + timeZone_ : timeZone_;
+   auto open = [&](int32_t timeStyle, int32_t dateStyle, const std::u16string &pattern) {
+-    return icu_->udat_open(timeStyle, dateStyle, locale8_.c_str(),
++    return icu_->udat_open(static_cast<UDateFormatStyle>(timeStyle),
++        static_cast<UDateFormatStyle>(dateStyle), locale8_.c_str(),
+         reinterpret_cast<const UChar *>(zone.data()), zone.size(),
+         reinterpret_cast<const UChar *>(pattern.data()), pattern.size(), &status);
+   };
+@@ -1624,13 +1661,13 @@
+   if (U_FAILURE(status) || !generator) return nullptr;
+   const int32_t length = icu_->udatpg_getBestPatternWithOptions(generator.get(),
+       reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
+-      kUDATPG_MATCH_HOUR_FIELD_LENGTH, nullptr, 0, &status);
++      UDATPG_MATCH_HOUR_FIELD_LENGTH, nullptr, 0, &status);
+   if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0) return nullptr;
+   std::u16string pattern(length, u'\0');
+   status = U_ZERO_ERROR;
+   icu_->udatpg_getBestPatternWithOptions(generator.get(),
+       reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
+-      kUDATPG_MATCH_HOUR_FIELD_LENGTH,
++      UDATPG_MATCH_HOUR_FIELD_LENGTH,
+       reinterpret_cast<UChar *>(pattern.data()), length, &status);
+   if (U_FAILURE(status)) return nullptr;
+   if (!hourCycle_.empty()) pattern = replacePatternHourCycle(pattern, hourCycleSymbol(hourCycle_));
+@@ -1707,8 +1744,15 @@
+   Options resolvedOptions() noexcept;
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
+   vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
++  vm::CallResult<std::u16string> formatRange(vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept;
++  vm::CallResult<std::vector<Part>> formatRangeToParts(vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept;
+ 
+  private:
++  vm::CallResult<icu::number::FormattedNumberRange> formatRangeValue(
++      vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept;
++  std::u16string skeleton_;
++  std::string localeICU_;
++  std::optional<icu::number::LocalizedNumberRangeFormatter> rangeFormatter_;
+   const hermes_icu_vtable *icu_ = nullptr;
+   vm::CallResult<const UFormattedValue *> formatValue(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
+   UNumberFormatter *unumf_ = nullptr;
+@@ -2052,6 +2096,8 @@
+     }
+   }
+   if (trailingZeroDisplay_ == u"stripIfInteger") skeleton += u"/w";
++  skeleton_ = skeleton;
++  localeICU_ = localeICU;
+   status = U_ZERO_ERROR;
+   unumf_ = icu_->unumf_openForSkeletonAndLocale(
+       reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
+@@ -2152,6 +2198,70 @@
+   if (U_FAILURE(status) || !text)
+     return runtime.raiseError("ICU formatted-number string retrieval failed");
+   return std::u16string(reinterpret_cast<const char16_t *>(text), length);
++}
++
++struct NumberFieldRange { int32_t begin, end, type; };
++
++vm::CallResult<std::vector<Part>> partitionNumberFields(
++    vm::Runtime &runtime, const std::u16string &formatted,
++    const std::vector<NumberFieldRange> &fields,
++    const std::vector<NumberFieldRange> &sources, bool outputSource,
++    bool isNaN, bool styleIsUnit) {
++  const int32_t length = formatted.size();
++  std::vector<int32_t> endpoints{0, length};
++  for (const auto *ranges : {&fields, &sources})
++    for (const auto &field : *ranges) {
++      if (field.begin < 0 || field.begin >= field.end || field.end > length)
++        return runtime.raiseError("ICU number-field range is invalid");
++      if (ranges == &fields) {
++        endpoints.push_back(field.begin);
++        endpoints.push_back(field.end);
++      }
++    }
++  for (const auto &span : sources)
++    if (span.type != 0 && span.type != 1)
++      return runtime.raiseError("ICU number-range source is invalid");
++  // Source spans classify complete parts; they do not split literals. A literal
++  // crossing an endpoint boundary is shared, as in V8's field partitioning.
++  // Integer fields include group fields: select the most specific covering field.
++  std::sort(endpoints.begin(), endpoints.end());
++  endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
++  std::vector<Part> parts;
++  for (size_t i = 1; i < endpoints.size(); ++i) {
++    const auto begin = endpoints[i - 1], end = endpoints[i];
++    const NumberFieldRange *selected = nullptr;
++    for (const auto &field : fields)
++      if (field.begin <= begin && field.end >= end &&
++          (!selected || field.end - field.begin < selected->end - selected->begin ||
++           (field.end - field.begin == selected->end - selected->begin && field.type > selected->type)))
++        selected = &field;
++    std::u16string type = u"literal", source = u"shared";
++    for (const auto &span : sources)
++      if (span.begin <= begin && span.end >= end)
++        source = span.type == 0 ? u"startRange" : u"endRange";
++    auto segment = formatted.substr(begin, end - begin);
++    if (selected) {
++      type = numberFieldToPartType(selected->type);
++      if (selected->type == UNUM_MEASURE_UNIT_FIELD ||
++          (selected->type == UNUM_PERCENT_FIELD && styleIsUnit)) type = u"unit";
++      else if (selected->type == UNUM_COMPACT_FIELD) type = u"compact";
++      else if (selected->type == UNUM_APPROXIMATELY_SIGN_FIELD) type = u"approximatelySign";
++      else if (selected->type == UNUM_SIGN_FIELD)
++        type = formatted[begin] == u'+' ? u"plusSign" : u"minusSign";
++      else if (selected->type == UNUM_INTEGER_FIELD && isNaN) type = u"nan";
++      else if (selected->type == UNUM_INTEGER_FIELD &&
++          (formatted[begin] == u'\u221e' || segment == u"INF")) type = u"infinity";
++    }
++    if (!parts.empty() && parts.back().at(u"type") == type &&
++        (!outputSource || parts.back().at(u"source") == source))
++      parts.back().at(u"value") += segment;
++    else {
++      Part part{{u"type", std::move(type)}, {u"value", std::move(segment)}};
++      if (outputSource) part.emplace(u"source", std::move(source));
++      parts.push_back(std::move(part));
++    }
++  }
++  return parts;
+ }
+ 
+ vm::CallResult<std::vector<Part>> NumberFormatIcuProvider::formatToParts(
+@@ -2173,56 +2283,68 @@
+     icu_->ufieldpositer_close(positions);
+     return runtime.raiseError("ICU number-field retrieval failed");
+   }
+-  struct FieldRange { int32_t begin, end, type; };
+-  std::vector<FieldRange> fields;
+-  std::vector<int32_t> endpoints{0, length};
++  std::vector<NumberFieldRange> fields;
+   int32_t begin, end, type;
+-  while ((type = icu_->ufieldpositer_next(positions, &begin, &end)) >= 0) {
+-    if (begin < 0 || end < begin || end > length) {
+-      icu_->ufieldpositer_close(positions);
+-      return runtime.raiseError("ICU number-field range is invalid");
+-    }
++  while ((type = icu_->ufieldpositer_next(positions, &begin, &end)) >= 0)
+     fields.push_back({begin, end, type});
+-    endpoints.push_back(begin);
+-    endpoints.push_back(end);
+-  }
+   icu_->ufieldpositer_close(positions);
+   const auto *binary = std::get_if<double>(&number);
+-  const bool isNaN = binary && std::isnan(*binary);
+-  const bool isInfinity = binary && std::isinf(*binary);
+-  const bool isNegative = binary ? std::signbit(*binary) && !isNaN
+-      : std::get<std::string>(number).front() == '-';
+-  // Integer ranges include group fields. Emit each interval exactly once using
+-  // its most specific covering field, rather than duplicating grouped digits.
+-  std::sort(endpoints.begin(), endpoints.end());
+-  endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+-  std::vector<Part> parts;
+-  for (size_t i = 1; i < endpoints.size(); ++i) {
+-    const auto begin = endpoints[i - 1];
+-    const auto end = endpoints[i];
+-    const FieldRange *selected = nullptr;
+-    for (const auto &field : fields)
+-      if (field.begin <= begin && field.end >= end &&
+-          (!selected || field.end - field.begin < selected->end - selected->begin))
+-        selected = &field;
+-    std::u16string type = u"literal";
+-    if (selected) {
+-      type = numberFieldToPartType(selected->type);
+-      if (selected->type == 11) type = u"unit";
+-      else if (selected->type == 12) type = u"compact";
+-      else if (selected->type == 13) type = u"approximatelySign";
+-      else if (selected->type == 10)
+-        type = isNegative ? u"minusSign" : u"plusSign";
+-      else if (selected->type == kUNUM_INTEGER_FIELD && isNaN) type = u"nan";
+-      else if (selected->type == kUNUM_INTEGER_FIELD && isInfinity) type = u"infinity";
+-    }
+-    auto segment = formatted.substr(begin, end - begin);
+-    if (!parts.empty() && parts.back().at(u"type") == type)
+-      parts.back().at(u"value") += segment;
+-    else
+-      parts.push_back({{u"type", std::move(type)}, {u"value", std::move(segment)}});
+-  }
+-  return parts;
++  return partitionNumberFields(runtime, formatted, fields, {}, false,
++      binary && std::isnan(*binary), style_ == u"unit");
++}
++
++vm::CallResult<icu::number::FormattedNumberRange> NumberFormatIcuProvider::formatRangeValue(
++    vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept {
++  UErrorCode status = U_ZERO_ERROR;
++  if (!rangeFormatter_) {
++    auto formatter = icu::number::NumberRangeFormatter::with()
++        .numberFormatterBoth(icu::number::NumberFormatter::forSkeleton(
++            icu::UnicodeString(skeleton_.data(), skeleton_.size()), status))
++        .locale(icu::Locale(localeICU_.c_str()));
++    if (U_FAILURE(status) || formatter.copyErrorTo(status))
++      return runtime.raiseError("ICU number-range formatter initialization failed");
++    rangeFormatter_.emplace(std::move(formatter));
++  }
++  // ICU's C range API accepts two doubles or two decimal strings. Its C++ API
++  // preserves mixed endpoint types without rounding either exact decimal input.
++  icu::Formattable first, second;
++  if (const auto *binary = std::get_if<double>(&start)) first.setDouble(*binary);
++  else first.setDecimalNumber(icu::StringPiece(std::get<std::string>(start)), status);
++  if (const auto *binary = std::get_if<double>(&end)) second.setDouble(*binary);
++  else second.setDecimalNumber(icu::StringPiece(std::get<std::string>(end)), status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU number-range endpoint conversion failed");
++  auto result = rangeFormatter_->formatFormattableRange(first, second, status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU number-range formatting failed");
++  return std::move(result);
++}
++
++vm::CallResult<std::u16string> NumberFormatIcuProvider::formatRange(
++    vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept {
++  auto value = formatRangeValue(runtime, start, end);
++  if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  auto text = value->toString(status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU number-range string retrieval failed");
++  return std::u16string(text.getBuffer(), text.length());
++}
++
++vm::CallResult<std::vector<Part>> NumberFormatIcuProvider::formatRangeToParts(
++    vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept {
++  auto value = formatRangeValue(runtime, start, end);
++  if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  auto text = value->toString(status);
++  std::vector<NumberFieldRange> fields, sources;
++  icu::ConstrainedFieldPosition position;
++  while (value->nextPosition(position, status)) {
++    NumberFieldRange field{position.getStart(), position.getLimit(), position.getField()};
++    if (position.getCategory() == UFIELD_CATEGORY_NUMBER_RANGE_SPAN) sources.push_back(field);
++    else if (position.getCategory() == UFIELD_CATEGORY_NUMBER) fields.push_back(field);
++    else return runtime.raiseError("ICU number-range field category is invalid");
++  }
++  if (U_FAILURE(status)) return runtime.raiseError("ICU number-range field retrieval failed");
++  return partitionNumberFields(runtime, std::u16string(text.getBuffer(), text.length()),
++      fields, sources, true, false, style_ == u"unit");
+ }
+ 
+ } // namespace
+@@ -2279,5 +2401,15 @@
+   return static_cast<NumberFormatIcuProvider *>(this)->formatToParts(runtime, number);
+ }
+ 
++vm::CallResult<std::u16string> NumberFormat::formatRange(
++    vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept {
++  return static_cast<NumberFormatIcuProvider *>(this)->formatRange(runtime, start, end);
++}
++
++vm::CallResult<std::vector<Part>> NumberFormat::formatRangeToParts(
++    vm::Runtime &runtime, const NumberFormatValue &start, const NumberFormatValue &end) noexcept {
++  return static_cast<NumberFormatIcuProvider *>(this)->formatRangeToParts(runtime, start, end);
++}
++
+ } // namespace platform_intl
+ } // namespace hermes
+--- a/lib/VM/JSLib/Intl.cpp
++++ b/lib/VM/JSLib/Intl.cpp
+@@ -228,10 +228,13 @@
+   lv.obj = std::move(*objRes);
+   GCScopeMarkerRAII marker{runtime};
+ #ifdef HERMES_USE_STATIC_INTL_PROVIDER
+-  if (result.size() != 2 || !result.count(u"type") || !result.count(u"value"))
++  if (!result.count(u"type") || !result.count(u"value") ||
++      result.size() != (result.count(u"source") ? 3 : 2))
+     return runtime.raiseError("Intl part has an invalid shape");
+-  for (const auto *key : {u"type", u"value"}) {
+-    auto &kv = *result.find(key);
++  for (const auto *key : {u"type", u"value", u"source"}) {
++    const auto found = result.find(key);
++    if (found == result.end()) continue;
++    auto &kv = *found;
+ #else
+   for (auto &kv : result) {
+ #endif
+@@ -1612,6 +1615,12 @@
+       intlNumberFormatPrototypeFormatToParts,
+       1);
+ #endif
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  defineMethod(runtime, prototype, Predefined::getSymbolID(Predefined::formatRange),
++      nullptr, intlNumberFormatPrototypeFormatRange, 2);
++  defineMethod(runtime, prototype, Predefined::getSymbolID(Predefined::formatRangeToParts),
++      reinterpret_cast<void *>(1), intlNumberFormatPrototypeFormatRange, 2);
++#endif
+ 
+   defineMethod(
+       runtime,
+@@ -1764,6 +1773,34 @@
+       runtime, (*numberFormatRes)->formatToParts(xRes->getNumber()));
+ #endif
+ }
++
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++CallResult<HermesValue> intlNumberFormatPrototypeFormatRange(void *context, Runtime &runtime) {
++  const auto args = runtime.getCurrentFrame().getNativeArgs();
++  // Range methods require native slots, even for legacy-chained receivers.
++  auto formatter = verifyDecoration<platform_intl::NumberFormat>(runtime,
++      args.dyncastThis<DecoratedObject>(), "Intl.NumberFormat range method");
++  if (formatter == ExecutionStatus::EXCEPTION) return formatter.getStatus();
++  if (args.getArg(0).isUndefined() || args.getArg(1).isUndefined())
++    return runtime.raiseTypeError("Intl number range requires both endpoints");
++  auto start = toIntlNumberValue(runtime, args.getArgHandle(0));
++  if (start == ExecutionStatus::EXCEPTION) return start.getStatus();
++  auto end = toIntlNumberValue(runtime, args.getArgHandle(1));
++  if (end == ExecutionStatus::EXCEPTION) return end.getStatus();
++  // Both coercions must finish before checking NaN; the second can run JS.
++  for (const auto *value : {&*start, &*end})
++    if (const auto *binary = std::get_if<double>(value); binary && std::isnan(*binary))
++      return runtime.raiseRangeError("Intl number range endpoint is NaN");
++  if (context) {
++    auto result = (*formatter)->formatRangeToParts(runtime, *start, *end);
++    if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++    return partsToJS(runtime, std::move(*result));
++  }
++  auto result = (*formatter)->formatRange(runtime, *start, *end);
++  if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*result));
++}
++#endif
+ 
+ CallResult<HermesValue> intlNumberFormatPrototypeResolvedOptions(
+     void *,

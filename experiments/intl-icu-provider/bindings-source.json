@@ -1,0 +1,36 @@
+{
+  "base": "prepare.py, fix-adapter.py, then apply-formatters.py",
+  "patchSha256": "4e9cf246614779e1a19ac6578066e8354e09fe2cac5670574985323b98d849fa",
+  "files": [
+    {
+      "path": "include/hermes/Platform/Intl/PlatformIntl.h",
+      "before": "4a21a163fc3b04adb6d6a12164baa0346315d6ce6b6f5c88d26905395002c694",
+      "after": "55feac959d514549c4545cf57a60146f8e3534879f8a1addf1207da06c0c7856"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp",
+      "before": "11107a046649bed9ed0c49149fe50e4f8870a04ccaf67bbe2fdcb2e597fb1bb3",
+      "after": "1c9a473735d526464ca799c6c2582621757ab5ec4dedad8d5f99085504121e06"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h",
+      "before": "323048f2f518254f57f1921e24445381f99e3f4f97c0ddfeb9ef8824d24f38d5",
+      "after": "4d878268418659490755c9fa356a2f06831fe6e44a04954fec9a16729f593805"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "444ef70791fd1f9fe9ce728520e2bb4d89863b3734e1feb6f945226984fa410c",
+      "after": "bae8244bb5e52d5f5edcefa8c080f457015ba630ccd6f8ea96a2a2a9893660f6"
+    },
+    {
+      "path": "lib/VM/JSLib/BigInt.cpp",
+      "before": "678f68bd8d402a17eb2e6b51db3a44302a45dca014addf89610b58f57a6bbe10",
+      "after": "562bfd832498f3235cc147fccf202e3017c8d2cde27cc696f21f5de3f0dfd512"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "a459bd6a4bd6cda247647178d564ff1b010f1d42dc607a6c05b435c727c6b29a",
+      "after": "ab4cb67da4664acb462b592037d1ae6e8b471a4c508e59656051ef786d17ff6c"
+    }
+  ]
+}

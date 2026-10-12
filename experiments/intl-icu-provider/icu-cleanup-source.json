@@ -1,0 +1,16 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction, locales and number-ranges patch stages",
+  "patchSha256": "08ca3e08d6f97e2d4f69bc466be63e0187a371dcb2127c88837fdedbd8a3fcba",
+  "files": [
+    {
+      "path": "external/icu-small/CMakeLists.txt",
+      "before": "bde3b998dfcb68e5b5837f4dbc09b572761a20f55108eba3a3447313288c82cb",
+      "after": "dafa83949d0995b8944f5c8be563dcc53290f72e5b6a53b478c7cf86d515f8af"
+    },
+    {
+      "path": "external/icu-small/source/common/ucln_cmn.h",
+      "before": "20a90978c7d8f62afcad6be680e7091775ac5004c6fa62bdbbf80dd1834ccd59",
+      "after": "63917cf60ee834867f8e13bec324d81a1fe1c5aa0d46953e4ddbc6af8c514c58"
+    }
+  ]
+}

@@ -1,0 +1,1202 @@
+--- a/include/hermes/Platform/Intl/PlatformIntl.h
++++ b/include/hermes/Platform/Intl/PlatformIntl.h
+@@ -16,7 +16,9 @@
+ #include "hermes/VM/JSObject.h"
+ #include "hermes/VM/StringPrimitive.h"
+ 
++#include <optional>
+ #include <string>
++#include <string_view>
+ #include <unordered_map>
+ #include <vector>
+ #include <variant>
+@@ -26,11 +28,23 @@
+ 
+ class Option {
+  public:
+-  enum Kind { Bool, Number, String, BoolOrString };
++  enum Kind { Bool, Number, String, BoolOrString
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    , DeferredNumber
++#endif
++  };
+ 
+   Option(bool b) : kind_(Kind::Bool), num_(b ? 1.0 : 0.0) {}
+   Option(double n) : kind_(Kind::Number), num_(n) {}
+   Option(std::u16string s) : kind_(Kind::String), str_(std::move(s)) {}
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  explicit Option(vm::Handle<> raw) : kind_(Kind::DeferredNumber), raw_(raw) {}
++  bool isDeferredNumber() const { return kind_ == Kind::DeferredNumber; }
++  vm::Handle<> getDeferredNumber() const {
++    assert(isDeferredNumber());
++    return *raw_;
++  }
++#endif
+   bool isBool() const {
+     return kind_ == Kind::Bool;
+   }
+@@ -63,24 +77,29 @@
+   // I am too lazy to make this a union.
+   double num_;
+   std::u16string str_;
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  // Borrowed root in the option reader's scope; never retain input options in
++  // the constructed formatter. Deferred conversion can execute arbitrary JS.
++  std::optional<vm::Handle<>> raw_;
++#endif
+ };
+ 
+ using Options = std::unordered_map<std::u16string, Option>;
+ using Part = std::unordered_map<std::u16string, std::u16string>;
+ 
+-/// For functions which take locales, most of
+-/// https://tc39.es/ecma402/#sec-canonicalizelocalelist has been done
+-/// already.  All that remains is for each method to iterate the array
+-/// and do steps 7.c.v-vii for each element.
+-///
+-/// For functions which take options, it has been canonicalized into a
+-/// C++ map.
+-///
+-/// Formally, doing this canonicalization up front create an
+-/// observable difference between the order of operations in ECMA 402
+-/// and the actual operations, if the locals or options involve
+-/// getters or Proxies.  For now, we will ignore this inconsistency,
+-/// as anybody depending on it is trying too hard.
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++class OptionReader {
++ public:
++  virtual ~OptionReader() = default;
++  virtual vm::CallResult<std::optional<Option>> read(
++      vm::Runtime &runtime, const std::u16string &name, Option::Kind kind) = 0;
++};
++#endif
++
++/// The static ICU provider receives canonical locales and reads constructor
++/// options through OptionReader, preserving observable reads and conversions.
++/// Its deferred numeric inputs borrow GC roots only during initialization.
++/// Other platform adapters still use the legacy normalized Options interface.
+ 
+ vm::CallResult<std::vector<std::u16string>> getCanonicalLocales(
+     vm::Runtime &runtime,
+@@ -145,6 +164,14 @@
+       vm::Runtime &runtime,
+       const std::vector<std::u16string> &locales,
+       const Options &options) noexcept;
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  static vm::CallResult<std::unique_ptr<DateTimeFormat>> create(
++      vm::Runtime &runtime,
++      const std::vector<std::u16string> &locales,
++      OptionReader &reader,
++      std::u16string_view required = u"any",
++      std::u16string_view defaults = u"date") noexcept;
++#endif
+   Options resolvedOptions() noexcept;
+ 
+ #ifdef HERMES_USE_STATIC_INTL_PROVIDER
+@@ -180,6 +207,12 @@
+       vm::Runtime &runtime,
+       const std::vector<std::u16string> &locales,
+       const Options &options) noexcept;
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  static vm::CallResult<std::unique_ptr<NumberFormat>> create(
++      vm::Runtime &runtime,
++      const std::vector<std::u16string> &locales,
++      OptionReader &reader) noexcept;
++#endif
+   Options resolvedOptions() noexcept;
+ 
+ #ifdef HERMES_USE_STATIC_INTL_PROVIDER
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include "IcuProviderUtils.h"
++#include "hermes/VM/Operations.h"
+ 
+ #include "hermes/Platform/Intl/BCP47Parser.h"
+ #include "llvh/Support/ConvertUTF.h"
+@@ -258,6 +259,34 @@
+   return std::u16string(value);
+ }
+ 
++vm::ExecutionStatus readOption(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property, Option::Kind kind) {
++  auto value = reader.read(runtime, property, kind);
++  if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
++  if (value->has_value()) options.emplace(property, std::move(value->value()));
++  return vm::ExecutionStatus::RETURNED;
++}
++
++vm::CallResult<std::u16string> getOptionString(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property,
++    const std::vector<std::u16string> &validValues,
++    const std::u16string &fallback) {
++  if (readOption(runtime, reader, options, property, Option::Kind::String) ==
++      vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
++  return getOptionString(runtime, options, property, validValues, fallback);
++}
++
++vm::CallResult<std::optional<int>> getNumberOption(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property, int minimum, int maximum,
++    std::optional<int> fallback) {
++  if (readOption(runtime, reader, options, property, Option::Kind::Number) ==
++      vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
++  return getNumberOption(runtime, options, property, minimum, maximum, fallback);
++}
++
+ std::optional<bool> getOptionBool(
+     vm::Runtime &runtime,
+     const Options &options,
+@@ -383,7 +412,14 @@
+   if (valueIt == options.end())
+     return fallback;
+ 
+-  double value = valueIt->second.getNumber();
++  double value;
++  if (valueIt->second.isDeferredNumber()) {
++    auto converted = vm::toNumber_RJS(runtime, valueIt->second.getDeferredNumber());
++    if (converted == vm::ExecutionStatus::EXCEPTION) return converted.getStatus();
++    value = converted->getNumber();
++  } else {
++    value = valueIt->second.getNumber();
++  }
+   if (std::isnan(value) || value < minimum || value > maximum) {
+     return runtime.raiseRangeError(
+         vm::TwineChar16(property.c_str()) +
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
+@@ -123,6 +123,19 @@
+     const std::u16string &fallback);
+ 
+ /// Get a bool option from options.
++vm::ExecutionStatus readOption(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property, Option::Kind kind);
++vm::CallResult<std::u16string> getOptionString(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property,
++    const std::vector<std::u16string> &validValues,
++    const std::u16string &fallback);
++vm::CallResult<std::optional<int>> getNumberOption(
++    vm::Runtime &runtime, OptionReader &reader, Options &options,
++    const std::u16string &property, int minimum, int maximum,
++    std::optional<int> fallback);
++
+ std::optional<bool> getOptionBool(
+     vm::Runtime &runtime,
+     const Options &options,
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -43,6 +43,19 @@
+ // ============================================================================
+ 
+ namespace {
++
++class MapOptionReader final : public OptionReader {
++ public:
++  explicit MapOptionReader(const Options &options) : options_(options) {}
++  vm::CallResult<std::optional<Option>> read(
++      vm::Runtime &, const std::u16string &name, Option::Kind) override {
++    auto found = options_.find(name);
++    if (found == options_.end()) return std::optional<Option>{};
++    return std::optional<Option>(found->second);
++  }
++ private:
++  const Options &options_;
++};
+ 
+ /// Get all available ICU locales as BCP47, cached per vtable.
+ /// Returns a map from lowercased BCP47 key to properly-cased BCP47 value.
+@@ -508,17 +521,22 @@
+     vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const std::vector<std::u16string> &locales,
+-    const Options &options,
++    Options &options,
++    OptionReader &reader,
+     llvh::ArrayRef<std::u16string_view> keys) {
+   auto requested = parseLocaleList(runtime, icu, locales);
+   if (requested == vm::ExecutionStatus::EXCEPTION) return requested.getStatus();
+-  auto matcher = getOptionString(runtime, options, u"localeMatcher",
++  auto matcher = getOptionString(runtime, reader, options, u"localeMatcher",
+       {u"lookup", u"best fit"}, u"best fit");
+   if (matcher == vm::ExecutionStatus::EXCEPTION) return matcher.getStatus();
+   Options opt;
+   opt.emplace(u"localeMatcher", Option(*matcher));
+   for (const auto &key : keys) {
+     const auto name = key == u"nu" ? u"numberingSystem" : key == u"ca" ? u"calendar" : u"hourCycle";
++    if (key == u"hc" && readOption(runtime, reader, options, u"hour12", Option::Kind::Bool) ==
++        vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
++    if (readOption(runtime, reader, options, name, Option::Kind::String) ==
++        vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
+     auto found = options.find(name);
+     if (found == options.end()) continue;
+     const auto &value = found->second.getString();
+@@ -1082,7 +1100,9 @@
+       vm::Runtime &runtime,
+       const hermes_icu_vtable *icu,
+       const std::vector<std::u16string> &locales,
+-      const Options &inputOptions) noexcept;
++      OptionReader &reader,
++      std::u16string_view required,
++      std::u16string_view defaults) noexcept;
+ 
+   Options resolvedOptions() noexcept;
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, double jsTimeValue) noexcept;
+@@ -1142,18 +1162,18 @@
+     vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const std::vector<std::u16string> &locales,
+-    const Options &inputOptions) noexcept {
++    OptionReader &reader,
++    std::u16string_view required,
++    std::u16string_view defaults) noexcept {
+   icu_ = icu;
+   if (!icu_) {
+     (void)runtime.raiseRangeError("DateTimeFormat requires ICU support");
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+ 
+-  auto dateOptions = toDateTimeOptions(runtime, inputOptions, u"any", u"date");
+-  if (dateOptions == vm::ExecutionStatus::EXCEPTION) return dateOptions.getStatus();
+-  Options options = std::move(*dateOptions);
++  Options options;
+   static constexpr std::u16string_view keys[]{u"ca", u"nu", u"hc"};
+-  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, keys);
++  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, reader, keys);
+   if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+   locale_ = resolved->getCanonicalizedLocaleId();
+   locale8_ = convertBCP47toICULocale(icu_, locale_);
+@@ -1164,6 +1184,8 @@
+   }
+   auto hour12 = getOptionBool(runtime, options, u"hour12", {});
+ 
++  if (readOption(runtime, reader, options, u"timeZone", Option::Kind::String) ==
++      vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
+   auto timeZoneRes = options.find(u"timeZone");
+   if (timeZoneRes != options.end()) {
+     std::u16string tz(timeZoneRes->second.getString());
+@@ -1195,25 +1217,101 @@
+     }
+   }
+ 
++  static const std::vector<std::u16string> weekdayValues = {
++      u"narrow", u"short", u"long"};
++  auto weekdayRes =
++      getOptionString(runtime, reader, options, u"weekday", weekdayValues, {});
++  if (weekdayRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return weekdayRes.getStatus();
++  weekday_ = weekdayRes.getValue();
++
++  static const std::vector<std::u16string> eraValues = {
++      u"narrow", u"short", u"long"};
++  auto eraRes = getOptionString(runtime, reader, options, u"era", eraValues, {});
++  if (eraRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return eraRes.getStatus();
++  era_ = *eraRes;
++
++  static const std::vector<std::u16string> yearValues = {
++      u"2-digit", u"numeric"};
++  auto yearRes = getOptionString(runtime, reader, options, u"year", yearValues, {});
++  if (yearRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return yearRes.getStatus();
++  year_ = *yearRes;
++
++  static const std::vector<std::u16string> monthValues = {
++      u"2-digit", u"numeric", u"narrow", u"short", u"long"};
++  auto monthRes = getOptionString(runtime, reader, options, u"month", monthValues, {});
++  if (monthRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return monthRes.getStatus();
++  month_ = *monthRes;
++
++  static const std::vector<std::u16string> dayValues = {
++      u"2-digit", u"numeric"};
++  auto dayRes = getOptionString(runtime, reader, options, u"day", dayValues, {});
++  if (dayRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return dayRes.getStatus();
++  day_ = *dayRes;
++
++  static const std::vector<std::u16string> dayPeriodValues = {
++      u"narrow", u"short", u"long"};
++  auto dayPeriodRes =
++      getOptionString(runtime, reader, options, u"dayPeriod", dayPeriodValues, {});
++  if (dayPeriodRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return dayPeriodRes.getStatus();
++  dayPeriod_ = *dayPeriodRes;
++
++  static const std::vector<std::u16string> hourValues = {
++      u"2-digit", u"numeric"};
++  auto hourRes = getOptionString(runtime, reader, options, u"hour", hourValues, {});
++  if (hourRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return hourRes.getStatus();
++  hour_ = *hourRes;
++
++  static const std::vector<std::u16string> minuteValues = {
++      u"2-digit", u"numeric"};
++  auto minuteRes =
++      getOptionString(runtime, reader, options, u"minute", minuteValues, {});
++  if (minuteRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return minuteRes.getStatus();
++  minute_ = *minuteRes;
++
++  static const std::vector<std::u16string> secondValues = {
++      u"2-digit", u"numeric"};
++  auto secondRes =
++      getOptionString(runtime, reader, options, u"second", secondValues, {});
++  if (secondRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return secondRes.getStatus();
++  second_ = *secondRes;
++
++  // fractionalSecondDigits (integer 1-3)
++  auto fsdRes = getNumberOption(
++      runtime, reader, options, u"fractionalSecondDigits", 1, 3, {});
++  if (LLVM_UNLIKELY(fsdRes == vm::ExecutionStatus::EXCEPTION))
++    return fsdRes.getStatus();
++  fractionalSecondDigits_ = fsdRes.getValue().value_or(0);
++
++  static const std::vector<std::u16string> timeZoneNameValues = {
++      u"short", u"long", u"shortOffset", u"longOffset",
++      u"shortGeneric", u"longGeneric"};
++  auto timeZoneNameRes = getOptionString(
++      runtime, reader, options, u"timeZoneName", timeZoneNameValues, {});
++  if (timeZoneNameRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
++    return timeZoneNameRes.getStatus();
++  timeZoneName_ = *timeZoneNameRes;
++
+   // formatMatcher
+   static const std::vector<std::u16string> validFormatMatchers = {
+       u"basic", u"best fit"};
+   auto fmRes = getOptionString(
+-      runtime, options, u"formatMatcher", validFormatMatchers, u"best fit");
++      runtime, reader, options, u"formatMatcher", validFormatMatchers, u"best fit");
+   if (LLVM_UNLIKELY(fmRes == vm::ExecutionStatus::EXCEPTION))
+     return fmRes.getStatus();
+-
+-  // fractionalSecondDigits (integer 1-3)
+-  auto fsdRes = getNumberOption(
+-      runtime, options, u"fractionalSecondDigits", 1, 3, {});
+-  if (LLVM_UNLIKELY(fsdRes == vm::ExecutionStatus::EXCEPTION))
+-    return fsdRes.getStatus();
+-  fractionalSecondDigits_ = fsdRes.getValue().value_or(0);
+ 
+   static const std::vector<std::u16string> dateStyles = {
+       u"full", u"long", u"medium", u"short"};
+   auto dateStyleRes =
+-      getOptionString(runtime, options, u"dateStyle", dateStyles, {});
++      getOptionString(runtime, reader, options, u"dateStyle", dateStyles, {});
+   if (dateStyleRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+     return dateStyleRes.getStatus();
+   dateStyle_ = dateStyleRes.getValue();
+@@ -1221,86 +1319,29 @@
+   static const std::vector<std::u16string> timeStyles = {
+       u"full", u"long", u"medium", u"short"};
+   auto timeStyleRes =
+-      getOptionString(runtime, options, u"timeStyle", timeStyles, {});
++      getOptionString(runtime, reader, options, u"timeStyle", timeStyles, {});
+   if (timeStyleRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+     return timeStyleRes.getStatus();
+   timeStyle_ = timeStyleRes.getValue();
+ 
+-  static const std::vector<std::u16string> weekdayValues = {
+-      u"narrow", u"short", u"long"};
+-  auto weekdayRes =
+-      getOptionString(runtime, options, u"weekday", weekdayValues, {});
+-  if (weekdayRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return weekdayRes.getStatus();
+-  weekday_ = weekdayRes.getValue();
+-
+-  static const std::vector<std::u16string> eraValues = {
+-      u"narrow", u"short", u"long"};
+-  auto eraRes = getOptionString(runtime, options, u"era", eraValues, {});
+-  if (eraRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return eraRes.getStatus();
+-  era_ = *eraRes;
+-
+-  static const std::vector<std::u16string> yearValues = {
+-      u"2-digit", u"numeric"};
+-  auto yearRes = getOptionString(runtime, options, u"year", yearValues, {});
+-  if (yearRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return yearRes.getStatus();
+-  year_ = *yearRes;
+-
+-  static const std::vector<std::u16string> monthValues = {
+-      u"2-digit", u"numeric", u"narrow", u"short", u"long"};
+-  auto monthRes = getOptionString(runtime, options, u"month", monthValues, {});
+-  if (monthRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return monthRes.getStatus();
+-  month_ = *monthRes;
+-
+-  static const std::vector<std::u16string> dayValues = {
+-      u"2-digit", u"numeric"};
+-  auto dayRes = getOptionString(runtime, options, u"day", dayValues, {});
+-  if (dayRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return dayRes.getStatus();
+-  day_ = *dayRes;
+-
+-  static const std::vector<std::u16string> dayPeriodValues = {
+-      u"narrow", u"short", u"long"};
+-  auto dayPeriodRes =
+-      getOptionString(runtime, options, u"dayPeriod", dayPeriodValues, {});
+-  if (dayPeriodRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return dayPeriodRes.getStatus();
+-  dayPeriod_ = *dayPeriodRes;
+-
+-  static const std::vector<std::u16string> hourValues = {
+-      u"2-digit", u"numeric"};
+-  auto hourRes = getOptionString(runtime, options, u"hour", hourValues, {});
+-  if (hourRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return hourRes.getStatus();
+-  hour_ = *hourRes;
+-
+-  static const std::vector<std::u16string> minuteValues = {
+-      u"2-digit", u"numeric"};
+-  auto minuteRes =
+-      getOptionString(runtime, options, u"minute", minuteValues, {});
+-  if (minuteRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return minuteRes.getStatus();
+-  minute_ = *minuteRes;
+-
+-  static const std::vector<std::u16string> secondValues = {
+-      u"2-digit", u"numeric"};
+-  auto secondRes =
+-      getOptionString(runtime, options, u"second", secondValues, {});
+-  if (secondRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return secondRes.getStatus();
+-  second_ = *secondRes;
+-
+-  static const std::vector<std::u16string> timeZoneNameValues = {
+-      u"short", u"long", u"shortOffset", u"longOffset",
+-      u"shortGeneric", u"longGeneric"};
+-  auto timeZoneNameRes = getOptionString(
+-      runtime, options, u"timeZoneName", timeZoneNameValues, {});
+-  if (timeZoneNameRes.getStatus() == vm::ExecutionStatus::EXCEPTION)
+-    return timeZoneNameRes.getStatus();
+-  timeZoneName_ = *timeZoneNameRes;
++  if ((!dateStyle_.empty() || !timeStyle_.empty()) &&
++      (!weekday_.empty() || !era_.empty() || !year_.empty() || !month_.empty() ||
++       !day_.empty() || !dayPeriod_.empty() || !hour_.empty() || !minute_.empty() ||
++       !second_.empty() || fractionalSecondDigits_ || !timeZoneName_.empty()))
++    return runtime.raiseTypeError("Date/time styles cannot be combined with components");
++  auto defaulted = toDateTimeOptions(runtime, options, required, defaults);
++  if (defaulted == vm::ExecutionStatus::EXCEPTION) return defaulted.getStatus();
++  for (const auto &field : {u"year", u"month", u"day", u"hour", u"minute", u"second"}) {
++    auto value = defaulted->find(field);
++    if (value != defaulted->end()) {
++      if (field == std::u16string_view(u"year")) year_ = value->second.getString();
++      else if (field == std::u16string_view(u"month")) month_ = value->second.getString();
++      else if (field == std::u16string_view(u"day")) day_ = value->second.getString();
++      else if (field == std::u16string_view(u"hour")) hour_ = value->second.getString();
++      else if (field == std::u16string_view(u"minute")) minute_ = value->second.getString();
++      else second_ = value->second.getString();
++    }
++  }
+ 
+   if (hour_.empty() && timeStyle_.empty()) {
+     hourCycle_ = u"";
+@@ -1417,11 +1458,21 @@
+ vm::CallResult<std::unique_ptr<DateTimeFormat>> DateTimeFormat::create(
+     vm::Runtime &runtime,
+     const std::vector<std::u16string> &locales,
+-    const Options &inputOptions) noexcept {
++    const Options &options) noexcept {
++  MapOptionReader reader(options);
++  return create(runtime, locales, reader);
++}
++
++vm::CallResult<std::unique_ptr<DateTimeFormat>> DateTimeFormat::create(
++    vm::Runtime &runtime,
++    const std::vector<std::u16string> &locales,
++    OptionReader &reader,
++    std::u16string_view required,
++    std::u16string_view defaults) noexcept {
+   const hermes_icu_vtable *icu = getIcuVtableForRuntime(runtime);
+   auto instance = std::make_unique<DateTimeFormatIcuProvider>();
+   if (LLVM_UNLIKELY(
+-          instance->initialize(runtime, icu, locales, inputOptions) ==
++          instance->initialize(runtime, icu, locales, reader, required, defaults) ==
+           vm::ExecutionStatus::EXCEPTION)) {
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+@@ -1678,7 +1729,7 @@
+       vm::Runtime &runtime,
+       const hermes_icu_vtable *icu,
+       const std::vector<std::u16string> &locales,
+-      const Options &options) noexcept;
++      OptionReader &reader) noexcept;
+ 
+   Options resolvedOptions() noexcept;
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
+@@ -1724,15 +1775,16 @@
+     vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const std::vector<std::u16string> &locales,
+-    const Options &options) noexcept {
++    OptionReader &reader) noexcept {
+   icu_ = icu;
++  Options options;
+   if (!icu_) {
+     (void)runtime.raiseRangeError("NumberFormat requires ICU support");
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+ 
+   static constexpr std::u16string_view keys[]{u"nu"};
+-  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, keys);
++  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, reader, keys);
+   if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+   locale_ = resolved->getCanonicalizedLocaleId();
+   auto numberingOption = resolved->resolvedOpts.find(u"nu");
+@@ -1743,13 +1795,13 @@
+   static const std::vector<std::u16string> validStyles = {
+       u"decimal", u"percent", u"currency", u"unit"};
+   auto styleRes =
+-      getOptionString(runtime, options, u"style", validStyles, u"decimal");
++      getOptionString(runtime, reader, options, u"style", validStyles, u"decimal");
+   if (LLVM_UNLIKELY(styleRes == vm::ExecutionStatus::EXCEPTION))
+     return styleRes.getStatus();
+   style_ = styleRes.getValue();
+ 
+   // currency (ECMA-402 steps 10-12)
+-  auto currencyRes = getOptionString(runtime, options, u"currency", {}, {});
++  auto currencyRes = getOptionString(runtime, reader, options, u"currency", {}, {});
+   if (LLVM_UNLIKELY(currencyRes == vm::ExecutionStatus::EXCEPTION))
+     return currencyRes.getStatus();
+   currency_ = currencyRes.getValue();
+@@ -1779,13 +1831,22 @@
+   static const std::vector<std::u16string> validCurrencyDisplays = {
+       u"code", u"symbol", u"narrowSymbol", u"name"};
+   auto currencyDisplayRes = getOptionString(
+-      runtime, options, u"currencyDisplay", validCurrencyDisplays, u"symbol");
++      runtime, reader, options, u"currencyDisplay", validCurrencyDisplays, u"symbol");
+   if (LLVM_UNLIKELY(currencyDisplayRes == vm::ExecutionStatus::EXCEPTION))
+     return currencyDisplayRes.getStatus();
+   currencyDisplay_ = currencyDisplayRes.getValue();
+ 
++  // currencySign
++  static const std::vector<std::u16string> validCurrencySigns = {
++      u"standard", u"accounting"};
++  auto csRes = getOptionString(
++      runtime, reader, options, u"currencySign", validCurrencySigns, u"standard");
++  if (LLVM_UNLIKELY(csRes == vm::ExecutionStatus::EXCEPTION))
++    return csRes.getStatus();
++  currencySign_ = csRes.getValue();
++
+   // unit
+-  auto unitRes = getOptionString(runtime, options, u"unit", {}, {});
++  auto unitRes = getOptionString(runtime, reader, options, u"unit", {}, {});
+   if (LLVM_UNLIKELY(unitRes == vm::ExecutionStatus::EXCEPTION))
+     return unitRes.getStatus();
+   unit_ = unitRes.getValue();
+@@ -1801,7 +1862,7 @@
+   static const std::vector<std::u16string> validUnitDisplays = {
+       u"short", u"narrow", u"long"};
+   auto udRes = getOptionString(
+-      runtime, options, u"unitDisplay", validUnitDisplays, u"short");
++      runtime, reader, options, u"unitDisplay", validUnitDisplays, u"short");
+   if (LLVM_UNLIKELY(udRes == vm::ExecutionStatus::EXCEPTION))
+     return udRes.getStatus();
+   unitDisplay_ = udRes.getValue();
+@@ -1810,37 +1871,10 @@
+   static const std::vector<std::u16string> validNotations = {
+       u"standard", u"scientific", u"engineering", u"compact"};
+   auto notationRes = getOptionString(
+-      runtime, options, u"notation", validNotations, u"standard");
++      runtime, reader, options, u"notation", validNotations, u"standard");
+   if (LLVM_UNLIKELY(notationRes == vm::ExecutionStatus::EXCEPTION))
+     return notationRes.getStatus();
+   notation_ = notationRes.getValue();
+-
+-  // signDisplay
+-  static const std::vector<std::u16string> validSignDisplays = {
+-      u"auto", u"never", u"always", u"exceptZero", u"negative"};
+-  auto signRes = getOptionString(
+-      runtime, options, u"signDisplay", validSignDisplays, u"auto");
+-  if (LLVM_UNLIKELY(signRes == vm::ExecutionStatus::EXCEPTION))
+-    return signRes.getStatus();
+-  signDisplay_ = signRes.getValue();
+-
+-  // compactDisplay
+-  static const std::vector<std::u16string> validCompactDisplays = {
+-      u"short", u"long"};
+-  auto compactRes = getOptionString(
+-      runtime, options, u"compactDisplay", validCompactDisplays, u"short");
+-  if (LLVM_UNLIKELY(compactRes == vm::ExecutionStatus::EXCEPTION))
+-    return compactRes.getStatus();
+-  compactDisplay_ = compactRes.getValue();
+-
+-  // currencySign
+-  static const std::vector<std::u16string> validCurrencySigns = {
+-      u"standard", u"accounting"};
+-  auto csRes = getOptionString(
+-      runtime, options, u"currencySign", validCurrencySigns, u"standard");
+-  if (LLVM_UNLIKELY(csRes == vm::ExecutionStatus::EXCEPTION))
+-    return csRes.getStatus();
+-  currencySign_ = csRes.getValue();
+ 
+   std::string localeICU = convertBCP47toICULocale(icu_, locale_);
+   // Unsupported numbering systems fall back to the locale's default. An
+@@ -1863,23 +1897,17 @@
+   numberingSystem_ = toUTF16ASCII(icu_->unumsys_getName(numbering));
+   icu_->unumsys_close(numbering);
+ 
+-  auto priority = getOptionString(runtime, options, u"roundingPriority",
+-      {u"auto", u"morePrecision", u"lessPrecision"}, u"auto");
+-  if (priority == vm::ExecutionStatus::EXCEPTION)
+-    return priority.getStatus();
+-  roundingPriority_ = *priority;
+-  auto rounding = getOptionString(runtime, options, u"roundingMode",
+-      {u"ceil", u"floor", u"expand", u"trunc", u"halfCeil", u"halfFloor",
+-       u"halfExpand", u"halfTrunc", u"halfEven"}, u"halfExpand");
+-  if (rounding == vm::ExecutionStatus::EXCEPTION)
+-    return rounding.getStatus();
+-  roundingMode_ = *rounding;
+-  auto trailing = getOptionString(runtime, options, u"trailingZeroDisplay",
+-      {u"auto", u"stripIfInteger"}, u"auto");
+-  if (trailing == vm::ExecutionStatus::EXCEPTION)
+-    return trailing.getStatus();
+-  trailingZeroDisplay_ = *trailing;
+-  auto increment = getNumberOption(runtime, options, u"roundingIncrement", 1, 5000, 1);
++  auto minInt = getNumberOption(runtime, reader, options, u"minimumIntegerDigits", 1, 21, 1);
++  if (minInt == vm::ExecutionStatus::EXCEPTION)
++    return minInt.getStatus();
++  minimumIntegerDigits_ = minInt->value();
++
++  for (const auto *name : {u"minimumFractionDigits", u"maximumFractionDigits",
++                           u"minimumSignificantDigits", u"maximumSignificantDigits"}) {
++    if (readOption(runtime, reader, options, name, Option::Kind::DeferredNumber) ==
++        vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
++  }
++  auto increment = getNumberOption(runtime, reader, options, u"roundingIncrement", 1, 5000, 1);
+   if (increment == vm::ExecutionStatus::EXCEPTION)
+     return increment.getStatus();
+   roundingIncrement_ = increment->value();
+@@ -1888,6 +1916,83 @@
+   if (!increments.count(roundingIncrement_))
+     return runtime.raiseRangeError("Invalid roundingIncrement");
+ 
++  auto rounding = getOptionString(runtime, reader, options, u"roundingMode",
++      {u"ceil", u"floor", u"expand", u"trunc", u"halfCeil", u"halfFloor",
++       u"halfExpand", u"halfTrunc", u"halfEven"}, u"halfExpand");
++  if (rounding == vm::ExecutionStatus::EXCEPTION)
++    return rounding.getStatus();
++  roundingMode_ = *rounding;
++  auto priority = getOptionString(runtime, reader, options, u"roundingPriority",
++      {u"auto", u"morePrecision", u"lessPrecision"}, u"auto");
++  if (priority == vm::ExecutionStatus::EXCEPTION)
++    return priority.getStatus();
++  roundingPriority_ = *priority;
++  auto trailing = getOptionString(runtime, reader, options, u"trailingZeroDisplay",
++      {u"auto", u"stripIfInteger"}, u"auto");
++  if (trailing == vm::ExecutionStatus::EXCEPTION)
++    return trailing.getStatus();
++  trailingZeroDisplay_ = *trailing;
++  int defaultMinFD = 0;
++  int defaultMaxFD = style_ == u"percent" ? 0 : 3;
++  if (style_ == u"currency") {
++    for (auto &character : currency_)
++      if (character >= u'a' && character <= u'z')
++        character -= u'a' - u'A';
++    status = U_ZERO_ERROR;
++    defaultMinFD = defaultMaxFD = icu_->ucurr_getDefaultFractionDigits(
++        reinterpret_cast<const UChar *>(currency_.c_str()), &status);
++    if (U_FAILURE(status))
++      return runtime.raiseError("ICU currency precision resolution failed");
++  }
++  if (roundingIncrement_ != 1)
++    defaultMaxFD = defaultMinFD;
++  const bool hasSD = options.count(u"minimumSignificantDigits") || options.count(u"maximumSignificantDigits");
++  const bool hasFD = options.count(u"minimumFractionDigits") || options.count(u"maximumFractionDigits");
++  bool needSD = roundingPriority_ != u"auto" || hasSD;
++  bool needFD = roundingPriority_ != u"auto" || (!hasSD && (hasFD || notation_ != u"compact"));
++  if (needSD) {
++    auto minimum = getNumberOption(runtime, options, u"minimumSignificantDigits", 1, 21, 1);
++    if (minimum == vm::ExecutionStatus::EXCEPTION) return minimum.getStatus();
++    minimumSignificantDigits_ = minimum->value();
++    auto maximum = getNumberOption(runtime, options, u"maximumSignificantDigits", minimumSignificantDigits_, 21, 21);
++    if (maximum == vm::ExecutionStatus::EXCEPTION) return maximum.getStatus();
++    maximumSignificantDigits_ = maximum->value();
++  }
++  if (needFD) {
++    auto minimum = getNumberOption(runtime, options, u"minimumFractionDigits", 0, 100, {});
++    if (minimum == vm::ExecutionStatus::EXCEPTION) return minimum.getStatus();
++    auto maximum = getNumberOption(runtime, options, u"maximumFractionDigits", 0, 100, {});
++    if (maximum == vm::ExecutionStatus::EXCEPTION) return maximum.getStatus();
++    minimumFractionDigits_ = minimum->value_or(std::min(defaultMinFD, maximum->value_or(defaultMaxFD)));
++    maximumFractionDigits_ = maximum->value_or(std::max(defaultMaxFD, minimumFractionDigits_));
++    if (minimumFractionDigits_ > maximumFractionDigits_)
++      return runtime.raiseRangeError("Invalid fraction digit range");
++  }
++  if (!needFD && !needSD) {
++    minimumFractionDigits_ = maximumFractionDigits_ = 0;
++    minimumSignificantDigits_ = 1;
++    maximumSignificantDigits_ = 2;
++    roundingPriority_ = u"morePrecision";
++    needFD = needSD = true;
++  }
++  if (roundingIncrement_ != 1) {
++    if (needSD || roundingPriority_ != u"auto")
++      return runtime.raiseTypeError("roundingIncrement requires fraction precision");
++    if (minimumFractionDigits_ != maximumFractionDigits_)
++      return runtime.raiseRangeError("roundingIncrement requires equal fraction bounds");
++  }
++
++  // compactDisplay
++  static const std::vector<std::u16string> validCompactDisplays = {
++      u"short", u"long"};
++  auto compactRes = getOptionString(
++      runtime, reader, options, u"compactDisplay", validCompactDisplays, u"short");
++  if (LLVM_UNLIKELY(compactRes == vm::ExecutionStatus::EXCEPTION))
++    return compactRes.getStatus();
++  compactDisplay_ = compactRes.getValue();
++
++  if (readOption(runtime, reader, options, u"useGrouping", Option::Kind::BoolOrString) ==
++      vm::ExecutionStatus::EXCEPTION) return vm::ExecutionStatus::EXCEPTION;
+   useGrouping_ = notation_ == u"compact" ? u"min2" : u"auto";
+   auto grouping = options.find(u"useGrouping");
+   if (grouping != options.end()) {
+@@ -1902,68 +2007,14 @@
+     }
+   }
+ 
+-  auto minInt = getNumberOption(runtime, options, u"minimumIntegerDigits", 1, 21, 1);
+-  if (minInt == vm::ExecutionStatus::EXCEPTION)
+-    return minInt.getStatus();
+-  minimumIntegerDigits_ = minInt->value();
+-
+-  int defaultMinFD = 0;
+-  int defaultMaxFD = style_ == u"percent" ? 0 : 3;
+-  if (style_ == u"currency") {
+-    for (auto &character : currency_)
+-      if (character >= u'a' && character <= u'z')
+-        character -= u'a' - u'A';
+-    status = U_ZERO_ERROR;
+-    defaultMinFD = defaultMaxFD = icu_->ucurr_getDefaultFractionDigits(
+-        reinterpret_cast<const UChar *>(currency_.c_str()), &status);
+-    if (U_FAILURE(status))
+-      return runtime.raiseError("ICU currency precision resolution failed");
+-  }
+-  if (roundingIncrement_ != 1)
+-    defaultMaxFD = defaultMinFD;
+-  auto minFD = getNumberOption(runtime, options, u"minimumFractionDigits", 0, 100, {});
+-  if (minFD == vm::ExecutionStatus::EXCEPTION)
+-    return minFD.getStatus();
+-  auto maxFD = getNumberOption(runtime, options, u"maximumFractionDigits", 0, 100, {});
+-  if (maxFD == vm::ExecutionStatus::EXCEPTION)
+-    return maxFD.getStatus();
+-  auto minSD = getNumberOption(runtime, options, u"minimumSignificantDigits", 1, 21, {});
+-  if (minSD == vm::ExecutionStatus::EXCEPTION)
+-    return minSD.getStatus();
+-  auto maxSD = getNumberOption(runtime, options, u"maximumSignificantDigits", 1, 21, {});
+-  if (maxSD == vm::ExecutionStatus::EXCEPTION)
+-    return maxSD.getStatus();
+-  bool hasSD = minSD->has_value() || maxSD->has_value();
+-  bool hasFD = minFD->has_value() || maxFD->has_value();
+-  bool needSD = roundingPriority_ != u"auto" || hasSD;
+-  bool needFD = roundingPriority_ != u"auto" ||
+-      (!hasSD && (hasFD || notation_ != u"compact"));
+-  if (needSD) {
+-    minimumSignificantDigits_ = minSD->value_or(1);
+-    maximumSignificantDigits_ = maxSD->value_or(21);
+-    if (minimumSignificantDigits_ > maximumSignificantDigits_)
+-      return runtime.raiseRangeError("Invalid significant digit range");
+-  }
+-  if (needFD) {
+-    minimumFractionDigits_ = minFD->value_or(
+-        std::min(defaultMinFD, static_cast<int>(maxFD->value_or(defaultMaxFD))));
+-    maximumFractionDigits_ = maxFD->value_or(std::max(defaultMaxFD, minimumFractionDigits_));
+-    if (minimumFractionDigits_ > maximumFractionDigits_)
+-      return runtime.raiseRangeError("Invalid fraction digit range");
+-  }
+-  if (!needFD && !needSD) {
+-    minimumFractionDigits_ = maximumFractionDigits_ = 0;
+-    minimumSignificantDigits_ = 1;
+-    maximumSignificantDigits_ = 2;
+-    roundingPriority_ = u"morePrecision";
+-    needFD = needSD = true;
+-  }
+-  if (roundingIncrement_ != 1) {
+-    if (needSD || roundingPriority_ != u"auto")
+-      return runtime.raiseTypeError("roundingIncrement requires fraction precision");
+-    if (minimumFractionDigits_ != maximumFractionDigits_)
+-      return runtime.raiseRangeError("roundingIncrement requires equal fraction bounds");
+-  }
++  // signDisplay
++  static const std::vector<std::u16string> validSignDisplays = {
++      u"auto", u"never", u"always", u"exceptZero", u"negative"};
++  auto signRes = getOptionString(
++      runtime, reader, options, u"signDisplay", validSignDisplays, u"auto");
++  if (LLVM_UNLIKELY(signRes == vm::ExecutionStatus::EXCEPTION))
++    return signRes.getStatus();
++  signDisplay_ = signRes.getValue();
+ 
+   std::u16string skeleton;
+   if (style_ == u"currency") {
+@@ -2224,10 +2275,18 @@
+     vm::Runtime &runtime,
+     const std::vector<std::u16string> &locales,
+     const Options &options) noexcept {
++  MapOptionReader reader(options);
++  return create(runtime, locales, reader);
++}
++
++vm::CallResult<std::unique_ptr<NumberFormat>> NumberFormat::create(
++    vm::Runtime &runtime,
++    const std::vector<std::u16string> &locales,
++    OptionReader &reader) noexcept {
+   const hermes_icu_vtable *icu = getIcuVtableForRuntime(runtime);
+   auto instance = std::make_unique<NumberFormatIcuProvider>();
+   if (LLVM_UNLIKELY(
+-          instance->initialize(runtime, icu, locales, options) ==
++          instance->initialize(runtime, icu, locales, reader) ==
+           vm::ExecutionStatus::EXCEPTION)) {
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+--- a/lib/VM/JSLib/BigInt.cpp
++++ b/lib/VM/JSLib/BigInt.cpp
+@@ -18,6 +18,10 @@
+ namespace hermes {
+ namespace vm {
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++CallResult<HermesValue> intlBigIntPrototypeToLocaleString(Runtime &runtime);
++#endif
++
+ void createBigIntConstructor(Runtime &runtime) {
+   Handle<JSObject> bigintPrototype{runtime.bigintPrototype};
+ 
+@@ -117,6 +121,9 @@
+ CallResult<HermesValue> bigintPrototypeToLocaleString(
+     void *ctx,
+     Runtime &runtime) {
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  return intlBigIntPrototypeToLocaleString(runtime);
++#else
+   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+   auto bigint = thisBigIntValue(runtime, args.getThisHandle());
+   if (LLVM_UNLIKELY(bigint == ExecutionStatus::EXCEPTION)) {
+@@ -137,6 +144,7 @@
+   }
+ 
+   return res->getHermesValue();
++#endif
+ }
+ 
+ CallResult<HermesValue> bigintPrototypeToString(void *, Runtime &runtime) {
+--- a/lib/VM/JSLib/Intl.cpp
++++ b/lib/VM/JSLib/Intl.cpp
+@@ -298,6 +298,52 @@
+ CallResult<std::vector<std::u16string>> normalizeLocales(
+     Runtime &runtime,
+     Handle<> locales) {
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  if (locales->isUndefined()) return std::vector<std::u16string>{};
++  if (locales->isString()) {
++    auto view = StringPrimitive::createStringView(runtime, Handle<StringPrimitive>::vmcast(locales));
++    return platform_intl::getCanonicalLocales(runtime, {std::u16string(view.begin(), view.end())});
++  }
++  struct : Locals {
++    PinnedValue<JSObject> object;
++    PinnedValue<> index;
++    PinnedValue<> value;
++    PinnedValue<StringPrimitive> string;
++  } lv;
++  LocalsRAII roots(runtime, &lv);
++  auto object = toObject(runtime, locales);
++  if (object == ExecutionStatus::EXCEPTION) return object.getStatus();
++  lv.object.castAndSetHermesValue<JSObject>(*object);
++  auto length = getArrayLikeLength_RJS(lv.object, runtime);
++  if (length == ExecutionStatus::EXCEPTION) return length.getStatus();
++  std::vector<std::u16string> result;
++  GCScopeMarkerRAII marker(runtime);
++  for (uint64_t index = 0; index < *length; ++index) {
++    marker.flush();
++    lv.index = HermesValue::encodeTrustedNumberValue(index);
++    auto exists = JSObject::hasComputed(lv.object, runtime, lv.index);
++    if (exists == ExecutionStatus::EXCEPTION) return exists.getStatus();
++    if (!*exists) continue;
++    auto value = JSObject::getComputed_RJS(lv.object, runtime, lv.index);
++    if (value == ExecutionStatus::EXCEPTION) return value.getStatus();
++    lv.value = std::move(*value);
++    if (!lv.value->isString() && !lv.value->isObject())
++      return runtime.raiseTypeError("Locale must be a string or object");
++    auto string = toString_RJS(runtime, lv.value);
++    if (string == ExecutionStatus::EXCEPTION) return string.getStatus();
++    lv.string = std::move(*string);
++    const auto view = StringPrimitive::createStringView(runtime, lv.string);
++    // Canonicalize this element before reading the next one: validation and
++    // duplicate removal are observable when the input contains getters/proxies.
++    auto canonical = platform_intl::getCanonicalLocales(runtime,
++        {std::u16string(view.begin(), view.end())});
++    if (canonical == ExecutionStatus::EXCEPTION) return canonical.getStatus();
++    assert(canonical->size() == 1);
++    if (std::find(result.begin(), result.end(), canonical->front()) == result.end())
++      result.push_back(std::move(canonical->front()));
++  }
++  return result;
++#else
+   std::vector<std::u16string> ret;
+ 
+   if (locales->isUndefined()) {
+@@ -355,6 +401,7 @@
+   }
+ 
+   return std::move(ret);
++#endif
+ }
+ 
+ constexpr int kDateRequired = 1 << 0;
+@@ -527,6 +574,64 @@
+   return std::move(ret);
+ }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++// Deferred digit options must remain rooted until the platform initializer
++// decides which precision family is used and performs the required conversions.
++class JSIntlOptionReader final : public platform_intl::OptionReader {
++ public:
++  explicit JSIntlOptionReader(Runtime &runtime)
++      : scope_(runtime), options_(runtime) {}
++
++  ExecutionStatus initialize(Runtime &runtime, Handle<> input) {
++    if (input->isUndefined()) return ExecutionStatus::RETURNED;
++    auto boxed = toObject(runtime, input);
++    if (boxed == ExecutionStatus::EXCEPTION) return boxed.getStatus();
++    options_.castAndSetHermesValue<JSObject>(*boxed);
++    return ExecutionStatus::RETURNED;
++  }
++
++  CallResult<std::optional<platform_intl::Option>> read(
++      Runtime &runtime, const std::u16string &name,
++      platform_intl::Option::Kind kind) override {
++    if (!options_) return std::optional<platform_intl::Option>{};
++    struct : Locals {
++      PinnedValue<> key;
++      PinnedValue<> value;
++      PinnedValue<StringPrimitive> string;
++    } lv;
++    LocalsRAII roots(runtime, &lv);
++    auto key = StringPrimitive::createEfficient(runtime, createUTF16Ref(name.c_str()));
++    if (key == ExecutionStatus::EXCEPTION) return key.getStatus();
++    lv.key = *key;
++    auto value = JSObject::getComputed_RJS(options_, runtime, lv.key);
++    if (value == ExecutionStatus::EXCEPTION) return value.getStatus();
++    if ((*value)->isUndefined()) return std::optional<platform_intl::Option>{};
++    lv.value = std::move(*value);
++    using Option = platform_intl::Option;
++    if (kind == Option::Kind::DeferredNumber)
++      return std::optional<Option>(Option(runtime.makeHandle(lv.value.getHermesValue())));
++    if (kind == Option::Kind::Bool ||
++        (kind == Option::Kind::BoolOrString &&
++         (lv.value->isBool() || !toBoolean(lv.value.getHermesValue()))))
++      return std::optional<Option>(Option(toBoolean(lv.value.getHermesValue())));
++    if (kind == Option::Kind::Number) {
++      auto number = toNumber_RJS(runtime, lv.value);
++      if (number == ExecutionStatus::EXCEPTION) return number.getStatus();
++      return std::optional<Option>(Option(number->getNumber()));
++    }
++    assert(kind == Option::Kind::String || kind == Option::Kind::BoolOrString);
++    auto string = toString_RJS(runtime, lv.value);
++    if (string == ExecutionStatus::EXCEPTION) return string.getStatus();
++    lv.string = std::move(*string);
++    const auto view = StringPrimitive::createStringView(runtime, lv.string);
++    return std::optional<Option>(Option(std::u16string(view.begin(), view.end())));
++  }
++ private:
++  GCScope scope_;
++  MutableHandle<JSObject> options_;
++};
++#endif
++
+ template <typename T>
+ ExecutionStatus checkOptions(Runtime &runtime, const platform_intl::Options &) {
+   return ExecutionStatus::RETURNED;
+@@ -595,32 +700,6 @@
+     Handle<NativeConstructor> serviceConstructor,
+     Handle<JSObject> servicePrototype,
+     unsigned int additionalSlots) {
+-  CallResult<std::vector<std::u16string>> localesRes =
+-      normalizeLocales(runtime, args.getArgHandle(0));
+-  if (LLVM_UNLIKELY(localesRes == ExecutionStatus::EXCEPTION)) {
+-    return ExecutionStatus::EXCEPTION;
+-  }
+-
+-  CallResult<platform_intl::Options> optionsRes =
+-      normalizeOptions(runtime, args.getArgHandle(1), optionData);
+-  if (LLVM_UNLIKELY(optionsRes == ExecutionStatus::EXCEPTION)) {
+-    return ExecutionStatus::EXCEPTION;
+-  }
+-
+-  // Service specific checks.
+-  if (LLVM_UNLIKELY(
+-          checkOptions<T>(runtime, *optionsRes) ==
+-          ExecutionStatus::EXCEPTION)) {
+-    return ExecutionStatus::EXCEPTION;
+-  }
+-
+-  CallResult<std::unique_ptr<T>> nativeRes =
+-      T::create(runtime, *localesRes, *optionsRes);
+-  if (LLVM_UNLIKELY(nativeRes == ExecutionStatus::EXCEPTION)) {
+-    return ExecutionStatus::EXCEPTION;
+-  }
+-  std::unique_ptr<T> native = std::move(*nativeRes);
+-
+   struct : public Locals {
+     PinnedValue<JSObject> selfParent;
+     PinnedValue<DecoratedObject> self;
+@@ -643,8 +722,45 @@
+     }
+     lv.selfParent = std::move(*thisParentRes);
+   }
++  CallResult<std::vector<std::u16string>> localesRes =
++      normalizeLocales(runtime, args.getArgHandle(0));
++  if (LLVM_UNLIKELY(localesRes == ExecutionStatus::EXCEPTION)) {
++    return ExecutionStatus::EXCEPTION;
++  }
++
++  auto createNative = [&]() -> CallResult<std::unique_ptr<T>> {
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    if constexpr (std::is_same<T, platform_intl::DateTimeFormat>::value ||
++                  std::is_same<T, platform_intl::NumberFormat>::value) {
++      JSIntlOptionReader reader(runtime);
++      if (reader.initialize(runtime, args.getArgHandle(1)) == ExecutionStatus::EXCEPTION)
++        return ExecutionStatus::EXCEPTION;
++      return T::create(runtime, *localesRes, reader);
++    }
++#endif
++  CallResult<platform_intl::Options> optionsRes =
++      normalizeOptions(runtime, args.getArgHandle(1), optionData);
++  if (LLVM_UNLIKELY(optionsRes == ExecutionStatus::EXCEPTION)) {
++    return ExecutionStatus::EXCEPTION;
++  }
++
++  // Service specific checks.
++  if (LLVM_UNLIKELY(
++          checkOptions<T>(runtime, *optionsRes) ==
++          ExecutionStatus::EXCEPTION)) {
++    return ExecutionStatus::EXCEPTION;
++  }
++
++  return T::create(runtime, *localesRes, *optionsRes);
++  };
++  auto nativeRes = createNative();
++  if (LLVM_UNLIKELY(nativeRes == ExecutionStatus::EXCEPTION)) {
++    return ExecutionStatus::EXCEPTION;
++  }
++  std::unique_ptr<T> native = std::move(*nativeRes);
++
+   lv.self = DecoratedObject::create(
+-      runtime, servicePrototype, std::move(native), additionalSlots);
++      runtime, lv.selfParent, std::move(native), additionalSlots);
+ 
+   lv.typeVal =
+       HermesValue::encodeTrustedNumberValue((uint32_t)T::getNativeType());
+@@ -671,12 +787,23 @@
+     return ExecutionStatus::EXCEPTION;
+   }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  JSIntlOptionReader reader(runtime);
++  if (reader.initialize(runtime, args.getArgHandle(1)) == ExecutionStatus::EXCEPTION)
++    return ExecutionStatus::EXCEPTION;
++  platform_intl::Options options;
++  auto matcher = reader.read(runtime, u"localeMatcher", platform_intl::Option::Kind::String);
++  if (matcher == ExecutionStatus::EXCEPTION) return matcher.getStatus();
++  if (*matcher) options.emplace(u"localeMatcher", std::move(**matcher));
++  CallResult<platform_intl::Options> optionsRes(std::move(options));
++#else
+   CallResult<platform_intl::Options> optionsRes = normalizeOptions(
+       runtime, args.getArgHandle(1), kSupportedLocalesOfOptions);
+   if (LLVM_UNLIKELY(optionsRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
+ 
++#endif
+   auto cr = T::supportedLocalesOf(runtime, *localesRes, *optionsRes);
+   if (cr == ExecutionStatus::EXCEPTION) {
+     return ExecutionStatus::EXCEPTION;
+@@ -1655,6 +1782,14 @@
+       return ExecutionStatus::EXCEPTION;
+     }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    JSIntlOptionReader reader(runtime);
++    if (reader.initialize(runtime, args.getArgHandle(1)) == ExecutionStatus::EXCEPTION)
++      return ExecutionStatus::EXCEPTION;
++    const auto required = dtoFlags == kDTODate ? u"date" : dtoFlags == kDTOTime ? u"time" : u"any";
++    const auto defaults = dtoFlags == kDTODate ? u"date" : dtoFlags == kDTOTime ? u"time" : u"all";
++    auto dtfRes = platform_intl::DateTimeFormat::create(runtime, *localesRes, reader, required, defaults);
++#else
+     CallResult<platform_intl::Options> optionsRes =
+         normalizeOptions(runtime, args.getArgHandle(1), kDTFOptions);
+     if (LLVM_UNLIKELY(optionsRes == ExecutionStatus::EXCEPTION)) {
+@@ -1670,6 +1805,7 @@
+     CallResult<std::unique_ptr<platform_intl::DateTimeFormat>> dtfRes =
+         platform_intl::DateTimeFormat::create(
+             runtime, *localesRes, *optionsRes);
++#endif
+     if (LLVM_UNLIKELY(dtfRes == ExecutionStatus::EXCEPTION)) {
+       return ExecutionStatus::EXCEPTION;
+     }
+@@ -1728,6 +1864,37 @@
+   return intlDatePrototypeToSomeLocaleString(runtime, args, date, kDTOTime);
+ }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++namespace {
++CallResult<HermesValue> formatNumericLocaleString(
++    Runtime &runtime, const NativeArgs &args,
++    const platform_intl::NumberFormatValue &value) {
++  auto locales = normalizeLocales(runtime, args.getArgHandle(0));
++  if (locales == ExecutionStatus::EXCEPTION) return locales.getStatus();
++  JSIntlOptionReader reader(runtime);
++  if (reader.initialize(runtime, args.getArgHandle(1)) == ExecutionStatus::EXCEPTION)
++    return ExecutionStatus::EXCEPTION;
++  auto formatter = platform_intl::NumberFormat::create(runtime, *locales, reader);
++  if (formatter == ExecutionStatus::EXCEPTION) return formatter.getStatus();
++  auto formatted = (*formatter)->format(runtime, value);
++  if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*formatted));
++}
++} // namespace
++
++CallResult<HermesValue> intlBigIntPrototypeToLocaleString(Runtime &runtime) {
++  const auto args = runtime.getCurrentFrame().getNativeArgs();
++  auto bigint = thisBigIntValue(runtime, args.getThisHandle());
++  if (bigint == ExecutionStatus::EXCEPTION) return bigint.getStatus();
++  struct : Locals { PinnedValue<> value; } lv;
++  LocalsRAII roots(runtime, &lv);
++  lv.value = *bigint;
++  auto value = toIntlNumberValue(runtime, lv.value);
++  if (value == ExecutionStatus::EXCEPTION) return value.getStatus();
++  return formatNumericLocaleString(runtime, args, *value);
++}
++#endif
++
+ CallResult<HermesValue> intlNumberPrototypeToLocaleString(
+     void *,
+     Runtime &runtime) {
+@@ -1744,6 +1911,9 @@
+     x = numPtr->getPrimitiveNumber();
+   }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  return formatNumericLocaleString(runtime, args, x);
++#else
+   CallResult<std::vector<std::u16string>> localesRes =
+       normalizeLocales(runtime, args.getArgHandle(0));
+   if (LLVM_UNLIKELY(localesRes == ExecutionStatus::EXCEPTION)) {
+@@ -1760,11 +1930,6 @@
+   if (LLVM_UNLIKELY(nfRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
+-#ifdef HERMES_USE_STATIC_INTL_PROVIDER
+-  auto formatted = (*nfRes)->format(runtime, x);
+-  if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
+-  return StringPrimitive::createEfficient(runtime, std::move(*formatted));
+-#else
+   return StringPrimitive::createEfficient(runtime, (*nfRes)->format(x));
+ #endif
+ }

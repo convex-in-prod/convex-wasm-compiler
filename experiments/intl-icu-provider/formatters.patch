@@ -1,0 +1,2254 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -542,6 +542,10 @@
+ endif()
+ if (NOT (ANDROID_LINUX_PERF_PATH STREQUAL ""))
+   add_definitions(-DANDROID_LINUX_PERF_PATH="${ANDROID_LINUX_PERF_PATH}")
++endif()
++
++if (HERMES_USE_STATIC_INTL_PROVIDER)
++  add_definitions(-DHERMES_USE_STATIC_INTL_PROVIDER)
+ endif()
+ 
+ if (HERMES_ENABLE_INTL)
+--- a/include/hermes/Platform/Intl/PlatformIntl.h
++++ b/include/hermes/Platform/Intl/PlatformIntl.h
+@@ -19,13 +19,14 @@
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
++#include <variant>
+ 
+ namespace hermes {
+ namespace platform_intl {
+ 
+ class Option {
+  public:
+-  enum Kind { Bool, Number, String };
++  enum Kind { Bool, Number, String, BoolOrString };
+ 
+   Option(bool b) : kind_(Kind::Bool), num_(b ? 1.0 : 0.0) {}
+   Option(double n) : kind_(Kind::Number), num_(n) {}
+@@ -146,9 +147,18 @@
+       const Options &options) noexcept;
+   Options resolvedOptions() noexcept;
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  vm::CallResult<std::u16string> format(vm::Runtime &runtime, double jsTimeValue) noexcept;
++  vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, double jsTimeValue) noexcept;
++#else
+   std::u16string format(double jsTimeValue) noexcept;
+   std::vector<Part> formatToParts(double jsTimeValue) noexcept;
++#endif
+ };
++
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++using NumberFormatValue = std::variant<double, std::string>;
++#endif
+ 
+ class NumberFormat : public vm::DecoratedObject::Decoration {
+  protected:
+@@ -172,8 +182,13 @@
+       const Options &options) noexcept;
+   Options resolvedOptions() noexcept;
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  vm::CallResult<std::u16string> format(vm::Runtime &runtime, const NumberFormatValue &value) noexcept;
++  vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, const NumberFormatValue &value) noexcept;
++#else
+   std::u16string format(double jsTimeValue) noexcept;
+   std::vector<Part> formatToParts(double jsTimeValue) noexcept;
++#endif
+ };
+ 
+ } // namespace platform_intl
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+@@ -468,9 +468,14 @@
+       return u"era";
+     case kUDAT_YEAR_FIELD:
+     case kUDAT_YEAR_WOY_FIELD:
++    case kUDAT_EXTENDED_YEAR_FIELD:
++      return u"year";
+     case kUDAT_RELATED_YEAR_FIELD:
+-      return u"year";
++      return u"relatedYear";
++    case kUDAT_YEAR_NAME_FIELD:
++      return u"yearName";
+     case kUDAT_MONTH_FIELD:
++    case kUDAT_STANDALONE_MONTH_FIELD:
+       return u"month";
+     case kUDAT_DATE_FIELD:
+       return u"day";
+@@ -486,10 +491,20 @@
+     case kUDAT_FRACTIONAL_SECOND_FIELD:
+       return u"fractionalSecond";
+     case kUDAT_DAY_OF_WEEK_FIELD:
++    case kUDAT_DOW_LOCAL_FIELD:
++    case kUDAT_STANDALONE_DAY_FIELD:
+       return u"weekday";
+     case kUDAT_AM_PM_FIELD:
++    case kUDAT_AM_PM_MIDNIGHT_NOON_FIELD:
++    case kUDAT_FLEXIBLE_DAY_PERIOD_FIELD:
+       return u"dayPeriod";
+     case kUDAT_TIMEZONE_FIELD:
++    case kUDAT_TIMEZONE_RFC_FIELD:
++    case kUDAT_TIMEZONE_GENERIC_FIELD:
++    case kUDAT_TIMEZONE_SPECIAL_FIELD:
++    case kUDAT_TIMEZONE_LOCALIZED_GMT_OFFSET_FIELD:
++    case kUDAT_TIMEZONE_ISO_FIELD:
++    case kUDAT_TIMEZONE_ISO_LOCAL_FIELD:
+       return u"timeZoneName";
+     default:
+       return u"literal";
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
+@@ -31,7 +31,7 @@
+ constexpr int32_t kUDAT_PATTERN = -2;
+ 
+ // UDateTimePatternMatchOptions
+-constexpr int32_t kUDATPG_MATCH_ALL_FIELDS_LENGTH = 0xFFFF;
++constexpr int32_t kUDATPG_MATCH_HOUR_FIELD_LENGTH = 1 << 11;
+ 
+ // UColAttribute values
+ constexpr int32_t UCOL_FRENCH_COLLATION = 0;
+@@ -210,6 +210,19 @@
+ constexpr int32_t kUDAT_HOUR0_FIELD = 16;
+ constexpr int32_t kUDAT_TIMEZONE_FIELD = 17;
+ constexpr int32_t kUDAT_YEAR_WOY_FIELD = 18;
++constexpr int32_t kUDAT_DOW_LOCAL_FIELD = 19;
++constexpr int32_t kUDAT_EXTENDED_YEAR_FIELD = 20;
++constexpr int32_t kUDAT_TIMEZONE_RFC_FIELD = 23;
++constexpr int32_t kUDAT_TIMEZONE_GENERIC_FIELD = 24;
++constexpr int32_t kUDAT_STANDALONE_DAY_FIELD = 25;
++constexpr int32_t kUDAT_STANDALONE_MONTH_FIELD = 26;
++constexpr int32_t kUDAT_TIMEZONE_SPECIAL_FIELD = 29;
++constexpr int32_t kUDAT_YEAR_NAME_FIELD = 30;
++constexpr int32_t kUDAT_TIMEZONE_LOCALIZED_GMT_OFFSET_FIELD = 31;
++constexpr int32_t kUDAT_TIMEZONE_ISO_FIELD = 32;
++constexpr int32_t kUDAT_TIMEZONE_ISO_LOCAL_FIELD = 33;
++constexpr int32_t kUDAT_AM_PM_MIDNIGHT_NOON_FIELD = 35;
++constexpr int32_t kUDAT_FLEXIBLE_DAY_PERIOD_FIELD = 36;
+ constexpr int32_t kUDAT_RELATED_YEAR_FIELD = 34;
+ 
+ // UNumberFormatFields constants (for formatToParts field mapping)
+@@ -224,6 +237,9 @@
+ constexpr int32_t kUNUM_PERCENT_FIELD = 8;
+ constexpr int32_t kUNUM_PERMILL_FIELD = 9;
+ constexpr int32_t kUNUM_SIGN_FIELD = 10;
++constexpr int32_t kUNUM_MEASURE_UNIT_FIELD = 11;
++constexpr int32_t kUNUM_COMPACT_FIELD = 12;
++constexpr int32_t kUNUM_APPROXIMATELY_SIGN_FIELD = 13;
+ 
+ /// Map a UDateFormatField value to the ECMA-402 part type string.
+ /// Returns u"literal" for unknown fields.
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -69,6 +69,19 @@
+     if (loc) {
+       std::string bcp47 = convertICUtoBCP47Locale(icu, loc);
+       s->emplace(toLowerASCII(bcp47), bcp47);
++      // ICU enumerates script-qualified locales. Include their script-less
++      // language/region forms too, matching V8's available-locale construction.
++      auto parsed = ParsedLocaleIdentifier::parse(toUTF16ASCII(bcp47));
++      if (parsed && !parsed->languageIdentifier.scriptSubtag.empty()) {
++        auto shortened = parsed->languageIdentifier.languageSubtag;
++        auto region = parsed->languageIdentifier.regionSubtag;
++        if (!region.empty()) {
++          for (auto &c : region) if (c >= u'a' && c <= u'z') c -= u'a' - u'A';
++          shortened += u"-" + region;
++        }
++        const auto tag = toUTF8ASCII(shortened);
++        s->emplace(toLowerASCII(tag), tag);
++      }
+     }
+   }
+   cache[icu] = s;
+@@ -82,16 +95,9 @@
+     vm::Runtime &runtime,
+     const hermes_icu_vtable *icu) {
+   std::vector<std::u16string> result;
+-  int32_t count = icu->uloc_countAvailable();
+-  for (int32_t i = 0; i < count; i++) {
+-    const char *loc = icu->uloc_getAvailable(i);
+-    if (loc) {
+-      std::string bcp47 = convertICUtoBCP47Locale(icu, loc);
+-      auto conv = UTF8toUTF16(runtime, bcp47);
+-      if (conv != vm::ExecutionStatus::EXCEPTION)
+-        result.push_back(std::move(conv.getValue()));
+-    }
+-  }
++  for (const auto &entry : getAvailableLocales(icu))
++    result.push_back(toUTF16ASCII(entry.second));
++  std::sort(result.begin(), result.end());
+   return result;
+ }
+ 
+@@ -131,6 +137,10 @@
+ std::string bestFitBestAvailableLocale(
+     const hermes_icu_vtable *icu,
+     const std::u16string &localeNoExt) {
++  const auto &available = getAvailableLocales(icu);
++  auto exact = available.find(toLowerASCII(toUTF8ASCII(localeNoExt)));
++  if (exact != available.end()) return exact->second;
++
+   // uloc_openAvailableByType and uloc_acceptLanguage are optional vtable
+   // entries — they may be nullptr when using a limited ICU provider
+   // (e.g. the Windows system icu.dll).
+@@ -494,6 +504,75 @@
+   return result;
+ }
+ 
++vm::CallResult<ResolvedLocaleResult> resolveFormatterLocale(
++    vm::Runtime &runtime,
++    const hermes_icu_vtable *icu,
++    const std::vector<std::u16string> &locales,
++    const Options &options,
++    llvh::ArrayRef<std::u16string_view> keys) {
++  auto requested = parseLocaleList(runtime, icu, locales);
++  if (requested == vm::ExecutionStatus::EXCEPTION) return requested.getStatus();
++  auto matcher = getOptionString(runtime, options, u"localeMatcher",
++      {u"lookup", u"best fit"}, u"best fit");
++  if (matcher == vm::ExecutionStatus::EXCEPTION) return matcher.getStatus();
++  Options opt;
++  opt.emplace(u"localeMatcher", Option(*matcher));
++  for (const auto &key : keys) {
++    const auto name = key == u"nu" ? u"numberingSystem" : key == u"ca" ? u"calendar" : u"hourCycle";
++    auto found = options.find(name);
++    if (found == options.end()) continue;
++    const auto &value = found->second.getString();
++    if (key == u"hc") {
++      if (value != u"h11" && value != u"h12" && value != u"h23" && value != u"h24")
++        return runtime.raiseRangeError("Invalid hourCycle");
++    } else if (!isUnicodeExtensionType(value)) {
++      return runtime.raiseRangeError("Invalid Unicode locale option");
++    }
++    opt.emplace(std::u16string(key), Option(value));
++  }
++  UErrorCode validationStatus = U_ZERO_ERROR;
++  auto supported = [&](std::u16string_view key, std::u16string_view type,
++                       const std::u16string &locale) {
++    if (key == u"hc")
++      return type == u"h11" || type == u"h12" || type == u"h23" || type == u"h24";
++    if (key == u"nu") {
++      const auto name = toUTF8ASCII(std::u16string(type));
++      UErrorCode status = U_ZERO_ERROR;
++      auto *system = icu->unumsys_openByName(name.c_str(), &status);
++      const bool found = U_SUCCESS(status) && system &&
++          !icu->unumsys_isAlgorithmic(system) && icu->unumsys_getRadix(system) == 10;
++      if (system) icu->unumsys_close(system);
++      if (U_FAILURE(status) && status != U_UNSUPPORTED_ERROR && status != U_MISSING_RESOURCE_ERROR)
++        validationStatus = status;
++      return found;
++    }
++    const auto localeICU = convertBCP47toICULocale(icu, locale);
++    UErrorCode status = U_ZERO_ERROR;
++    auto *values = icu->ucal_getKeywordValuesForLocale("calendar", localeICU.c_str(), false, &status);
++    if (U_FAILURE(status) || !values) {
++      validationStatus = U_FAILURE(status) ? status : U_INTERNAL_PROGRAM_ERROR;
++      return false;
++    }
++    bool found = false;
++    int32_t length;
++    while (const char *value = icu->uenum_next(values, &length, &status)) {
++      const auto *canonical = icu->uloc_toUnicodeLocaleType("ca", value);
++      if (canonical && toUTF16ASCII(canonical) == type) found = true;
++    }
++    icu->uenum_close(values);
++    if (U_FAILURE(status)) validationStatus = status;
++    return found;
++  };
++  auto resolved = resolveLocale(icu, *requested, opt, keys, supported);
++  if (U_FAILURE(validationStatus))
++    return runtime.raiseError("ICU locale-option resolution failed");
++  if (options.count(u"hour12")) {
++    resolved.extensions.erase(u"hc");
++    resolved.resolvedOpts.erase(u"hc");
++  }
++  return resolved;
++}
++
+ } // anonymous namespace
+ 
+ // ============================================================================
+@@ -947,8 +1026,51 @@
+ }
+ 
+ // ============================================================================
+-// DateTimeFormat (ported from Phase 1, unchanged)
++// DateTimeFormat (static ICU provider)
+ // ============================================================================
++
++namespace {
++vm::CallResult<std::u16string> readDatePattern(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu, UDateFormat *formatter) {
++  UErrorCode status = U_ZERO_ERROR;
++  const int32_t length = icu->udat_toPattern(formatter, false, nullptr, 0, &status);
++  if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0)
++    return runtime.raiseError("ICU date-pattern retrieval failed");
++  std::u16string pattern(length, u'\0');
++  status = U_ZERO_ERROR;
++  icu->udat_toPattern(formatter, false,
++      reinterpret_cast<UChar *>(pattern.data()), length, &status);
++  if (U_FAILURE(status))
++    return runtime.raiseError("ICU date-pattern retrieval failed");
++  return pattern;
++}
++
++char16_t hourCycleSymbol(const std::u16string &cycle) {
++  if (cycle == u"h11") return u'K';
++  if (cycle == u"h12") return u'h';
++  if (cycle == u"h23") return u'H';
++  assert(cycle == u"h24");
++  return u'k';
++}
++
++// ICU may normalize K/k skeletons to h/H. Restore the requested hour cycle
++// after pattern selection, without modifying quoted literal text.
++std::u16string replacePatternHourCycle(
++    const std::u16string &pattern, char16_t replacement) {
++  std::u16string result;
++  bool quoted = false;
++  char16_t previous = 0;
++  for (char16_t c : pattern) {
++    if (c == u'\'') quoted = !quoted;
++    if (!quoted && (c == u'h' || c == u'H' || c == u'K' || c == u'k')) {
++      if (previous == u'd') result += u' ';
++      result += replacement;
++    } else result += c;
++    previous = c;
++  }
++  return result;
++}
++} // namespace
+ 
+ namespace {
+ class DateTimeFormatIcuProvider : public DateTimeFormat {
+@@ -963,8 +1085,8 @@
+       const Options &inputOptions) noexcept;
+ 
+   Options resolvedOptions() noexcept;
+-  std::u16string format(double jsTimeValue) noexcept;
+-  std::vector<Part> formatToParts(double x) noexcept;
++  vm::CallResult<std::u16string> format(vm::Runtime &runtime, double jsTimeValue) noexcept;
++  vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, double x) noexcept;
+ 
+  private:
+   std::u16string locale_;
+@@ -1027,159 +1149,20 @@
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+ 
+-  auto requestedLocalesRes = canonicalizeLocaleList(runtime, icu_, locales);
+-  if (requestedLocalesRes.getStatus() == vm::ExecutionStatus::EXCEPTION) {
+-    return requestedLocalesRes.getStatus();
+-  }
+-  if (!requestedLocalesRes.getValue().empty()) {
+-    locale_ = requestedLocalesRes.getValue().front();
+-  } else if (!locales.empty()) {
+-    locale_ = locales.front();
+-  } else {
+-    // Use system default locale.
+-    const char *defLoc = icu_->uloc_getDefault();
+-    if (defLoc)
+-      locale_ = toUTF16ASCII(convertICUtoBCP47Locale(icu_, defLoc));
+-    else
+-      locale_ = u"en-US";
+-  }
+-
+-  // Save extension values from the locale before stripping for later use.
+-  std::u16string extHc = getUnicodeExtensionValue(locale_, u"hc");
+-  std::u16string extNu = getUnicodeExtensionValue(locale_, u"nu");
+-  std::u16string extCa = getUnicodeExtensionValue(locale_, u"ca");
+-
+-  // ECMA-402 §11.1.2: Strip ALL unicode extensions from locale. Relevant
+-  // extensions (ca, nu, hc) will be re-added after option resolution only
+-  // if they match what the implementation actually uses.
+-  static const std::unordered_set<std::u16string> emptyKeys = {};
+-  locale_ = filterUnicodeExtensions(locale_, emptyKeys);
+-
+-  auto conversion = UTF16toUTF8(runtime, locale_);
+-  if (conversion.getStatus() == vm::ExecutionStatus::EXCEPTION) {
+-    return conversion.getStatus();
+-  }
+-  locale8_ = conversion.getValue();
+-
+-  Options options =
+-      toDateTimeOptions(runtime, inputOptions, u"any", u"date").getValue();
+-  std::unordered_map<std::u16string, std::u16string> opt;
+-
+-  // localeMatcher
+-  auto matcher = getOptionString(
+-      runtime, options, u"localeMatcher", {u"lookup", u"best fit"},
+-      u"best fit");
+-  if (LLVM_UNLIKELY(matcher == vm::ExecutionStatus::EXCEPTION))
+-    return matcher.getStatus();
+-  opt.emplace(u"localeMatcher", matcher.getValue());
+-
+-  // calendar (validate BCP47 unicode extension type format)
+-  auto calendarRes = getOptionString(runtime, options, u"calendar", {}, {});
+-  if (LLVM_UNLIKELY(calendarRes == vm::ExecutionStatus::EXCEPTION))
+-    return calendarRes.getStatus();
+-  bool hasCalendarOption = options.count(u"calendar") > 0;
+-  if (hasCalendarOption &&
+-      !isUnicodeExtensionType(calendarRes.getValue())) {
+-    return runtime.raiseRangeError("Invalid calendar value");
+-  }
+-  // Option takes precedence over extension; extension is fallback.
+-  if (hasCalendarOption) {
+-    calendar_ = calendarRes.getValue();
+-  } else if (!extCa.empty() && isUnicodeExtensionType(extCa)) {
+-    calendar_ = extCa;
+-  }
+-  opt.emplace(u"ca", calendar_);
+-
+-  // numberingSystem (validate BCP47 unicode extension type format)
+-  auto nuSysRes =
+-      getOptionString(runtime, options, u"numberingSystem", {}, {});
+-  if (LLVM_UNLIKELY(nuSysRes == vm::ExecutionStatus::EXCEPTION))
+-    return nuSysRes.getStatus();
+-  bool hasNuOption = options.count(u"numberingSystem") > 0;
+-  if (hasNuOption && !isUnicodeExtensionType(nuSysRes.getValue())) {
+-    return runtime.raiseRangeError("Invalid numberingSystem value");
+-  }
+-  // Option takes precedence over extension; extension is fallback.
+-  // For nu extensions, only accept values from the CLDR numbering system
+-  // list. Reject abstract values (native/traditio/finance) and unknown
+-  // identifiers.
+-  static const std::unordered_set<std::u16string> validNuValues = {
+-      u"adlm",    u"ahom",    u"arab",    u"arabext", u"armn",
+-      u"armnlow", u"bali",    u"beng",    u"bhks",    u"brah",
+-      u"cakm",    u"cham",    u"cyrl",    u"deva",    u"diak",
+-      u"ethi",    u"fullwide",u"geor",    u"gong",    u"gonm",
+-      u"grek",    u"greklow", u"gujr",    u"guru",    u"hanidays",
+-      u"hanidec", u"hans",    u"hansfin", u"hant",    u"hantfin",
+-      u"hebr",    u"hmng",    u"hmnp",    u"java",    u"jpan",
+-      u"jpanfin", u"jpanyear",u"kali",    u"khmr",    u"knda",
+-      u"lana",    u"lanatham",u"laoo",    u"latn",    u"lepc",
+-      u"limb",    u"mathbold",u"mathdbl", u"mathmono",u"mathsanb",
+-      u"mathsans",u"mlym",    u"modi",    u"mong",    u"mroo",
+-      u"mtei",    u"mymr",    u"mymrshan",u"mymrtlng",u"newa",
+-      u"nkoo",    u"olck",    u"orya",    u"osma",    u"rohg",
+-      u"roman",   u"romanlow",u"saur",    u"segment", u"shrd",
+-      u"sind",    u"sinh",    u"sora",    u"sund",    u"takr",
+-      u"talu",    u"tamldec", u"telu",    u"thai",    u"tibt",
+-      u"tirh",    u"tnsa",    u"vaii",    u"wara",    u"wcho",
+-  };
+-  if (hasNuOption) {
+-    numberingSystem_ = nuSysRes.getValue();
+-  } else if (!extNu.empty() && validNuValues.count(extNu) > 0) {
+-    numberingSystem_ = extNu;
+-  }
+-  opt.emplace(u"nu", numberingSystem_);
+-
++  auto dateOptions = toDateTimeOptions(runtime, inputOptions, u"any", u"date");
++  if (dateOptions == vm::ExecutionStatus::EXCEPTION) return dateOptions.getStatus();
++  Options options = std::move(*dateOptions);
++  static constexpr std::u16string_view keys[]{u"ca", u"nu", u"hc"};
++  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, keys);
++  if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
++  locale_ = resolved->getCanonicalizedLocaleId();
++  locale8_ = convertBCP47toICULocale(icu_, locale_);
++  for (const auto &entry : resolved->resolvedOpts) {
++    if (entry.first == u"ca") calendar_ = entry.second.getString();
++    else if (entry.first == u"nu") numberingSystem_ = entry.second.getString();
++    else if (entry.first == u"hc") hourCycle_ = entry.second.getString();
++  }
+   auto hour12 = getOptionBool(runtime, options, u"hour12", {});
+-
+-  static const std::vector<std::u16string> hourCycles = {
+-      u"h11", u"h12", u"h23", u"h24"};
+-  auto hourCycleRes =
+-      getOptionString(runtime, options, u"hourCycle", hourCycles, {});
+-  std::u16string hourCycle = hourCycleRes.getValue();
+-  bool hasHourCycleOption = !hourCycle.empty();
+-  bool hasHour12Option = hour12.has_value();
+-  // Use hc extension value as fallback when no option is provided.
+-  if (!hasHourCycleOption && !hasHour12Option && !extHc.empty()) {
+-    if (extHc == u"h11" || extHc == u"h12" ||
+-        extHc == u"h23" || extHc == u"h24") {
+-      hourCycle = extHc;
+-    }
+-  }
+-  if (hasHour12Option) {
+-    hourCycle = u"";
+-  }
+-  opt.emplace(u"hc", hourCycle);
+-  hourCycle_ = hourCycle;
+-
+-  // ECMA-402 §11.1.2: Re-add valid unicode extensions to the resolved locale
+-  // that came from the input locale (not overridden by explicit options).
+-  {
+-    std::u16string exts;
+-    // ca: re-add if from extension and not overridden by option
+-    if (!calendar_.empty() && !hasCalendarOption &&
+-        !extCa.empty() && calendar_ == extCa) {
+-      exts += u"ca-" + calendar_;
+-    }
+-    // hc: re-add if from extension and not overridden by option
+-    if (!extHc.empty() && !hasHourCycleOption && !hasHour12Option) {
+-      if (extHc == u"h11" || extHc == u"h12" ||
+-          extHc == u"h23" || extHc == u"h24") {
+-        if (!exts.empty())
+-          exts += u"-";
+-        exts += u"hc-" + extHc;
+-      }
+-    }
+-    // nu: re-add if from extension and not overridden by option
+-    if (!numberingSystem_.empty() && !hasNuOption &&
+-        !extNu.empty() && numberingSystem_ == extNu) {
+-      if (!exts.empty())
+-        exts += u"-";
+-      exts += u"nu-" + numberingSystem_;
+-    }
+-    if (!exts.empty()) {
+-      locale_ += u"-u-" + exts;
+-    }
+-  }
+ 
+   auto timeZoneRes = options.find(u"timeZone");
+   if (timeZoneRes != options.end()) {
+@@ -1199,7 +1182,9 @@
+     UErrorCode tzErr = U_ZERO_ERROR;
+     int32_t tzLen =
+         icu_->ucal_getDefaultTimeZone(tzBuf, 128, &tzErr);
+-    if (U_SUCCESS(tzErr) && tzLen > 0 && tzLen <= 128) {
++    if (U_FAILURE(tzErr) || tzLen <= 0 || tzLen > 128)
++      return runtime.raiseError("ICU default time-zone resolution failed");
++    {
+       timeZone_.assign(
+           reinterpret_cast<const char16_t *>(tzBuf), tzLen);
+       // Canonicalize common aliases to "UTC".
+@@ -1317,18 +1302,24 @@
+     return timeZoneNameRes.getStatus();
+   timeZoneName_ = *timeZoneNameRes;
+ 
+-  if (hour_.empty()) {
++  if (hour_.empty() && timeStyle_.empty()) {
+     hourCycle_ = u"";
+   } else {
+-    std::u16string hcDefault = getDefaultHourCycle(runtime).getValue();
++    auto defaultCycle = getDefaultHourCycle(runtime);
++    if (defaultCycle == vm::ExecutionStatus::EXCEPTION) return defaultCycle.getStatus();
++    std::u16string hcDefault = *defaultCycle;
+     auto hc = hourCycle_;
+     if (hc.empty())
+       hc = hcDefault;
+     if (hour12.has_value()) {
+       if (*hour12) {
+-        hc = (hcDefault == u"h11" || hcDefault == u"h23") ? u"h11" : u"h12";
++        // V8's preferred 12-hour cycle follows CLDR timeData: Japan uses
++        // h11 when its ordinary cycle is 24-hour; other regions use h12.
++        const auto parsed = ParsedLocaleIdentifier::parse(resolved->localeNoExt);
++        const bool japan = parsed && parsed->languageIdentifier.regionSubtag == u"jp";
++        hc = hcDefault == u"h11" || (hcDefault == u"h23" && japan) ? u"h11" : u"h12";
+       } else {
+-        hc = (hcDefault == u"h11" || hcDefault == u"h23") ? u"h23" : u"h24";
++        hc = hcDefault == u"h24" ? u"h24" : u"h23";
+       }
+     }
+     hourCycle_ = hc;
+@@ -1354,6 +1345,72 @@
+   }
+ 
+   dtf_ = getUDateFormatter(runtime);
++  if (!dtf_)
++    return runtime.raiseError("ICU date formatter initialization failed");
++  UErrorCode status = U_ZERO_ERROR;
++  const auto *calendar = icu_->ucal_getType(icu_->udat_getCalendar(dtf_), &status);
++  if (U_FAILURE(status) || !calendar)
++    return runtime.raiseError("ICU calendar resolution failed");
++  const auto *calendarTag = icu_->uloc_toUnicodeLocaleType("ca", calendar);
++  if (!calendarTag)
++    return runtime.raiseError("ICU calendar has no Unicode locale identifier");
++  calendar_ = toUTF16ASCII(calendarTag);
++  if (calendar_ == u"gregory" || calendar_ == u"iso8601") {
++    auto *proleptic = icu_->ucal_clone(icu_->udat_getCalendar(dtf_), &status);
++    if (U_FAILURE(status) || !proleptic)
++      return runtime.raiseError("ICU calendar allocation failed");
++    // ECMAScript dates use the proleptic Gregorian calendar, including dates
++    // before the historical Gregorian cutover.
++    icu_->ucal_setGregorianChange(proleptic, -9007199254740992.0, &status);
++    if (U_SUCCESS(status)) icu_->udat_setCalendar(dtf_, proleptic);
++    icu_->ucal_close(proleptic);
++    if (U_FAILURE(status)) return runtime.raiseError("ICU calendar initialization failed");
++  }
++  auto *numbering = icu_->unumsys_open(locale8_.c_str(), &status);
++  if (U_FAILURE(status) || !numbering)
++    return runtime.raiseError("ICU date numbering-system resolution failed");
++  numberingSystem_ = toUTF16ASCII(icu_->unumsys_getName(numbering));
++  icu_->unumsys_close(numbering);
++
++  auto patternResult = readDatePattern(runtime, icu_, dtf_);
++  if (patternResult == vm::ExecutionStatus::EXCEPTION) return patternResult.getStatus();
++  const auto &pattern = *patternResult;
++  weekday_.clear(); era_.clear(); year_.clear(); month_.clear(); day_.clear();
++  dayPeriod_.clear(); hour_.clear(); minute_.clear(); second_.clear(); timeZoneName_.clear();
++  fractionalSecondDigits_ = 0;
++  if (dateStyle_.empty() && timeStyle_.empty()) {
++    // Match V8's ordered substring rules for resolvedOptions, including quoted
++    // text and the omission of one/two-letter era patterns. This compatibility
++    // metadata must not be used to derive the actual formatting pattern.
++    auto resolveField = [&](std::u16string &field,
++        std::initializer_list<std::pair<std::u16string_view, std::u16string_view>> candidates) {
++      for (const auto &candidate : candidates) {
++        if (pattern.find(candidate.first) != std::u16string::npos) {
++          field = candidate.second;
++          return;
++        }
++      }
++    };
++    resolveField(weekday_, {{u"EEEEE", u"narrow"}, {u"EEEE", u"long"}, {u"EEE", u"short"},
++        {u"ccccc", u"narrow"}, {u"cccc", u"long"}, {u"ccc", u"short"}});
++    resolveField(era_, {{u"GGGGG", u"narrow"}, {u"GGGG", u"long"}, {u"GGG", u"short"}});
++    resolveField(year_, {{u"yy", u"2-digit"}, {u"y", u"numeric"}});
++    resolveField(month_, {{u"MMMMM", u"narrow"}, {u"MMMM", u"long"}, {u"MMM", u"short"},
++        {u"MM", u"2-digit"}, {u"M", u"numeric"}, {u"LLLLL", u"narrow"}, {u"LLLL", u"long"},
++        {u"LLL", u"short"}, {u"LL", u"2-digit"}, {u"L", u"numeric"}});
++    resolveField(day_, {{u"dd", u"2-digit"}, {u"d", u"numeric"}});
++    resolveField(dayPeriod_, {{u"BBBBB", u"narrow"}, {u"bbbbb", u"narrow"}, {u"BBBB", u"long"},
++        {u"bbbb", u"long"}, {u"B", u"short"}, {u"b", u"short"}});
++    resolveField(hour_, {{u"HH", u"2-digit"}, {u"H", u"numeric"}, {u"hh", u"2-digit"},
++        {u"h", u"numeric"}, {u"kk", u"2-digit"}, {u"k", u"numeric"},
++        {u"KK", u"2-digit"}, {u"K", u"numeric"}});
++    resolveField(minute_, {{u"mm", u"2-digit"}, {u"m", u"numeric"}});
++    resolveField(second_, {{u"ss", u"2-digit"}, {u"s", u"numeric"}});
++    resolveField(timeZoneName_, {{u"zzzz", u"long"}, {u"z", u"short"}, {u"OOOO", u"longOffset"},
++        {u"O", u"shortOffset"}, {u"vvvv", u"longGeneric"}, {u"v", u"shortGeneric"}});
++    fractionalSecondDigits_ = std::min(3, static_cast<int>(std::count(pattern.begin(), pattern.end(), u'S')));
++  }
++
+   return vm::ExecutionStatus::RETURNED;
+ }
+ 
+@@ -1374,16 +1431,9 @@
+ Options DateTimeFormatIcuProvider::resolvedOptions() noexcept {
+   Options options;
+   options.emplace(u"locale", Option(locale_));
+-  // calendar: default to "gregory" if not explicitly set
+-  if (!calendar_.empty())
+-    options.emplace(u"calendar", Option(calendar_));
+-  else
+-    options.emplace(u"calendar", Option(std::u16string(u"gregory")));
+-  // numberingSystem: default to "latn" if not explicitly set
+-  if (!numberingSystem_.empty())
+-    options.emplace(u"numberingSystem", Option(numberingSystem_));
+-  else
+-    options.emplace(u"numberingSystem", Option(std::u16string(u"latn")));
++  assert(!calendar_.empty() && !numberingSystem_.empty());
++  options.emplace(u"calendar", Option(calendar_));
++  options.emplace(u"numberingSystem", Option(numberingSystem_));
+   options.emplace(u"timeZone", Option(timeZone_));
+   // hourCycle and hour12: only present when hour component is in the format
+   if (!hourCycle_.empty()) {
+@@ -1402,6 +1452,8 @@
+     options.emplace(u"month", month_);
+   if (!day_.empty())
+     options.emplace(u"day", day_);
++  if (!dayPeriod_.empty())
++    options.emplace(u"dayPeriod", dayPeriod_);
+   if (!hour_.empty())
+     options.emplace(u"hour", hour_);
+   if (!minute_.empty())
+@@ -1426,306 +1478,189 @@
+   return static_cast<DateTimeFormatIcuProvider *>(this)->resolvedOptions();
+ }
+ 
+-std::u16string DateTimeFormatIcuProvider::format(double jsTimeValue) noexcept {
+-  if (!icu_ || !dtf_)
+-    return u"";
+-
+-  UDate date = static_cast<UDate>(jsTimeValue);
+-  std::u16string result;
+-
+-  UErrorCode err = U_ZERO_ERROR;
+-  int32_t len = icu_->udat_format(dtf_, date, nullptr, 0, nullptr, &err);
+-  if (err == U_BUFFER_OVERFLOW_ERROR && len > 0) {
+-    result.resize(len);
+-    err = U_ZERO_ERROR;
+-    icu_->udat_format(
+-        dtf_, date,
+-        reinterpret_cast<UChar *>(&result[0]), len, nullptr, &err);
+-  }
++vm::CallResult<std::u16string> DateTimeFormatIcuProvider::format(
++    vm::Runtime &runtime, double jsTimeValue) noexcept {
++  assert(icu_ && dtf_);
++  UErrorCode status = U_ZERO_ERROR;
++  const int32_t length = icu_->udat_format(dtf_, jsTimeValue, nullptr, 0, nullptr, &status);
++  if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0)
++    return runtime.raiseError("ICU date formatting failed");
++  std::u16string result(length, u'\0');
++  status = U_ZERO_ERROR;
++  icu_->udat_format(dtf_, jsTimeValue,
++      reinterpret_cast<UChar *>(result.data()), length, nullptr, &status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU date formatting failed");
++  // V8 keeps pre-ICU-72 spacing for format(), while parts retain ICU spacing.
++  std::replace(result.begin(), result.end(), char16_t(0x202f), u' ');
+   return result;
+ }
+ 
+-std::u16string DateTimeFormat::format(double jsTimeValue) noexcept {
+-  return static_cast<DateTimeFormatIcuProvider *>(this)->format(jsTimeValue);
++vm::CallResult<std::u16string> DateTimeFormat::format(
++    vm::Runtime &runtime, double jsTimeValue) noexcept {
++  return static_cast<DateTimeFormatIcuProvider *>(this)->format(runtime, jsTimeValue);
+ }
+ 
+ vm::CallResult<std::u16string> DateTimeFormatIcuProvider::getDefaultHourCycle(
+     vm::Runtime &runtime) {
+-  if (!icu_)
+-    return std::u16string(u"h12");
+-
+-  UErrorCode err = U_ZERO_ERROR;
+-  UDateFormat *defaultDTF = icu_->udat_open(
+-      kUDAT_DEFAULT, kUDAT_DEFAULT, locale8_.c_str(),
+-      nullptr, -1, nullptr, -1, &err);
+-  if (U_FAILURE(err) || !defaultDTF)
+-    return std::u16string(u"h12");
+-
+-  err = U_ZERO_ERROR;
+-  int32_t size = icu_->udat_toPattern(defaultDTF, 1, nullptr, 0, &err);
+-  std::u16string pattern;
+-  if (err == U_BUFFER_OVERFLOW_ERROR && size > 0) {
+-    pattern.resize(size + 1);
+-    err = U_ZERO_ERROR;
+-    icu_->udat_toPattern(
+-        defaultDTF, 1,
+-        reinterpret_cast<UChar *>(&pattern[0]),
+-        size + 1, &err);
+-  }
+-  icu_->udat_close(defaultDTF);
+-
+-  for (int32_t i = 0; i < size; i++) {
+-    switch (pattern[i]) {
+-      case u'K': return std::u16string(u"h11");
+-      case u'h': return std::u16string(u"h12");
+-      case u'H': return std::u16string(u"h23");
+-      case u'k': return std::u16string(u"h24");
+-    }
+-  }
+-  return std::u16string(u"h12");
+-}
+-
+-UDateFormat *DateTimeFormatIcuProvider::getUDateFormatter(
+-    vm::Runtime &runtime) {
+-  if (!icu_)
+-    return nullptr;
+-
+-  static std::u16string eLong = u"long", eShort = u"short",
+-                        eNarrow = u"narrow", eMedium = u"medium",
+-                        eFull = u"full", eNumeric = u"numeric",
+-                        eTwoDigit = u"2-digit",
+-                        eShortOffset = u"shortOffset",
+-                        eLongOffset = u"longOffset",
+-                        eShortGeneric = u"shortGeneric",
+-                        eLongGeneric = u"longGeneric";
+-
++  UErrorCode status = U_ZERO_ERROR;
++  auto *generator = icu_->udatpg_open(locale8_.c_str(), &status);
++  if (U_FAILURE(status) || !generator)
++    return runtime.raiseError("ICU hour-cycle resolution failed");
++  const auto cycle = icu_->udatpg_getDefaultHourCycle(generator, &status);
++  icu_->udatpg_close(generator);
++  if (U_FAILURE(status))
++    return runtime.raiseError("ICU hour-cycle resolution failed");
++  switch (cycle) {
++    case 0: return std::u16string(u"h11");
++    case 1: return std::u16string(u"h12");
++    case 2: return std::u16string(u"h23");
++    case 3: return std::u16string(u"h24");
++    default: return runtime.raiseError("ICU returned an unknown hour cycle");
++  }
++}
++
++UDateFormat *DateTimeFormatIcuProvider::getUDateFormatter(vm::Runtime &runtime) {
++  UErrorCode status = U_ZERO_ERROR;
++  const auto zone = !timeZone_.empty() && (timeZone_[0] == u'+' || timeZone_[0] == u'-')
++      ? u"GMT" + timeZone_ : timeZone_;
++  auto open = [&](int32_t timeStyle, int32_t dateStyle, const std::u16string &pattern) {
++    return icu_->udat_open(timeStyle, dateStyle, locale8_.c_str(),
++        reinterpret_cast<const UChar *>(zone.data()), zone.size(),
++        reinterpret_cast<const UChar *>(pattern.data()), pattern.size(), &status);
++  };
++  std::unique_ptr<UDateFormat, decltype(icu_->udat_close)> formatter(nullptr, icu_->udat_close);
++  std::u16string skeleton;
+   if (!timeStyle_.empty() || !dateStyle_.empty()) {
+-    int32_t dateStyleRes = kUDAT_DEFAULT;
+-    int32_t timeStyleRes = kUDAT_DEFAULT;
+-    if (!dateStyle_.empty()) {
+-      if (dateStyle_ == eFull) dateStyleRes = kUDAT_FULL;
+-      else if (dateStyle_ == eLong) dateStyleRes = kUDAT_LONG;
+-      else if (dateStyle_ == eMedium) dateStyleRes = kUDAT_MEDIUM;
+-      else if (dateStyle_ == eShort) dateStyleRes = kUDAT_SHORT;
+-    }
+-    if (!timeStyle_.empty()) {
+-      if (timeStyle_ == eFull) timeStyleRes = kUDAT_FULL;
+-      else if (timeStyle_ == eLong) timeStyleRes = kUDAT_LONG;
+-      else if (timeStyle_ == eMedium) timeStyleRes = kUDAT_MEDIUM;
+-      else if (timeStyle_ == eShort) timeStyleRes = kUDAT_SHORT;
+-    }
+-    UErrorCode err = U_ZERO_ERROR;
+-    UDateFormat *dtf = nullptr;
+-    if (!timeZone_.empty()) {
+-      dtf = icu_->udat_open(
+-          timeStyleRes, dateStyleRes, locale8_.c_str(),
+-          reinterpret_cast<const UChar *>(timeZone_.c_str()),
+-          static_cast<int32_t>(timeZone_.length()),
+-          nullptr, -1, &err);
+-    } else {
+-      dtf = icu_->udat_open(
+-          timeStyleRes, dateStyleRes, locale8_.c_str(),
+-          nullptr, -1, nullptr, -1, &err);
+-    }
+-    return dtf;
+-  }
+-
+-  std::u16string skeleton;
+-  if (!weekday_.empty()) {
+-    if (weekday_ == eNarrow) skeleton += u"EEEEE";
+-    else if (weekday_ == eLong) skeleton += u"EEEE";
+-    else if (weekday_ == eShort) skeleton += u"EEE";
+-  }
+-  if (!timeZoneName_.empty()) {
+-    if (timeZoneName_ == eShort) skeleton += u"z";
+-    else if (timeZoneName_ == eLong) skeleton += u"zzzz";
+-    else if (timeZoneName_ == eShortOffset) skeleton += u"O";
+-    else if (timeZoneName_ == eLongOffset) skeleton += u"OOOO";
+-    else if (timeZoneName_ == eShortGeneric) skeleton += u"v";
+-    else if (timeZoneName_ == eLongGeneric) skeleton += u"vvvv";
+-  }
+-  if (!era_.empty()) {
+-    if (era_ == eNarrow) skeleton += u"GGGGG";
+-    else if (era_ == eShort) skeleton += u"G";
+-    else if (era_ == eLong) skeleton += u"GGGG";
+-  }
+-  if (!year_.empty()) {
+-    if (year_ == eNumeric) skeleton += u"y";
+-    else if (year_ == eTwoDigit) skeleton += u"yy";
+-  }
+-  if (!month_.empty()) {
+-    if (month_ == eTwoDigit) skeleton += u"MM";
+-    else if (month_ == eNumeric) skeleton += u'M';
+-    else if (month_ == eNarrow) skeleton += u"MMMMM";
+-    else if (month_ == eShort) skeleton += u"MMM";
+-    else if (month_ == eLong) skeleton += u"MMMM";
+-  }
+-  if (!day_.empty()) {
+-    if (day_ == eNumeric) skeleton += u"d";
+-    else if (day_ == eTwoDigit) skeleton += u"dd";
+-  }
+-  if (!hour_.empty()) {
+-    if (hourCycle_ == u"h12")
+-      skeleton += (hour_ == eTwoDigit) ? u"hh" : u"h";
+-    else if (hourCycle_ == u"h24")
+-      skeleton += (hour_ == eTwoDigit) ? u"kk" : u"k";
+-    else if (hourCycle_ == u"h23")
+-      skeleton += (hour_ == eTwoDigit) ? u"HH" : u"H";
+-    else
+-      skeleton += (hour_ == eTwoDigit) ? u"KK" : u"K";
+-  }
+-  if (!minute_.empty()) {
+-    skeleton += (minute_ == eTwoDigit) ? u"mm" : u"m";
+-  }
+-  if (!second_.empty()) {
+-    skeleton += (second_ == eTwoDigit) ? u"ss" : u"s";
+-  }
+-
+-  UErrorCode dtpErr = U_ZERO_ERROR;
+-  UDateTimePatternGenerator *dtpGenerator =
+-      icu_->udatpg_open(locale8_.c_str(), &dtpErr);
+-  if (!dtpGenerator)
+-    return nullptr;
+-
+-  UErrorCode bpErr = U_ZERO_ERROR;
+-  int32_t patternLength = icu_->udatpg_getBestPatternWithOptions(
+-      dtpGenerator,
+-      reinterpret_cast<const UChar *>(skeleton.data()),
+-      -1, kUDATPG_MATCH_ALL_FIELDS_LENGTH,
+-      nullptr, 0, &bpErr);
+-
+-  std::u16string bestpattern;
+-  if (patternLength > 0) {
+-    bestpattern.resize(patternLength);
+-    bpErr = U_ZERO_ERROR;
+-    patternLength = icu_->udatpg_getBestPatternWithOptions(
+-        dtpGenerator,
+-        reinterpret_cast<const UChar *>(skeleton.data()),
+-        static_cast<int32_t>(skeleton.length()),
+-        kUDATPG_MATCH_ALL_FIELDS_LENGTH,
+-        reinterpret_cast<UChar *>(&bestpattern[0]),
+-        patternLength, &bpErr);
+-  }
+-  icu_->udatpg_close(dtpGenerator);
+-
+-  UErrorCode openErr = U_ZERO_ERROR;
+-  UDateFormat *dtf = nullptr;
+-  if (!timeZone_.empty()) {
+-    dtf = icu_->udat_open(
+-        kUDAT_PATTERN, kUDAT_PATTERN, locale8_.c_str(),
+-        reinterpret_cast<const UChar *>(timeZone_.c_str()),
+-        static_cast<int32_t>(timeZone_.length()),
+-        reinterpret_cast<const UChar *>(bestpattern.data()),
+-        patternLength, &openErr);
++    auto style = [](const std::u16string &value) {
++      if (value == u"full") return kUDAT_FULL;
++      if (value == u"long") return kUDAT_LONG;
++      if (value == u"medium") return kUDAT_MEDIUM;
++      if (value == u"short") return kUDAT_SHORT;
++      return kUDAT_NONE;
++    };
++    formatter.reset(open(style(timeStyle_), style(dateStyle_), {}));
++    if (U_FAILURE(status) || !formatter) return nullptr;
++    if (timeStyle_.empty()) return formatter.release();
++    auto pattern = readDatePattern(runtime, icu_, formatter.get());
++    if (pattern == vm::ExecutionStatus::EXCEPTION) return nullptr;
++    const auto requestedHour = hourCycleSymbol(hourCycle_);
++    bool quoted = false, matches = false;
++    for (char16_t c : *pattern) {
++      if (c == u'\'') quoted = !quoted;
++      if (!quoted && c == requestedHour) matches = true;
++    }
++    if (matches) return formatter.release();
++    // Switching between 12/24-hour styles also changes day-period placement
++    // and punctuation. Regenerate from the style's skeleton, as V8 does.
++    status = U_ZERO_ERROR;
++    const int32_t length = icu_->udatpg_getSkeleton(nullptr,
++        reinterpret_cast<const UChar *>(pattern->data()), pattern->size(),
++        nullptr, 0, &status);
++    if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0) return nullptr;
++    skeleton.resize(length);
++    status = U_ZERO_ERROR;
++    icu_->udatpg_getSkeleton(nullptr,
++        reinterpret_cast<const UChar *>(pattern->data()), pattern->size(),
++        reinterpret_cast<UChar *>(skeleton.data()), length, &status);
++    if (U_FAILURE(status)) return nullptr;
++    skeleton.erase(std::remove_if(skeleton.begin(), skeleton.end(),
++        [](char16_t c) { return c == u'a' || c == u'b' || c == u'B'; }), skeleton.end());
++    for (auto &c : skeleton)
++      if (c == u'h' || c == u'H' || c == u'K' || c == u'k') c = requestedHour;
+   } else {
+-    dtf = icu_->udat_open(
+-        kUDAT_PATTERN, kUDAT_PATTERN, locale8_.c_str(),
+-        nullptr, -1,
+-        reinterpret_cast<const UChar *>(bestpattern.data()),
+-        patternLength, &openErr);
+-  }
+-  return dtf;
+-}
+-
+-std::vector<Part> DateTimeFormatIcuProvider::formatToParts(
+-    double jsTimeValue) noexcept {
+-  if (!icu_ || !dtf_)
+-    return {};
+-
+-  // Open a field position iterator.
+-  UErrorCode fpiErr = U_ZERO_ERROR;
+-  UFieldPositionIterator *fpi = icu_->ufieldpositer_open(&fpiErr);
+-  if (U_FAILURE(fpiErr) || !fpi) {
+-    // Fallback: return single part with the full formatted string.
+-    Part part;
+-    part[u"type"] = u"literal";
+-    part[u"value"] = format(jsTimeValue);
+-    return {part};
+-  }
+-
+-  // Format with field positions.
+-  UChar buf[256];
+-  UErrorCode st = U_ZERO_ERROR;
+-  int32_t len = icu_->udat_formatForFields(
+-      dtf_, jsTimeValue, buf, 256, fpi, &st);
+-  std::u16string formatted;
+-  if (st == U_BUFFER_OVERFLOW_ERROR) {
+-    // Retry with larger buffer.
+-    formatted.resize(len);
+-    icu_->ufieldpositer_close(fpi);
+-    fpi = nullptr;
+-    fpiErr = U_ZERO_ERROR;
+-    fpi = icu_->ufieldpositer_open(&fpiErr);
+-    if (U_FAILURE(fpiErr) || !fpi) {
+-      Part part;
+-      part[u"type"] = u"literal";
+-      part[u"value"] = format(jsTimeValue);
+-      return {part};
+-    }
+-    st = U_ZERO_ERROR;
+-    len = icu_->udat_formatForFields(
+-        dtf_, jsTimeValue,
+-        reinterpret_cast<UChar *>(formatted.data()),
+-        len + 1, fpi, &st);
+-  } else if (U_SUCCESS(st)) {
+-    formatted.assign(reinterpret_cast<const char16_t *>(buf), len);
+-  }
+-  if (U_FAILURE(st)) {
+-    icu_->ufieldpositer_close(fpi);
+-    return {};
+-  }
+-
+-  // Collect field ranges.
+-  struct FieldRange {
+-    int32_t begin;
+-    int32_t end;
+-    int32_t type;
+-  };
+-  std::vector<FieldRange> fields;
+-  int32_t beginIdx = 0, endIdx = 0;
+-  int32_t fieldType = icu_->ufieldpositer_next(fpi, &beginIdx, &endIdx);
+-  while (fieldType >= 0) {
+-    fields.push_back({beginIdx, endIdx, fieldType});
+-    fieldType = icu_->ufieldpositer_next(fpi, &beginIdx, &endIdx);
+-  }
+-  icu_->ufieldpositer_close(fpi);
+-
+-  // Sort fields by begin position.
+-  std::sort(
+-      fields.begin(),
+-      fields.end(),
+-      [](const FieldRange &a, const FieldRange &b) {
+-        return a.begin < b.begin;
+-      });
+-
+-  // Build parts, filling gaps with "literal" parts.
++    if (weekday_ == u"narrow") skeleton += u"EEEEE";
++    else if (weekday_ == u"long") skeleton += u"EEEE";
++    else if (weekday_ == u"short") skeleton += u"EEE";
++    if (era_ == u"narrow") skeleton += u"GGGGG";
++    else if (era_ == u"long") skeleton += u"GGGG";
++    else if (era_ == u"short") skeleton += u"GGG";
++    if (!year_.empty()) skeleton += year_ == u"2-digit" ? u"yy" : u"y";
++    if (month_ == u"2-digit") skeleton += u"MM";
++    else if (month_ == u"numeric") skeleton += u"M";
++    else if (month_ == u"narrow") skeleton += u"MMMMM";
++    else if (month_ == u"short") skeleton += u"MMM";
++    else if (month_ == u"long") skeleton += u"MMMM";
++    if (!day_.empty()) skeleton += day_ == u"2-digit" ? u"dd" : u"d";
++    if (!dayPeriod_.empty())
++      skeleton += dayPeriod_ == u"narrow" ? u"BBBBB" : dayPeriod_ == u"long" ? u"BBBB" : u"B";
++    if (!hour_.empty()) skeleton += std::u16string(hour_ == u"2-digit" ? 2 : 1, hourCycleSymbol(hourCycle_));
++    if (!minute_.empty()) skeleton += minute_ == u"2-digit" ? u"mm" : u"m";
++    if (!second_.empty()) skeleton += second_ == u"2-digit" ? u"ss" : u"s";
++    skeleton += std::u16string(fractionalSecondDigits_, u'S');
++    if (timeZoneName_ == u"short") skeleton += u"z";
++    else if (timeZoneName_ == u"long") skeleton += u"zzzz";
++    else if (timeZoneName_ == u"shortOffset") skeleton += u"O";
++    else if (timeZoneName_ == u"longOffset") skeleton += u"OOOO";
++    else if (timeZoneName_ == u"shortGeneric") skeleton += u"v";
++    else if (timeZoneName_ == u"longGeneric") skeleton += u"vvvv";
++  }
++  status = U_ZERO_ERROR;
++  std::unique_ptr<UDateTimePatternGenerator, decltype(icu_->udatpg_close)> generator(
++      icu_->udatpg_open(locale8_.c_str(), &status), icu_->udatpg_close);
++  if (U_FAILURE(status) || !generator) return nullptr;
++  const int32_t length = icu_->udatpg_getBestPatternWithOptions(generator.get(),
++      reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
++      kUDATPG_MATCH_HOUR_FIELD_LENGTH, nullptr, 0, &status);
++  if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0) return nullptr;
++  std::u16string pattern(length, u'\0');
++  status = U_ZERO_ERROR;
++  icu_->udatpg_getBestPatternWithOptions(generator.get(),
++      reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
++      kUDATPG_MATCH_HOUR_FIELD_LENGTH,
++      reinterpret_cast<UChar *>(pattern.data()), length, &status);
++  if (U_FAILURE(status)) return nullptr;
++  if (!hourCycle_.empty()) pattern = replacePatternHourCycle(pattern, hourCycleSymbol(hourCycle_));
++  formatter.reset(open(kUDAT_PATTERN, kUDAT_PATTERN, pattern));
++  if (U_FAILURE(status)) return nullptr;
++  return formatter.release();
++}
++
++vm::CallResult<std::vector<Part>> DateTimeFormatIcuProvider::formatToParts(
++    vm::Runtime &runtime, double jsTimeValue) noexcept {
++  assert(icu_ && dtf_);
++  UErrorCode status = U_ZERO_ERROR;
++  std::unique_ptr<UFieldPositionIterator, decltype(icu_->ufieldpositer_close)> fields(
++      icu_->ufieldpositer_open(&status), icu_->ufieldpositer_close);
++  if (U_FAILURE(status) || !fields)
++    return runtime.raiseError("ICU date field-iterator allocation failed");
++  const int32_t length = icu_->udat_formatForFields(dtf_, jsTimeValue, nullptr, 0, nullptr, &status);
++  if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0)
++    return runtime.raiseError("ICU date field formatting failed");
++  std::u16string formatted(length, u'\0');
++  status = U_ZERO_ERROR;
++  icu_->udat_formatForFields(dtf_, jsTimeValue,
++      reinterpret_cast<UChar *>(formatted.data()), length, fields.get(), &status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU date field formatting failed");
++  struct Field { int32_t begin, end, type; };
++  std::vector<Field> ranges;
++  int32_t begin, end, type;
++  while ((type = icu_->ufieldpositer_next(fields.get(), &begin, &end)) >= 0) {
++    if (begin < 0 || begin >= end || end > length)
++      return runtime.raiseError("ICU returned an invalid date field range");
++    ranges.push_back({begin, end, type});
++  }
++  std::sort(ranges.begin(), ranges.end(), [](const Field &a, const Field &b) {
++    return a.begin < b.begin;
++  });
+   std::vector<Part> parts;
+-  int32_t pos = 0;
+-  for (const auto &f : fields) {
+-    if (f.begin > pos) {
+-      Part literal;
+-      literal[u"type"] = u"literal";
+-      literal[u"value"] = formatted.substr(pos, f.begin - pos);
+-      parts.push_back(std::move(literal));
+-    }
+-    Part part;
+-    part[u"type"] = dateFieldToPartType(f.type);
+-    part[u"value"] = formatted.substr(f.begin, f.end - f.begin);
+-    parts.push_back(std::move(part));
+-    pos = f.end;
+-  }
+-  if (pos < static_cast<int32_t>(formatted.size())) {
+-    Part literal;
+-    literal[u"type"] = u"literal";
+-    literal[u"value"] = formatted.substr(pos);
+-    parts.push_back(std::move(literal));
+-  }
+-
++  int32_t position = 0;
++  for (const auto &field : ranges) {
++    if (field.begin < position)
++      return runtime.raiseError("ICU returned overlapping date fields");
++    if (field.begin > position)
++      parts.push_back({{u"type", u"literal"}, {u"value", formatted.substr(position, field.begin - position)}});
++    parts.push_back({{u"type", dateFieldToPartType(field.type)},
++        {u"value", formatted.substr(field.begin, field.end - field.begin)}});
++    position = field.end;
++  }
++  if (position < length)
++    parts.push_back({{u"type", u"literal"}, {u"value", formatted.substr(position)}});
+   return parts;
+ }
+ 
+-std::vector<Part> DateTimeFormat::formatToParts(double x) noexcept {
+-  return static_cast<DateTimeFormatIcuProvider *>(this)->formatToParts(x);
++vm::CallResult<std::vector<Part>> DateTimeFormat::formatToParts(
++    vm::Runtime &runtime, double value) noexcept {
++  return static_cast<DateTimeFormatIcuProvider *>(this)->formatToParts(runtime, value);
+ }
+ 
+ // ============================================================================
+@@ -1746,12 +1681,12 @@
+       const Options &options) noexcept;
+ 
+   Options resolvedOptions() noexcept;
+-  std::u16string format(double number) noexcept;
+-  std::vector<Part> formatToParts(double number) noexcept;
++  vm::CallResult<std::u16string> format(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
++  vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
+ 
+  private:
+   const hermes_icu_vtable *icu_ = nullptr;
+-  UNumberFormat *nf_ = nullptr;
++  vm::CallResult<const UFormattedValue *> formatValue(vm::Runtime &runtime, const NumberFormatValue &number) noexcept;
+   UNumberFormatter *unumf_ = nullptr;
+   UFormattedNumber *unumfResult_ = nullptr;
+ 
+@@ -1771,14 +1706,12 @@
+   int maximumFractionDigits_ = -1;
+   int minimumSignificantDigits_ = -1;
+   int maximumSignificantDigits_ = -1;
+-  bool useGrouping_ = true;
+-  bool useSignificantDigits_ = false;
++  std::u16string useGrouping_;
++  std::u16string roundingPriority_, roundingMode_, trailingZeroDisplay_;
++  int roundingIncrement_ = 1;
+ };
+ 
+ NumberFormatIcuProvider::~NumberFormatIcuProvider() {
+-  if (nf_ && icu_) {
+-    icu_->unum_close(nf_);
+-  }
+   if (unumfResult_ && icu_) {
+     icu_->unumf_closeResult(unumfResult_);
+   }
+@@ -1798,38 +1731,13 @@
+     return vm::ExecutionStatus::EXCEPTION;
+   }
+ 
+-  auto requestedLocales = canonicalizeLocaleList(runtime, icu_, locales);
+-  if (LLVM_UNLIKELY(requestedLocales == vm::ExecutionStatus::EXCEPTION))
+-    return vm::ExecutionStatus::EXCEPTION;
+-
+-  if (!requestedLocales.getValue().empty()) {
+-    locale_ = requestedLocales.getValue().front();
+-  } else {
+-    const char *defLoc = icu_->uloc_getDefault();
+-    if (defLoc)
+-      locale_ = toUTF16ASCII(convertICUtoBCP47Locale(icu_, defLoc));
+-    else
+-      locale_ = u"en-US";
+-  }
+-
+-  // localeMatcher (ECMA-402 requires reading + validation)
+-  static const std::vector<std::u16string> validMatchers = {
+-      u"lookup", u"best fit"};
+-  auto matcherRes = getOptionString(
+-      runtime, options, u"localeMatcher", validMatchers, u"best fit");
+-  if (LLVM_UNLIKELY(matcherRes == vm::ExecutionStatus::EXCEPTION))
+-    return matcherRes.getStatus();
+-
+-  // numberingSystem (BCP47 unicode extension type format)
+-  auto nuRes = getOptionString(runtime, options, u"numberingSystem", {}, {});
+-  if (LLVM_UNLIKELY(nuRes == vm::ExecutionStatus::EXCEPTION))
+-    return nuRes.getStatus();
+-  // Validate if the option was explicitly provided (even if empty).
+-  if (options.count(u"numberingSystem") &&
+-      !isUnicodeExtensionType(nuRes.getValue())) {
+-    return runtime.raiseRangeError("Invalid numberingSystem value");
+-  }
+-  numberingSystem_ = nuRes.getValue();
++  static constexpr std::u16string_view keys[]{u"nu"};
++  auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, keys);
++  if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
++  locale_ = resolved->getCanonicalizedLocaleId();
++  auto numberingOption = resolved->resolvedOpts.find(u"nu");
++  if (numberingOption != resolved->resolvedOpts.end())
++    numberingSystem_ = numberingOption->second.getString();
+ 
+   // style
+   static const std::vector<std::u16string> validStyles = {
+@@ -1881,11 +1789,11 @@
+   if (LLVM_UNLIKELY(unitRes == vm::ExecutionStatus::EXCEPTION))
+     return unitRes.getStatus();
+   unit_ = unitRes.getValue();
+-  if (style_ == u"unit" && unit_.empty()) {
++  if (style_ == u"unit" && !options.count(u"unit")) {
+     return runtime.raiseTypeError("Unit is required with unit style");
+   }
+   // Unit identifier validation (ECMA-402 §6.5)
+-  if (!unit_.empty() && !isWellFormedUnitIdentifier(unit_)) {
++  if (options.count(u"unit") && !isWellFormedUnitIdentifier(unit_)) {
+     return runtime.raiseRangeError("Invalid unit identifier");
+   }
+ 
+@@ -1909,7 +1817,7 @@
+ 
+   // signDisplay
+   static const std::vector<std::u16string> validSignDisplays = {
+-      u"auto", u"never", u"always", u"exceptZero"};
++      u"auto", u"never", u"always", u"exceptZero", u"negative"};
+   auto signRes = getOptionString(
+       runtime, options, u"signDisplay", validSignDisplays, u"auto");
+   if (LLVM_UNLIKELY(signRes == vm::ExecutionStatus::EXCEPTION))
+@@ -1935,225 +1843,201 @@
+   currencySign_ = csRes.getValue();
+ 
+   std::string localeICU = convertBCP47toICULocale(icu_, locale_);
+-  // Apply numberingSystem to ICU locale if explicitly set.
++  // Unsupported numbering systems fall back to the locale's default. An
++  // algorithmic numbering system is not an ECMA-402 decimal numbering system.
+   if (!numberingSystem_.empty()) {
+-    std::string nuUtf8(numberingSystem_.begin(), numberingSystem_.end());
+-    if (localeICU.find('@') != std::string::npos)
+-      localeICU += ";numbers=" + nuUtf8;
+-    else
+-      localeICU += "@numbers=" + nuUtf8;
+-  }
+-
+-  bool useUnitV2 = false;
+-  if (style_ == u"unit" && icu_->unumf_openForSkeletonAndLocale &&
+-      icu_->unumf_openResult) {
+-    // Try ICU Number Formatter v2 for unit formatting.
+-    // Build skeleton using ICU 68+ "unit/" syntax which takes ECMA-402
+-    // unit identifiers directly (e.g., "unit/kilometer-per-hour").
+-    std::string skeleton = "unit/";
+-
+-    // Convert unit_ to UTF-8 for the skeleton
+-    std::string unitUtf8(unit_.begin(), unit_.end());
+-    skeleton += unitUtf8;
+-
+-    // unitDisplay: "short" → "short", "narrow" → "narrow", "long" → "full-name"
+-    if (unitDisplay_ == u"long")
+-      skeleton += " unit-width-full-name";
+-    else if (unitDisplay_ == u"narrow")
+-      skeleton += " unit-width-narrow";
+-    else
+-      skeleton += " unit-width-short";
+-
+-    // Convert skeleton to UTF-16 for ICU API
+-    std::u16string skeleton16(skeleton.begin(), skeleton.end());
+-    UErrorCode err = U_ZERO_ERROR;
+-    unumf_ = icu_->unumf_openForSkeletonAndLocale(
+-        reinterpret_cast<const UChar *>(skeleton16.data()),
+-        static_cast<int32_t>(skeleton16.size()),
+-        localeICU.c_str(),
+-        &err);
+-    if (U_SUCCESS(err) && unumf_) {
+-      err = U_ZERO_ERROR;
+-      unumfResult_ = icu_->unumf_openResult(&err);
+-      if (U_SUCCESS(err) && unumfResult_) {
+-        useUnitV2 = true;
+-        // Also create a basic decimal formatter for resolvedOptions defaults
+-        err = U_ZERO_ERROR;
+-        nf_ = icu_->unum_open(
+-            UNUM_DECIMAL, nullptr, 0, localeICU.c_str(), nullptr, &err);
+-      } else {
+-        // Clean up partial state.
+-        if (icu_->unumf_close)
+-          icu_->unumf_close(unumf_);
+-        unumf_ = nullptr;
+-        unumfResult_ = nullptr;
+-      }
++    UErrorCode status = U_ZERO_ERROR;
++    auto name = toUTF8ASCII(numberingSystem_);
++    auto *system = icu_->unumsys_openByName(name.c_str(), &status);
++    const bool supported = U_SUCCESS(status) && system &&
++        !icu_->unumsys_isAlgorithmic(system) && icu_->unumsys_getRadix(system) == 10;
++    if (system)
++      icu_->unumsys_close(system);
++    if (supported)
++      localeICU += (localeICU.find('@') == std::string::npos ? "@numbers=" : ";numbers=") + name;
++  }
++  UErrorCode status = U_ZERO_ERROR;
++  auto *numbering = icu_->unumsys_open(localeICU.c_str(), &status);
++  if (U_FAILURE(status) || !numbering)
++    return runtime.raiseError("ICU numbering system resolution failed");
++  numberingSystem_ = toUTF16ASCII(icu_->unumsys_getName(numbering));
++  icu_->unumsys_close(numbering);
++
++  auto priority = getOptionString(runtime, options, u"roundingPriority",
++      {u"auto", u"morePrecision", u"lessPrecision"}, u"auto");
++  if (priority == vm::ExecutionStatus::EXCEPTION)
++    return priority.getStatus();
++  roundingPriority_ = *priority;
++  auto rounding = getOptionString(runtime, options, u"roundingMode",
++      {u"ceil", u"floor", u"expand", u"trunc", u"halfCeil", u"halfFloor",
++       u"halfExpand", u"halfTrunc", u"halfEven"}, u"halfExpand");
++  if (rounding == vm::ExecutionStatus::EXCEPTION)
++    return rounding.getStatus();
++  roundingMode_ = *rounding;
++  auto trailing = getOptionString(runtime, options, u"trailingZeroDisplay",
++      {u"auto", u"stripIfInteger"}, u"auto");
++  if (trailing == vm::ExecutionStatus::EXCEPTION)
++    return trailing.getStatus();
++  trailingZeroDisplay_ = *trailing;
++  auto increment = getNumberOption(runtime, options, u"roundingIncrement", 1, 5000, 1);
++  if (increment == vm::ExecutionStatus::EXCEPTION)
++    return increment.getStatus();
++  roundingIncrement_ = increment->value();
++  static const std::unordered_set<int> increments{
++      1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000};
++  if (!increments.count(roundingIncrement_))
++    return runtime.raiseRangeError("Invalid roundingIncrement");
++
++  useGrouping_ = notation_ == u"compact" ? u"min2" : u"auto";
++  auto grouping = options.find(u"useGrouping");
++  if (grouping != options.end()) {
++    if (grouping->second.isBool()) {
++      useGrouping_ = grouping->second.getBool() ? u"always" : u"off";
+     } else {
+-      // Unit skeleton not supported by this ICU provider (e.g. older system
+-      // icu.dll). Fall through to legacy decimal formatter.
+-      unumf_ = nullptr;
+-    }
+-  }
+-
+-  if (!useUnitV2) {
+-    // Legacy ICU number format API (non-unit styles, or unit fallback)
+-    int32_t icuStyle = UNUM_DECIMAL;
+-    if (style_ == u"percent")
+-      icuStyle = UNUM_PERCENT;
+-    else if (style_ == u"currency") {
+-      if (currencyDisplay_ == u"name")
+-        icuStyle = UNUM_CURRENCY_PLURAL;
+-      else
+-        icuStyle = UNUM_CURRENCY;
+-    }
+-
+-    UErrorCode err = U_ZERO_ERROR;
+-    nf_ = icu_->unum_open(
+-        icuStyle, nullptr, 0, localeICU.c_str(), nullptr, &err);
+-    if (U_FAILURE(err) || !nf_) {
+-      return runtime.raiseRangeError("Failed to create NumberFormat");
+-    }
+-  }
+-
+-  // Set rounding mode to HALF_UP (ECMA-402 default for legacy NumberFormat).
+-  // ICU defaults to HALF_EVEN but test262 expects HALF_UP.
+-  constexpr int32_t UNUM_ROUND_HALFUP = 6;
+-  if (nf_) {
+-    icu_->unum_setAttribute(nf_, UNUM_ROUNDING_MODE, UNUM_ROUND_HALFUP);
+-  }
+-
+-  // Set currency code
+-  if (style_ == u"currency" && !currency_.empty() && nf_) {
+-    std::u16string currUpper;
+-    for (auto c : currency_) {
+-      currUpper += (c >= u'a' && c <= u'z') ? (c - u'a' + u'A') : c;
+-    }
+-    {
+-      UErrorCode stErr = U_ZERO_ERROR;
+-      icu_->unum_setTextAttribute(
+-          nf_,
+-          UNUM_CURRENCY_CODE,
+-          reinterpret_cast<const UChar *>(currUpper.data()),
+-          static_cast<int32_t>(currUpper.size()),
+-          &stErr);
+-    }
+-  }
+-
+-  // useGrouping
+-  auto useGroupingIt = options.find(u"useGrouping");
+-  if (useGroupingIt != options.end() && useGroupingIt->second.isBool()) {
+-    useGrouping_ = useGroupingIt->second.getBool();
+-  }
+-  if (!useGrouping_) {
+-    icu_->unum_setAttribute(nf_, UNUM_GROUPING_USED, 0);
+-  }
+-
+-  // minimumIntegerDigits
+-  auto minIntRes = getNumberOption(
+-      runtime, options, u"minimumIntegerDigits", 1, 21, 1);
+-  if (LLVM_UNLIKELY(minIntRes == vm::ExecutionStatus::EXCEPTION))
+-    return minIntRes.getStatus();
+-  minimumIntegerDigits_ = minIntRes.getValue().value_or(1);
+-  if (minimumIntegerDigits_ > 1) {
+-    icu_->unum_setAttribute(nf_, UNUM_MIN_INTEGER_DIGITS, minimumIntegerDigits_);
+-  }
+-
+-  // Get currency default fraction digits per ECMA-402 §15.5.3.
+-  // ECMA-402 requires ISO 4217 values. ICU CLDR data may differ for some
+-  // currencies, so we apply overrides where needed.
+-  int currencyDefaultMinFD = 2;
+-  int currencyDefaultMaxFD = 2;
+-  if (style_ == u"currency" && nf_) {
+-    currencyDefaultMinFD =
+-        icu_->unum_getAttribute(nf_, UNUM_MIN_FRACTION_DIGITS);
+-    currencyDefaultMaxFD =
+-        icu_->unum_getAttribute(nf_, UNUM_MAX_FRACTION_DIGITS);
+-
+-    // ISO 4217 overrides where CLDR data disagrees with the standard.
+-    // ECMA-402 §15.5.3 requires ISO 4217 values, but ICU CLDR may use 0
+-    // for currencies whose fractional units are rarely used in practice.
+-    std::u16string currUpper;
+-    for (auto c : currency_) {
+-      currUpper += (c >= u'a' && c <= u'z') ? (c - u'a' + u'A') : c;
+-    }
+-    // Map of currencies where CLDR says 0 but ISO 4217 says 2 or 3.
+-    static const std::unordered_map<std::u16string, int> iso4217Overrides = {
+-        {u"AFN", 2}, {u"ALL", 2}, {u"COP", 2}, {u"HUF", 2},
+-        {u"IDR", 2}, {u"IQD", 3}, {u"IRR", 2}, {u"KPW", 2},
+-        {u"LAK", 2}, {u"LBP", 2}, {u"MGA", 2}, {u"MMK", 2},
+-        {u"MRO", 2}, {u"PKR", 2}, {u"SLL", 2}, {u"SOS", 2},
+-        {u"STD", 2}, {u"SYP", 2}, {u"YER", 2},
+-    };
+-    auto overrideIt = iso4217Overrides.find(currUpper);
+-    if (overrideIt != iso4217Overrides.end()) {
+-      int fd = overrideIt->second;
+-      currencyDefaultMinFD = fd;
+-      currencyDefaultMaxFD = fd;
+-      icu_->unum_setAttribute(nf_, UNUM_MIN_FRACTION_DIGITS, fd);
+-      icu_->unum_setAttribute(nf_, UNUM_MAX_FRACTION_DIGITS, fd);
+-    }
+-  }
+-
+-  // significantDigits
+-  auto minSigRes = getNumberOption(
+-      runtime, options, u"minimumSignificantDigits", 1, 21, {});
+-  if (LLVM_UNLIKELY(minSigRes == vm::ExecutionStatus::EXCEPTION))
+-    return minSigRes.getStatus();
+-  auto maxSigRes = getNumberOption(
+-      runtime, options, u"maximumSignificantDigits", 1, 21, {});
+-  if (LLVM_UNLIKELY(maxSigRes == vm::ExecutionStatus::EXCEPTION))
+-    return maxSigRes.getStatus();
+-
+-  if (minSigRes.getValue().has_value() || maxSigRes.getValue().has_value()) {
+-    useSignificantDigits_ = true;
+-    int minSig = minSigRes.getValue().value_or(1);
+-    int maxSig = maxSigRes.getValue().value_or(21);
+-    if (minSig > maxSig) {
+-      return runtime.raiseRangeError(
+-          "maximumSignificantDigits value is invalid.");
+-    }
+-    minimumSignificantDigits_ = minSig;
+-    maximumSignificantDigits_ = maxSig;
+-    icu_->unum_setAttribute(nf_, UNUM_SIGNIFICANT_DIGITS_USED, 1);
+-    icu_->unum_setAttribute(nf_, UNUM_MIN_SIGNIFICANT_DIGITS, minSig);
+-    icu_->unum_setAttribute(nf_, UNUM_MAX_SIGNIFICANT_DIGITS, maxSig);
++      const auto &value = grouping->second.getString();
++      if (value == u"auto" || value == u"always" || value == u"min2")
++        useGrouping_ = value;
++      else if (value != u"true" && value != u"false")
++        return runtime.raiseRangeError("Invalid useGrouping");
++    }
++  }
++
++  auto minInt = getNumberOption(runtime, options, u"minimumIntegerDigits", 1, 21, 1);
++  if (minInt == vm::ExecutionStatus::EXCEPTION)
++    return minInt.getStatus();
++  minimumIntegerDigits_ = minInt->value();
++
++  int defaultMinFD = 0;
++  int defaultMaxFD = style_ == u"percent" ? 0 : 3;
++  if (style_ == u"currency") {
++    for (auto &character : currency_)
++      if (character >= u'a' && character <= u'z')
++        character -= u'a' - u'A';
++    status = U_ZERO_ERROR;
++    defaultMinFD = defaultMaxFD = icu_->ucurr_getDefaultFractionDigits(
++        reinterpret_cast<const UChar *>(currency_.c_str()), &status);
++    if (U_FAILURE(status))
++      return runtime.raiseError("ICU currency precision resolution failed");
++  }
++  if (roundingIncrement_ != 1)
++    defaultMaxFD = defaultMinFD;
++  auto minFD = getNumberOption(runtime, options, u"minimumFractionDigits", 0, 100, {});
++  if (minFD == vm::ExecutionStatus::EXCEPTION)
++    return minFD.getStatus();
++  auto maxFD = getNumberOption(runtime, options, u"maximumFractionDigits", 0, 100, {});
++  if (maxFD == vm::ExecutionStatus::EXCEPTION)
++    return maxFD.getStatus();
++  auto minSD = getNumberOption(runtime, options, u"minimumSignificantDigits", 1, 21, {});
++  if (minSD == vm::ExecutionStatus::EXCEPTION)
++    return minSD.getStatus();
++  auto maxSD = getNumberOption(runtime, options, u"maximumSignificantDigits", 1, 21, {});
++  if (maxSD == vm::ExecutionStatus::EXCEPTION)
++    return maxSD.getStatus();
++  bool hasSD = minSD->has_value() || maxSD->has_value();
++  bool hasFD = minFD->has_value() || maxFD->has_value();
++  bool needSD = roundingPriority_ != u"auto" || hasSD;
++  bool needFD = roundingPriority_ != u"auto" ||
++      (!hasSD && (hasFD || notation_ != u"compact"));
++  if (needSD) {
++    minimumSignificantDigits_ = minSD->value_or(1);
++    maximumSignificantDigits_ = maxSD->value_or(21);
++    if (minimumSignificantDigits_ > maximumSignificantDigits_)
++      return runtime.raiseRangeError("Invalid significant digit range");
++  }
++  if (needFD) {
++    minimumFractionDigits_ = minFD->value_or(
++        std::min(defaultMinFD, static_cast<int>(maxFD->value_or(defaultMaxFD))));
++    maximumFractionDigits_ = maxFD->value_or(std::max(defaultMaxFD, minimumFractionDigits_));
++    if (minimumFractionDigits_ > maximumFractionDigits_)
++      return runtime.raiseRangeError("Invalid fraction digit range");
++  }
++  if (!needFD && !needSD) {
++    minimumFractionDigits_ = maximumFractionDigits_ = 0;
++    minimumSignificantDigits_ = 1;
++    maximumSignificantDigits_ = 2;
++    roundingPriority_ = u"morePrecision";
++    needFD = needSD = true;
++  }
++  if (roundingIncrement_ != 1) {
++    if (needSD || roundingPriority_ != u"auto")
++      return runtime.raiseTypeError("roundingIncrement requires fraction precision");
++    if (minimumFractionDigits_ != maximumFractionDigits_)
++      return runtime.raiseRangeError("roundingIncrement requires equal fraction bounds");
++  }
++
++  std::u16string skeleton;
++  if (style_ == u"currency") {
++    skeleton += u"currency/" + currency_;
++    if (currencyDisplay_ == u"code") skeleton += u" unit-width-iso-code";
++    else if (currencyDisplay_ == u"name") skeleton += u" unit-width-full-name";
++    else if (currencyDisplay_ == u"narrowSymbol") skeleton += u" unit-width-narrow";
++    else skeleton += u" unit-width-short";
++  } else if (style_ == u"unit") {
++    skeleton += u"unit/" + unit_;
++    if (unitDisplay_ == u"long") skeleton += u" unit-width-full-name";
++    else if (unitDisplay_ == u"narrow") skeleton += u" unit-width-narrow";
++    else skeleton += u" unit-width-short";
++  } else if (style_ == u"percent") {
++    skeleton += u"percent scale/100";
++  }
++  if (notation_ == u"scientific") skeleton += u" scientific";
++  else if (notation_ == u"engineering") skeleton += u" engineering";
++  else if (notation_ == u"compact")
++    skeleton += compactDisplay_ == u"long" ? u" compact-long" : u" compact-short";
++
++  const bool accounting = style_ == u"currency" && currencySign_ == u"accounting";
++  if (signDisplay_ == u"never") skeleton += u" sign-never";
++  else if (signDisplay_ == u"always")
++    skeleton += accounting ? u" sign-accounting-always" : u" sign-always";
++  else if (signDisplay_ == u"exceptZero")
++    skeleton += accounting ? u" sign-accounting-except-zero" : u" sign-except-zero";
++  else if (signDisplay_ == u"negative")
++    skeleton += accounting ? u" sign-accounting-negative" : u" sign-negative";
++  else if (accounting) skeleton += u" sign-accounting";
++  else skeleton += u" sign-auto";
++
++  skeleton += u" group-";
++  skeleton += useGrouping_ == u"always" ? u"on-aligned" : useGrouping_;
++  skeleton += u" integer-width/+" + std::u16string(minimumIntegerDigits_, u'0');
++  static const std::unordered_map<std::u16string, std::u16string> roundingModes{
++      {u"ceil", u"ceiling"}, {u"floor", u"floor"}, {u"expand", u"up"},
++      {u"trunc", u"down"}, {u"halfCeil", u"half-ceiling"},
++      {u"halfFloor", u"half-floor"}, {u"halfExpand", u"half-up"},
++      {u"halfTrunc", u"half-down"}, {u"halfEven", u"half-even"}};
++  skeleton += u" rounding-mode-" + roundingModes.at(roundingMode_);
++  skeleton += u" ";
++  if (roundingIncrement_ != 1) {
++    std::string decimal = std::to_string(roundingIncrement_);
++    if (maximumFractionDigits_ > 0) {
++      if (decimal.size() <= static_cast<size_t>(maximumFractionDigits_))
++        decimal.insert(0, maximumFractionDigits_ + 1 - decimal.size(), '0');
++      decimal.insert(decimal.size() - maximumFractionDigits_, 1, '.');
++    }
++    skeleton += u"precision-increment/" + toUTF16ASCII(decimal);
+   } else {
+-    int defaultMinFD = 0;
+-    int defaultMaxFD = 3;
+-    if (style_ == u"currency") {
+-      defaultMinFD = currencyDefaultMinFD;
+-      defaultMaxFD = currencyDefaultMaxFD;
+-    } else if (style_ == u"percent") {
+-      defaultMinFD = 0;
+-      defaultMaxFD = 0;
+-    }
+-
+-    auto minFDRes = getNumberOption(
+-        runtime, options, u"minimumFractionDigits", 0, 20, {});
+-    if (LLVM_UNLIKELY(minFDRes == vm::ExecutionStatus::EXCEPTION))
+-      return minFDRes.getStatus();
+-    auto maxFDRes = getNumberOption(
+-        runtime, options, u"maximumFractionDigits", 0, 20, {});
+-    if (LLVM_UNLIKELY(maxFDRes == vm::ExecutionStatus::EXCEPTION))
+-      return maxFDRes.getStatus();
+-
+-    int minFD = minFDRes.getValue().value_or(defaultMinFD);
+-    int maxFD = maxFDRes.getValue().value_or(
+-        defaultMaxFD > minFD ? defaultMaxFD : minFD);
+-    // Per ECMA-402: if only max is set, clamp min to at most max.
+-    if (!minFDRes.getValue().has_value() && minFD > maxFD) {
+-      minFD = maxFD;
+-    }
+-    if (minFD > maxFD) {
+-      return runtime.raiseRangeError(
+-          "minimumFractionDigits is greater than maximumFractionDigits");
+-    }
+-    minimumFractionDigits_ = minFD;
+-    maximumFractionDigits_ = maxFD;
+-    icu_->unum_setAttribute(nf_, UNUM_MIN_FRACTION_DIGITS, minFD);
+-    icu_->unum_setAttribute(nf_, UNUM_MAX_FRACTION_DIGITS, maxFD);
+-  }
+-
++    if (needFD) {
++      if (maximumFractionDigits_ == 0) skeleton += u"precision-integer";
++      else skeleton += u"." + std::u16string(minimumFractionDigits_, u'0') +
++          std::u16string(maximumFractionDigits_ - minimumFractionDigits_, u'#');
++    }
++    if (needSD) {
++      if (needFD) skeleton += u"/";
++      skeleton += std::u16string(minimumSignificantDigits_, u'@') +
++          std::u16string(maximumSignificantDigits_ - minimumSignificantDigits_, u'#');
++      if (needFD) skeleton += roundingPriority_ == u"morePrecision" ? u"r" : u"s";
++    }
++  }
++  if (trailingZeroDisplay_ == u"stripIfInteger") skeleton += u"/w";
++  status = U_ZERO_ERROR;
++  unumf_ = icu_->unumf_openForSkeletonAndLocale(
++      reinterpret_cast<const UChar *>(skeleton.data()), skeleton.size(),
++      localeICU.c_str(), &status);
++  if (U_FAILURE(status) || !unumf_)
++    return runtime.raiseError("ICU number formatter initialization failed");
++  status = U_ZERO_ERROR;
++  unumfResult_ = icu_->unumf_openResult(&status);
++  if (U_FAILURE(status) || !unumfResult_)
++    return runtime.raiseError("ICU formatted-number allocation failed");
+   return vm::ExecutionStatus::RETURNED;
+ }
+ 
+@@ -2186,18 +2070,24 @@
+     options.emplace(u"compactDisplay", Option(compactDisplay_));
+   }
+   options.emplace(u"signDisplay", Option(signDisplay_));
+-  options.emplace(u"useGrouping", Option(useGrouping_));
++  if (useGrouping_ == u"off") options.emplace(u"useGrouping", Option(false));
++  else options.emplace(u"useGrouping", Option(useGrouping_));
++  options.emplace(u"roundingIncrement", Option(static_cast<double>(roundingIncrement_)));
++  options.emplace(u"roundingMode", Option(roundingMode_));
++  options.emplace(u"roundingPriority", Option(roundingPriority_));
++  options.emplace(u"trailingZeroDisplay", Option(trailingZeroDisplay_));
+   options.emplace(
+       u"minimumIntegerDigits",
+       Option(static_cast<double>(minimumIntegerDigits_)));
+-  if (useSignificantDigits_) {
++  if (minimumSignificantDigits_ >= 0) {
+     options.emplace(
+         u"minimumSignificantDigits",
+         Option(static_cast<double>(minimumSignificantDigits_)));
+     options.emplace(
+         u"maximumSignificantDigits",
+         Option(static_cast<double>(maximumSignificantDigits_)));
+-  } else {
++  }
++  if (minimumFractionDigits_ >= 0) {
+     options.emplace(
+         u"minimumFractionDigits",
+         Option(static_cast<double>(minimumFractionDigits_)));
+@@ -2208,148 +2098,78 @@
+   return options;
+ }
+ 
+-std::u16string NumberFormatIcuProvider::format(double number) noexcept {
+-  if (!icu_) {
+-    auto s = std::to_string(number);
+-    return std::u16string(s.begin(), s.end());
+-  }
+-
+-  // Normalize NaN to positive NaN. Hermes NaN-boxing may set the sign bit
+-  // on NaN values, causing ICU to format as "-NaN" instead of "NaN".
+-  if (std::isnan(number)) {
+-    number = std::numeric_limits<double>::quiet_NaN();
+-  }
+-
+-  // Use Number Formatter v2 for unit formatting.
+-  if (unumf_ && unumfResult_) {
+-    UErrorCode err = U_ZERO_ERROR;
+-    icu_->unumf_formatDouble(unumf_, number, unumfResult_, &err);
+-    if (U_SUCCESS(err)) {
+-      UChar buf[128];
+-      err = U_ZERO_ERROR;
+-      int32_t len = icu_->unumf_resultToString(
+-          unumfResult_, buf, 128, &err);
+-      if (U_SUCCESS(err) && len > 0 && len <= 128) {
+-        return std::u16string(
+-            reinterpret_cast<const char16_t *>(buf), len);
+-      }
+-      if (err == U_BUFFER_OVERFLOW_ERROR && len > 0) {
+-        std::u16string result(len + 1, u' ');
+-        err = U_ZERO_ERROR;
+-        icu_->unumf_resultToString(
+-            unumfResult_,
+-            reinterpret_cast<UChar *>(&result[0]),
+-            len + 1, &err);
+-        result.resize(len);
+-        return result;
+-      }
+-    }
+-    // Fallback to plain number
+-    auto s = std::to_string(number);
+-    return std::u16string(s.begin(), s.end());
+-  }
+-
+-  if (!nf_) {
+-    auto s = std::to_string(number);
+-    return std::u16string(s.begin(), s.end());
+-  }
+-
+-  // Use a stack buffer for the common case to avoid two-pass.
+-  UChar smallBuf[128];
+-  UErrorCode err = U_ZERO_ERROR;
+-  int32_t len = icu_->unum_formatDouble(
+-      nf_, number, smallBuf, 128, nullptr, &err);
+-  if (U_SUCCESS(err) && len > 0 && len <= 128) {
+-    return std::u16string(
+-        reinterpret_cast<const char16_t *>(smallBuf), len);
+-  }
+-  if (err == U_BUFFER_OVERFLOW_ERROR && len > 0) {
+-    std::u16string result(len + 1, u' ');
+-    err = U_ZERO_ERROR;
+-    icu_->unum_formatDouble(
+-        nf_, number,
+-        reinterpret_cast<UChar *>(&result[0]), len + 1, nullptr, &err);
+-    result.resize(len);
+-    return result;
+-  }
+-  auto s = std::to_string(number);
+-  return std::u16string(s.begin(), s.end());
+-}
+-
+-std::vector<Part> NumberFormatIcuProvider::formatToParts(double number) noexcept {
+-  if (!icu_ || !nf_)
+-    return {};
+-
+-  // Normalize NaN to positive NaN (same as format()).
+-  if (std::isnan(number)) {
+-    number = std::numeric_limits<double>::quiet_NaN();
+-  }
+-
+-  // Open a field position iterator.
+-  UErrorCode fpiErr = U_ZERO_ERROR;
+-  UFieldPositionIterator *fpi = icu_->ufieldpositer_open(&fpiErr);
+-  if (U_FAILURE(fpiErr) || !fpi) {
+-    // Fallback: return single "integer" part with the full formatted string.
+-    Part part;
+-    part[u"type"] = u"integer";
+-    part[u"value"] = format(number);
+-    return {part};
+-  }
+-
+-  // Format with field positions.
+-  UChar buf[128];
+-  UErrorCode st = U_ZERO_ERROR;
+-  int32_t len = icu_->unum_formatDoubleForFields(
+-      nf_, number, buf, 128, fpi, &st);
+-  std::u16string formatted;
+-  if (st == U_BUFFER_OVERFLOW_ERROR) {
+-    formatted.resize(len);
+-    icu_->ufieldpositer_close(fpi);
+-    fpi = nullptr;
+-    fpiErr = U_ZERO_ERROR;
+-    fpi = icu_->ufieldpositer_open(&fpiErr);
+-    if (U_FAILURE(fpiErr) || !fpi) {
+-      Part part;
+-      part[u"type"] = u"integer";
+-      part[u"value"] = format(number);
+-      return {part};
+-    }
+-    st = U_ZERO_ERROR;
+-    len = icu_->unum_formatDoubleForFields(
+-        nf_, number,
+-        reinterpret_cast<UChar *>(formatted.data()),
+-        len + 1, fpi, &st);
+-  } else if (U_SUCCESS(st)) {
+-    formatted.assign(reinterpret_cast<const char16_t *>(buf), len);
+-  }
+-  if (U_FAILURE(st)) {
+-    icu_->ufieldpositer_close(fpi);
+-    return {};
+-  }
+-
+-  // Collect field ranges.
+-  struct FieldRange {
+-    int32_t begin;
+-    int32_t end;
+-    int32_t type;
+-  };
++vm::CallResult<const UFormattedValue *> NumberFormatIcuProvider::formatValue(
++    vm::Runtime &runtime, const NumberFormatValue &number) noexcept {
++  // Hermes NaN boxing may set a NaN's sign bit. Intl never emits a negative NaN.
++  UErrorCode status = U_ZERO_ERROR;
++  if (const auto *binary = std::get_if<double>(&number)) {
++    const double normalized = std::isnan(*binary) ? std::numeric_limits<double>::quiet_NaN() : *binary;
++    icu_->unumf_formatDouble(unumf_, normalized, unumfResult_, &status);
++  } else {
++    const auto &decimal = std::get<std::string>(number);
++    icu_->unumf_formatDecimal(unumf_, decimal.data(), decimal.size(), unumfResult_, &status);
++  }
++  if (U_FAILURE(status))
++    return runtime.raiseError("ICU number formatting failed");
++  const auto *value = icu_->unumf_resultAsValue(unumfResult_, &status);
++  if (U_FAILURE(status) || !value)
++    return runtime.raiseError("ICU formatted-number retrieval failed");
++  return value;
++}
++
++vm::CallResult<std::u16string> NumberFormatIcuProvider::format(
++    vm::Runtime &runtime, const NumberFormatValue &number) noexcept {
++  auto value = formatValue(runtime, number);
++  if (value == vm::ExecutionStatus::EXCEPTION)
++    return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  int32_t length;
++  const auto *text = icu_->ufmtval_getString(*value, &length, &status);
++  if (U_FAILURE(status) || !text)
++    return runtime.raiseError("ICU formatted-number string retrieval failed");
++  return std::u16string(reinterpret_cast<const char16_t *>(text), length);
++}
++
++vm::CallResult<std::vector<Part>> NumberFormatIcuProvider::formatToParts(
++    vm::Runtime &runtime, const NumberFormatValue &number) noexcept {
++  auto value = formatValue(runtime, number);
++  if (value == vm::ExecutionStatus::EXCEPTION)
++    return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  int32_t length;
++  const auto *text = icu_->ufmtval_getString(*value, &length, &status);
++  if (U_FAILURE(status) || !text)
++    return runtime.raiseError("ICU formatted-number string retrieval failed");
++  const std::u16string formatted(reinterpret_cast<const char16_t *>(text), length);
++  auto *positions = icu_->ufieldpositer_open(&status);
++  if (U_FAILURE(status) || !positions)
++    return runtime.raiseError("ICU number-field iterator allocation failed");
++  icu_->unumf_resultGetAllFieldPositions(unumfResult_, positions, &status);
++  if (U_FAILURE(status)) {
++    icu_->ufieldpositer_close(positions);
++    return runtime.raiseError("ICU number-field retrieval failed");
++  }
++  struct FieldRange { int32_t begin, end, type; };
+   std::vector<FieldRange> fields;
+-  int32_t beginIdx = 0, endIdx = 0;
+-  int32_t fieldType = icu_->ufieldpositer_next(fpi, &beginIdx, &endIdx);
+-  while (fieldType >= 0) {
+-    fields.push_back({beginIdx, endIdx, fieldType});
+-    fieldType = icu_->ufieldpositer_next(fpi, &beginIdx, &endIdx);
+-  }
+-  icu_->ufieldpositer_close(fpi);
+-
+-  // ICU integer fields contain the grouping-separator fields. Partition the
+-  // string at every field endpoint and choose the most specific covering field;
+-  // emitting each ICU range directly duplicates grouped digits.
+-  std::vector<int32_t> endpoints{0, static_cast<int32_t>(formatted.size())};
+-  for (const auto &field : fields) {
+-    endpoints.push_back(field.begin);
+-    endpoints.push_back(field.end);
+-  }
++  std::vector<int32_t> endpoints{0, length};
++  int32_t begin, end, type;
++  while ((type = icu_->ufieldpositer_next(positions, &begin, &end)) >= 0) {
++    if (begin < 0 || end < begin || end > length) {
++      icu_->ufieldpositer_close(positions);
++      return runtime.raiseError("ICU number-field range is invalid");
++    }
++    fields.push_back({begin, end, type});
++    endpoints.push_back(begin);
++    endpoints.push_back(end);
++  }
++  icu_->ufieldpositer_close(positions);
++  const auto *binary = std::get_if<double>(&number);
++  const bool isNaN = binary && std::isnan(*binary);
++  const bool isInfinity = binary && std::isinf(*binary);
++  const bool isNegative = binary ? std::signbit(*binary) && !isNaN
++      : std::get<std::string>(number).front() == '-';
++  // Integer ranges include group fields. Emit each interval exactly once using
++  // its most specific covering field, rather than duplicating grouped digits.
+   std::sort(endpoints.begin(), endpoints.end());
+   endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+   std::vector<Part> parts;
+@@ -2357,24 +2177,27 @@
+     const auto begin = endpoints[i - 1];
+     const auto end = endpoints[i];
+     const FieldRange *selected = nullptr;
+-    for (const auto &field : fields) {
++    for (const auto &field : fields)
+       if (field.begin <= begin && field.end >= end &&
+           (!selected || field.end - field.begin < selected->end - selected->begin))
+         selected = &field;
+-    }
+-    const auto type = selected ? numberFieldToPartType(selected->type)
+-                               : std::u16string(u"literal");
+-    auto value = formatted.substr(begin, end - begin);
+-    if (!parts.empty() && parts.back().at(u"type") == type) {
+-      parts.back().at(u"value") += value;
+-    } else {
+-      Part part;
+-      part.emplace(u"type", type);
+-      part.emplace(u"value", std::move(value));
+-      parts.push_back(std::move(part));
+-    }
+-  }
+-
++    std::u16string type = u"literal";
++    if (selected) {
++      type = numberFieldToPartType(selected->type);
++      if (selected->type == 11) type = u"unit";
++      else if (selected->type == 12) type = u"compact";
++      else if (selected->type == 13) type = u"approximatelySign";
++      else if (selected->type == 10)
++        type = isNegative ? u"minusSign" : u"plusSign";
++      else if (selected->type == kUNUM_INTEGER_FIELD && isNaN) type = u"nan";
++      else if (selected->type == kUNUM_INTEGER_FIELD && isInfinity) type = u"infinity";
++    }
++    auto segment = formatted.substr(begin, end - begin);
++    if (!parts.empty() && parts.back().at(u"type") == type)
++      parts.back().at(u"value") += segment;
++    else
++      parts.push_back({{u"type", std::move(type)}, {u"value", std::move(segment)}});
++  }
+   return parts;
+ }
+ 
+@@ -2415,12 +2238,12 @@
+   return static_cast<NumberFormatIcuProvider *>(this)->resolvedOptions();
+ }
+ 
+-std::u16string NumberFormat::format(double number) noexcept {
+-  return static_cast<NumberFormatIcuProvider *>(this)->format(number);
+-}
+-
+-std::vector<Part> NumberFormat::formatToParts(double number) noexcept {
+-  return static_cast<NumberFormatIcuProvider *>(this)->formatToParts(number);
++vm::CallResult<std::u16string> NumberFormat::format(vm::Runtime &runtime, const NumberFormatValue &number) noexcept {
++  return static_cast<NumberFormatIcuProvider *>(this)->format(runtime, number);
++}
++
++vm::CallResult<std::vector<Part>> NumberFormat::formatToParts(vm::Runtime &runtime, const NumberFormatValue &number) noexcept {
++  return static_cast<NumberFormatIcuProvider *>(this)->formatToParts(runtime, number);
+ }
+ 
+ } // namespace platform_intl
+--- a/lib/VM/JSLib/Intl.cpp
++++ b/lib/VM/JSLib/Intl.cpp
+@@ -17,6 +17,7 @@
+ #include "hermes/VM/Runtime.h"
+ #include "hermes/VM/StackFrame-inline.h"
+ #include "hermes/VM/StringView.h"
++#include <cmath>
+ 
+ namespace hermes {
+ // TODO T65916424: Move this out of the hermes::vm namespace.
+@@ -52,6 +53,59 @@
+   return std::u16string(view.begin(), view.end());
+ }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++CallResult<platform_intl::NumberFormatValue> toIntlNumberValue(
++    Runtime &runtime, Handle<> input) {
++  using platform_intl::NumberFormatValue;
++  struct : public Locals {
++    PinnedValue<> value;
++    PinnedValue<StringPrimitive> string;
++  } lv;
++  LocalsRAII lraii(runtime, &lv);
++  auto primitive = toPrimitive_RJS(runtime, input, PreferredType::NUMBER);
++  if (primitive == ExecutionStatus::EXCEPTION) return primitive.getStatus();
++  lv.value = *primitive;
++  if (lv.value->isString()) {
++    // Number conversion validates StringNumericLiteral and its overflow/underflow
++    // limits. Preserve its exact finite decimal value instead of the rounded
++    // double; non-decimal integer literals take the existing BigInt parser.
++    auto number = toNumber_RJS(runtime, lv.value);
++    if (number == ExecutionStatus::EXCEPTION) return number.getStatus();
++    if (!std::isfinite(number->getNumber()) || number->getNumber() == 0)
++      return NumberFormatValue(number->getNumber());
++    lv.string = lv.value->getString();
++    auto view = StringPrimitive::createStringView(runtime, lv.string);
++    auto begin = view.begin(), end = view.end();
++    while (begin != end && (isWhiteSpaceChar(*begin) || isLineTerminatorChar(*begin))) ++begin;
++    while (begin != end && (isWhiteSpaceChar(*(end - 1)) || isLineTerminatorChar(*(end - 1)))) --end;
++    std::string decimal;
++    for (auto it = begin; it != end; ++it) decimal.push_back(static_cast<char>(*it));
++    if (decimal.size() > 2 && decimal[0] == '0' &&
++        (decimal[1] == 'x' || decimal[1] == 'X' || decimal[1] == 'b' ||
++         decimal[1] == 'B' || decimal[1] == 'o' || decimal[1] == 'O')) {
++      auto bigint = stringToBigInt(runtime, lv.value);
++      if (bigint == ExecutionStatus::EXCEPTION) return bigint.getStatus();
++      if (!bigint->isBigInt())
++        return runtime.raiseError("Validated integer literal could not be parsed");
++      lv.value = *bigint;
++    } else {
++      return NumberFormatValue(std::move(decimal));
++    }
++  }
++  if (lv.value->isBigInt()) {
++    auto string = toString_RJS(runtime, lv.value);
++    if (string == ExecutionStatus::EXCEPTION) return string.getStatus();
++    lv.string = std::move(*string);
++    auto view = StringPrimitive::createStringView(runtime, lv.string);
++    std::string decimal(view.begin(), view.end());
++    return NumberFormatValue(std::move(decimal));
++  }
++  auto number = toNumber_RJS(runtime, lv.value);
++  if (number == ExecutionStatus::EXCEPTION) return number.getStatus();
++  return NumberFormatValue(number->getNumber());
++}
++#endif
++
+ CallResult<HermesValue> localesToJS(
+     Runtime &runtime,
+     std::vector<std::u16string> &&result) {
+@@ -100,7 +154,29 @@
+   }
+   lv.obj = std::move(*objRes);
+   GCScopeMarkerRAII marker{runtime};
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  // Object insertion order is observable through Object.keys and serialization.
++  // Each service uses the subsequence belonging to its resolved-options record.
++  static constexpr const char16_t *keys[] = {
++      u"locale", u"usage", u"sensitivity", u"ignorePunctuation", u"collation",
++      u"numeric", u"caseFirst", u"calendar", u"numberingSystem", u"timeZone",
++      u"hourCycle", u"hour12", u"weekday", u"era", u"year", u"month", u"day",
++      u"dayPeriod", u"hour", u"minute", u"second", u"fractionalSecondDigits",
++      u"timeZoneName", u"dateStyle", u"timeStyle", u"style", u"currency",
++      u"currencyDisplay", u"currencySign", u"unit", u"unitDisplay",
++      u"minimumIntegerDigits", u"minimumFractionDigits", u"maximumFractionDigits",
++      u"minimumSignificantDigits", u"maximumSignificantDigits", u"useGrouping",
++      u"notation", u"compactDisplay", u"signDisplay", u"roundingIncrement",
++      u"roundingMode", u"roundingPriority", u"trailingZeroDisplay"};
++  size_t emitted = 0;
++  for (const auto *key : keys) {
++    auto found = result.find(key);
++    if (found == result.end()) continue;
++    auto &kv = *found;
++    ++emitted;
++#else
+   for (auto &kv : result) {
++#endif
+     marker.flush();
+     CallResult<HermesValue> keyRes = StringPrimitive::createEfficient(
+         runtime, createUTF16Ref(kv.first.c_str()));
+@@ -127,6 +203,10 @@
+     }
+     assert(*putRes && "put returned false on a plain object");
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  if (emitted != result.size())
++    return runtime.raiseError("Intl resolved options contain an unknown field");
++#endif
+   return lv.obj.getHermesValue();
+ }
+ 
+@@ -147,7 +227,14 @@
+   }
+   lv.obj = std::move(*objRes);
+   GCScopeMarkerRAII marker{runtime};
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  if (result.size() != 2 || !result.count(u"type") || !result.count(u"value"))
++    return runtime.raiseError("Intl part has an invalid shape");
++  for (const auto *key : {u"type", u"value"}) {
++    auto &kv = *result.find(key);
++#else
+   for (auto &kv : result) {
++#endif
+     marker.flush();
+ 
+     CallResult<HermesValue> keyRes = StringPrimitive::createEfficient(
+@@ -312,7 +399,11 @@
+     {u"month",
+      platform_intl::Option::Kind::String,
+      kDateRequired | kDateDefault},
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    {u"dayPeriod", platform_intl::Option::Kind::String, kTimeRequired},
++#else
+     {u"dayPeriod", platform_intl::Option::Kind::String, 0},
++#endif
+     {u"day", platform_intl::Option::Kind::String, kDateRequired | kDateDefault},
+     {u"hour",
+      platform_intl::Option::Kind::String,
+@@ -326,7 +417,11 @@
+     {u"timeZoneName", platform_intl::Option::Kind::String, 0},
+     {u"dateStyle", platform_intl::Option::Kind::String, 0},
+     {u"timeStyle", platform_intl::Option::Kind::String, 0},
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    {u"fractionalSecondDigits", platform_intl::Option::Kind::Number, kTimeRequired},
++#else
+     {u"fractionalSecondDigits", platform_intl::Option::Kind::Number, 0},
++#endif
+ };
+ 
+ constexpr OptionData kNumberFormatOptions[] = {
+@@ -345,7 +440,15 @@
+     {u"minimumSignificantDigits", platform_intl::Option::Kind::Number, 0},
+     {u"maximumSignificantDigits", platform_intl::Option::Kind::Number, 0},
+     {u"compactDisplay", platform_intl::Option::Kind::String, 0},
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    {u"useGrouping", platform_intl::Option::Kind::BoolOrString, 0},
++    {u"roundingIncrement", platform_intl::Option::Kind::Number, 0},
++    {u"roundingMode", platform_intl::Option::Kind::String, 0},
++    {u"roundingPriority", platform_intl::Option::Kind::String, 0},
++    {u"trailingZeroDisplay", platform_intl::Option::Kind::String, 0},
++#else
+     {u"useGrouping", platform_intl::Option::Kind::Bool, 0},
++#endif
+     {u"signDisplay", platform_intl::Option::Kind::String, 0},
+ };
+ 
+@@ -390,7 +493,9 @@
+       continue;
+     }
+ 
+-    if (pod.kind == platform_intl::Option::Kind::Bool) {
++    if (pod.kind == platform_intl::Option::Kind::Bool ||
++        (pod.kind == platform_intl::Option::Kind::BoolOrString &&
++         ((*valRes)->isBool() || !toBoolean(valRes->getHermesValue())))) {
+       ret.emplace(
+           pod.name, platform_intl::Option(toBoolean(valRes->getHermesValue())));
+     } else if (pod.kind == platform_intl::Option::Kind::Number) {
+@@ -402,7 +507,8 @@
+       ret.emplace(pod.name, platform_intl::Option(numRes->getNumber()));
+     } else {
+       assert(
+-          pod.kind == platform_intl::Option::Kind::String &&
++          (pod.kind == platform_intl::Option::Kind::String ||
++           pod.kind == platform_intl::Option::Kind::BoolOrString) &&
+           "Unknown option kind");
+       lv.value = std::move(*valRes);
+       CallResult<PseudoHandle<StringPrimitive>> strRes =
+@@ -1081,8 +1187,14 @@
+   if (LLVM_UNLIKELY(dateRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto result = dateTimeFormat->format(runtime, *dateRes);
++  if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*result));
++#else
+   return StringPrimitive::createEfficient(
+       runtime, dateTimeFormat->format(*dateRes));
++#endif
+ }
+ 
+ CallResult<HermesValue> intlDateTimeFormatPrototypeFormatGetter(
+@@ -1144,7 +1256,13 @@
+   if (LLVM_UNLIKELY(dateRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto result = (*dateTimeFormatRes)->formatToParts(runtime, *dateRes);
++  if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++  return partsToJS(runtime, std::move(*result));
++#else
+   return partsToJS(runtime, (*dateTimeFormatRes)->formatToParts(*dateRes));
++#endif
+ }
+ 
+ CallResult<HermesValue> intlDateTimeFormatPrototypeResolvedOptions(
+@@ -1354,14 +1472,22 @@
+           numberFormatHandle->getDecoration());
+   assert(numberFormat && "Intl.NumberFormat platform part is nullptr");
+ 
+-  // TODO(T150198421): This should be toNumeric as Hermes supports BigInt, but
+-  // Hermes' Intl doesn't. Thus use toNumber.
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto xRes = toIntlNumberValue(runtime, args.getArgHandle(0));
++#else
+   CallResult<HermesValue> xRes = toNumber_RJS(runtime, args.getArgHandle(0));
++#endif
+   if (LLVM_UNLIKELY(xRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto formatted = numberFormat->format(runtime, *xRes);
++  if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*formatted));
++#else
+   return StringPrimitive::createEfficient(
+       runtime, numberFormat->format(xRes->getNumber()));
++#endif
+ }
+ 
+ CallResult<HermesValue> intlNumberFormatPrototypeFormatGetter(
+@@ -1419,14 +1545,22 @@
+     return ExecutionStatus::EXCEPTION;
+   }
+ 
+-  // TODO(T150198421): This should be toNumeric as Hermes supports BigInt, but
+-  // Hermes' Intl doesn't. Thus use toNumber.
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto xRes = toIntlNumberValue(runtime, args.getArgHandle(0));
++#else
+   CallResult<HermesValue> xRes = toNumber_RJS(runtime, args.getArgHandle(0));
++#endif
+   if (LLVM_UNLIKELY(xRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto formatted = (*numberFormatRes)->formatToParts(runtime, *xRes);
++  if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
++  return partsToJS(runtime, std::move(*formatted));
++#else
+   return partsToJS(
+       runtime, (*numberFormatRes)->formatToParts(xRes->getNumber()));
++#endif
+ }
+ 
+ CallResult<HermesValue> intlNumberFormatPrototypeResolvedOptions(
+@@ -1543,7 +1677,13 @@
+     // Naively, the spec requires TimeClip to be called here, but
+     // since in this code path, x comes from a Date slot which has
+     // already been clipped, there's no reason to do it again.
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    auto formatted = (*dtfRes)->format(runtime, x);
++    if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
++    str = std::move(*formatted);
++#else
+     str = (*dtfRes)->format(x);
++#endif
+   }
+ 
+   return StringPrimitive::createEfficient(runtime, std::move(str));
+@@ -1620,7 +1760,13 @@
+   if (LLVM_UNLIKELY(nfRes == ExecutionStatus::EXCEPTION)) {
+     return ExecutionStatus::EXCEPTION;
+   }
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  auto formatted = (*nfRes)->format(runtime, x);
++  if (formatted == ExecutionStatus::EXCEPTION) return formatted.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*formatted));
++#else
+   return StringPrimitive::createEfficient(runtime, (*nfRes)->format(x));
++#endif
+ }
+ 
+ CallResult<HermesValue> intlStringPrototypeLocaleCompare(

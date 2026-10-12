@@ -1,0 +1,36 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction and locales patch stages",
+  "patchSha256": "b533bec5521f5205ec9de408e12a233721ce97013d28ae709406f2216f024cdc",
+  "files": [
+    {
+      "path": "include/hermes/Platform/Intl/PlatformIntl.h",
+      "before": "55feac959d514549c4545cf57a60146f8e3534879f8a1addf1207da06c0c7856",
+      "after": "06d52cb1eda95970f2fac43b8e1304a1179c3d993d152ca037173347d48bd8e8"
+    },
+    {
+      "path": "include/hermes/VM/NativeFunctions.def",
+      "before": "865734403cb058a05303db4af6a0bbaecfd2a39e054818cb03c928f8e2452328",
+      "after": "a726c922d11c6f267c84d9bc27fdb166013c2d23ad38553e8df79cc16c081bb8"
+    },
+    {
+      "path": "include/hermes/VM/PredefinedStrings.def",
+      "before": "e694bb6543fa159c23693245ebea4f9678a5fba4809c7f906fdfb03bc7206bf8",
+      "after": "4879c0858ce17831ff56364daf454fe2227c4f9477f1b0a2af53824663de0835"
+    },
+    {
+      "path": "lib/Platform/Intl/CMakeLists.txt",
+      "before": "1de979d0e459d27c008b951c52c443f939580602a5fbcb082070f2d10aed8d15",
+      "after": "4cc946d2e6c3d54202cd5c9f40839fa5742cfe6fd41f42e2fd9dff48622c4514"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "9eff7ff3f4b1893ecea94b1908543844f2eafa43be8c671672b5d27fc42852a7",
+      "after": "f2c3e0bb0c4e48f9125772418d8e489d567beac39ce1df0c239a6c534bcaac41"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "a946b889d78dc22273c4bfca86438a996fa707a893390bb5b90eee68d89e72d1",
+      "after": "a029fa46beac22aae4e9faed13dc9a71ac7cd36a50d66b03364d7c9862f0b0e2"
+    }
+  ]
+}

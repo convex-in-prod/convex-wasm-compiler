@@ -1,0 +1,36 @@
+{
+  "base": "prepare.py followed by fix-adapter.py",
+  "patchSha256": "81e44b1c5c61b7e8bd3f1835bbdfd2cf32839a1ef7d163377b572355fcf86667",
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "before": "910da710c457dbd4a06e317dc80ffe6518a9a45b5620091c123dc8285c46e337",
+      "after": "e6115b257a86879da1e13694a45d92c72d65ba9e546945f5a91f5258c9ab9a07"
+    },
+    {
+      "path": "include/hermes/Platform/Intl/PlatformIntl.h",
+      "before": "c9864867df47c171b3854c447267520ab4d6ea3ffaf30d0b76af5f399692185a",
+      "after": "4a21a163fc3b04adb6d6a12164baa0346315d6ce6b6f5c88d26905395002c694"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp",
+      "before": "f740b89d9d9fcaf3444dafe95424f7647581fd4473937e4ad4fddfc59e8c568e",
+      "after": "11107a046649bed9ed0c49149fe50e4f8870a04ccaf67bbe2fdcb2e597fb1bb3"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h",
+      "before": "a59275ddbfe97631c1eb765d450b470b8739b41069f3278fbca8a0b2a9b152e3",
+      "after": "323048f2f518254f57f1921e24445381f99e3f4f97c0ddfeb9ef8824d24f38d5"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "4aa1f96c5c120e6842a2890ae470430e9d264a5313d8c9ed6794e0065608ecee",
+      "after": "444ef70791fd1f9fe9ce728520e2bb4d89863b3734e1feb6f945226984fa410c"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "3225eb2d727928d7b61237c6062da5411e5176479371f006290bcf0c342bb94c",
+      "after": "a459bd6a4bd6cda247647178d564ff1b010f1d42dc607a6c05b435c727c6b29a"
+    }
+  ]
+}

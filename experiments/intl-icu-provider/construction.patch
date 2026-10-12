@@ -1,0 +1,274 @@
+--- a/include/hermes/VM/RuntimeHermesValueFields.def
++++ b/include/hermes/VM/RuntimeHermesValueFields.def
+@@ -120,6 +120,9 @@
+ RUNTIME_HV_FIELD(intlDateTimeFormatPrototype, JSObject)
+ RUNTIME_HV_FIELD(intlNumberFormat, NativeConstructor)
+ RUNTIME_HV_FIELD(intlNumberFormatPrototype, JSObject)
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++RUNTIME_HV_FIELD(intlLegacyConstructedSymbol, HermesValue)
++#endif
+ #endif
+ 
+ RUNTIME_HV_FIELD(promiseRejectionTrackingHook_, HermesValue)
+--- a/lib/VM/JSLib/BigInt.cpp
++++ b/lib/VM/JSLib/BigInt.cpp
+@@ -61,7 +61,7 @@
+       Predefined::getSymbolID(Predefined::toLocaleString),
+       ctx,
+       bigintPrototypeToLocaleString,
+-      1);
++      0);
+ 
+   // BigInt.xxx() methods.
+   // https://tc39.es/ecma262/#sec-properties-of-the-bigint-constructor
+--- a/lib/VM/JSLib/Intl.cpp
++++ b/lib/VM/JSLib/Intl.cpp
+@@ -690,6 +690,19 @@
+   return ExecutionStatus::RETURNED;
+ }
+ 
++void defineIntlConstructor(
++    Runtime &runtime,
++    SymbolID name,
++    NativeFunctionPtr function,
++    Handle<JSObject> prototype,
++    unsigned paramCount,
++    MutableHandle<NativeConstructor> out) {
++  out = NativeConstructor::create(
++      runtime, runtime.functionPrototype, nullptr, function, paramCount);
++  runtime.ignoreAllocationFailure(Callable::defineNameLengthAndPrototype(
++      out, runtime, name, paramCount, prototype, Callable::WritablePrototype::No));
++}
++
+ // T here is one of the platform_intl types.  This exists to avoid
+ // duplicating code, since all the ctors are basically the same.
+ template <typename T>
+@@ -772,6 +785,26 @@
+       lv.typeVal);
+   (void)res;
+   assert(res != ExecutionStatus::EXCEPTION && "Setting type cannot fail.");
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  if constexpr (std::is_same<T, platform_intl::DateTimeFormat>::value ||
++                std::is_same<T, platform_intl::NumberFormat>::value) {
++    if (!args.isConstructorCall()) {
++      auto instance = ordinaryHasInstance(runtime, serviceConstructor, args.getThisHandle());
++      if (instance == ExecutionStatus::EXCEPTION) return instance.getStatus();
++      if (*instance) {
++        auto flags = DefinePropertyFlags::getDefaultNewPropertyFlags();
++        flags.writable = flags.enumerable = flags.configurable = 0;
++        auto defined = JSObject::defineOwnProperty(
++            Handle<JSObject>::vmcast(args.getThisHandle()), runtime,
++            runtime.intlLegacyConstructedSymbol.getHermesValue().getSymbol(),
++            flags, lv.self, PropOpFlags().plusThrowOnError());
++        if (defined == ExecutionStatus::EXCEPTION) return defined.getStatus();
++        assert(*defined && "ThrowOnError must reject failed legacy construction");
++        return args.getThisArg();
++      }
++    }
++  }
++#endif
+   return lv.self.getHermesValue();
+ }
+ 
+@@ -811,36 +844,51 @@
+   return localesToJS(runtime, std::move(cr.getValue()));
+ }
+ 
+-// This checks that the handle is valid (the caller may have used
+-// dyn_vmcast to make it), and that the native decoration on the
+-// handle corresponds to the expected class.
++template <typename T>
++bool hasIntlDecoration(Runtime &runtime, Handle<DecoratedObject> handle) {
++  if (!handle) return false;
++  NamedPropertyDescriptor desc;
++  if (!JSObject::getOwnNamedDescriptor(
++          handle, runtime,
++          Predefined::getSymbolID(Predefined::InternalPropertyIntlNativeType), desc))
++    return false;
++  const auto value = JSObject::getNamedSlotValueUnsafe(*handle, runtime, desc);
++  return value.getNumber(runtime) == static_cast<uint32_t>(T::getNativeType());
++}
++
+ template <typename T>
+ CallResult<T *> verifyDecoration(
+-    Runtime &runtime,
+-    Handle<DecoratedObject> handle,
+-    const char *what) {
+-  if (!handle) {
+-    return runtime.raiseTypeError(
+-        TwineChar16(what) + " called with incompatible 'this'");
+-  }
+-
+-  NamedPropertyDescriptor desc;
+-  bool exists = JSObject::getOwnNamedDescriptor(
+-      handle,
+-      runtime,
+-      Predefined::getSymbolID(Predefined::InternalPropertyIntlNativeType),
+-      desc);
+-  if (!exists) {
+-    return runtime.raiseTypeError(
+-        TwineChar16(what) + " called with incompatible 'this'");
+-  }
+-  auto val = JSObject::getNamedSlotValueUnsafe(*handle, runtime, desc);
+-  if (val.getNumber(runtime) != (uint32_t)T::getNativeType()) {
+-    return runtime.raiseTypeError(
+-        TwineChar16(what) + " called with incompatible 'this'");
+-  }
++    Runtime &runtime, Handle<DecoratedObject> handle, const char *what) {
++  if (!hasIntlDecoration<T>(runtime, handle))
++    return runtime.raiseTypeError(TwineChar16(what) + " called with incompatible 'this'");
+   return static_cast<T *>(handle->getDecoration());
+ }
++
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++// Only format and resolvedOptions unwrap legacy receivers. Other methods must
++// require native slots directly, even when a valid fallback symbol is present.
++template <typename T>
++CallResult<PseudoHandle<DecoratedObject>> unwrapIntlReceiver(
++    Runtime &runtime, Handle<> receiver,
++    Handle<NativeConstructor> constructor, const char *what) {
++  auto native = Handle<DecoratedObject>::dyn_vmcast(receiver);
++  if (hasIntlDecoration<T>(runtime, native)) return createPseudoHandle(native.get());
++  if (receiver->isObject()) {
++    auto instance = ordinaryHasInstance(runtime, constructor, receiver);
++    if (instance == ExecutionStatus::EXCEPTION) return instance.getStatus();
++    if (*instance) {
++      auto fallback = JSObject::getNamed_RJS(
++          Handle<JSObject>::vmcast(receiver), runtime,
++          runtime.intlLegacyConstructedSymbol.getHermesValue().getSymbol());
++      if (fallback == ExecutionStatus::EXCEPTION) return fallback.getStatus();
++      auto rooted = runtime.makeHandle(std::move(*fallback));
++      native = Handle<DecoratedObject>::dyn_vmcast(rooted);
++      if (hasIntlDecoration<T>(runtime, native)) return createPseudoHandle(native.get());
++    }
++  }
++  return runtime.raiseTypeError(TwineChar16(what) + " called with incompatible 'this'");
++}
++#endif
+ 
+ } // namespace
+ 
+@@ -909,7 +957,7 @@
+   LocalsRAII lraii(runtime, &lv);
+ 
+   // Create %Collator% intrinsic.
+-  defineSystemConstructor(
++  defineIntlConstructor(
+       runtime,
+       Predefined::getSymbolID(Predefined::Collator),
+       intlCollatorConstructor,
+@@ -1151,7 +1199,7 @@
+   LocalsRAII lraii(runtime, &lv);
+ 
+   // Create %DateTimeFormat% intrinsic.
+-  defineSystemConstructor(
++  defineIntlConstructor(
+       runtime,
+       Predefined::getSymbolID(Predefined::DateTimeFormat),
+       intlDateTimeFormatConstructor,
+@@ -1328,8 +1376,17 @@
+     void *,
+     Runtime &runtime) {
+   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  GCScope scope(runtime);
++  auto unwrapped = unwrapIntlReceiver<platform_intl::DateTimeFormat>(
++      runtime, args.getThisHandle(), Handle<NativeConstructor>(runtime.intlDateTimeFormat),
++      "Intl.DateTimeFormat.prototype.format getter");
++  if (unwrapped == ExecutionStatus::EXCEPTION) return unwrapped.getStatus();
++  auto dateTimeFormatHandle = runtime.makeHandle(std::move(*unwrapped));
++#else
+   Handle<DecoratedObject> dateTimeFormatHandle =
+       args.dyncastThis<DecoratedObject>();
++#endif
+ 
+   CallResult<platform_intl::DateTimeFormat *> dateTimeFormatRes =
+       verifyDecoration<platform_intl::DateTimeFormat>(
+@@ -1396,8 +1453,17 @@
+     void *,
+     Runtime &runtime) {
+   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  GCScope scope(runtime);
++  auto unwrapped = unwrapIntlReceiver<platform_intl::DateTimeFormat>(
++      runtime, args.getThisHandle(), Handle<NativeConstructor>(runtime.intlDateTimeFormat),
++      "Intl.DateTimeFormat.prototype.resolvedOptions");
++  if (unwrapped == ExecutionStatus::EXCEPTION) return unwrapped.getStatus();
++  auto dateTimeFormatHandle = runtime.makeHandle(std::move(*unwrapped));
++#else
+   Handle<DecoratedObject> dateTimeFormatHandle =
+       args.dyncastThis<DecoratedObject>();
++#endif
+ 
+   CallResult<platform_intl::DateTimeFormat *> dateTimeFormatRes =
+       verifyDecoration<platform_intl::DateTimeFormat>(
+@@ -1476,7 +1542,7 @@
+   LocalsRAII lraii(runtime, &lv);
+ 
+   // Create %NumberFormat% intrinsic.
+-  defineSystemConstructor(
++  defineIntlConstructor(
+       runtime,
+       Predefined::getSymbolID(Predefined::NumberFormat),
+       intlNumberFormatConstructor,
+@@ -1621,8 +1687,17 @@
+     void *,
+     Runtime &runtime) {
+   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  GCScope scope(runtime);
++  auto unwrapped = unwrapIntlReceiver<platform_intl::NumberFormat>(
++      runtime, args.getThisHandle(), Handle<NativeConstructor>(runtime.intlNumberFormat),
++      "Intl.NumberFormat.prototype.format getter");
++  if (unwrapped == ExecutionStatus::EXCEPTION) return unwrapped.getStatus();
++  auto numberFormatHandle = runtime.makeHandle(std::move(*unwrapped));
++#else
+   Handle<DecoratedObject> numberFormatHandle =
+       args.dyncastThis<DecoratedObject>();
++#endif
+ 
+   CallResult<platform_intl::NumberFormat *> numberFormatRes =
+       verifyDecoration<platform_intl::NumberFormat>(
+@@ -1694,8 +1769,17 @@
+     void *,
+     Runtime &runtime) {
+   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  GCScope scope(runtime);
++  auto unwrapped = unwrapIntlReceiver<platform_intl::NumberFormat>(
++      runtime, args.getThisHandle(), Handle<NativeConstructor>(runtime.intlNumberFormat),
++      "Intl.NumberFormat.prototype.resolvedOptions");
++  if (unwrapped == ExecutionStatus::EXCEPTION) return unwrapped.getStatus();
++  auto numberFormatHandle = runtime.makeHandle(std::move(*unwrapped));
++#else
+   Handle<DecoratedObject> numberFormatHandle =
+       args.dyncastThis<DecoratedObject>();
++#endif
+ 
+   CallResult<platform_intl::NumberFormat *> numberFormatRes =
+       verifyDecoration<platform_intl::NumberFormat>(
+@@ -2057,6 +2141,9 @@
+ vm::HermesValue createIntlObject(vm::Runtime &runtime) {
+   struct : public vm::Locals {
+     vm::PinnedValue<vm::JSObject> intl;
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++    vm::PinnedValue<vm::StringPrimitive> legacyDescription;
++#endif
+   } lv;
+   vm::LocalsRAII lraii(runtime, &lv);
+ 
+@@ -2082,6 +2169,14 @@
+         dpf);
+   }
+ 
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  lv.legacyDescription.castAndSetHermesValue<vm::StringPrimitive>(
++      runtime.ignoreAllocationFailure(vm::StringPrimitive::create(
++          runtime, llvh::createASCIIRef("IntlLegacyConstructedSymbol"))));
++  const auto legacySymbol = runtime.ignoreAllocationFailure(
++      runtime.getIdentifierTable().createNotUniquedSymbol(runtime, lv.legacyDescription));
++  runtime.intlLegacyConstructedSymbol = vm::HermesValue::encodeSymbolValue(legacySymbol);
++#endif
+   vm::defineIntlCollator(runtime, lv.intl);
+   vm::defineIntlDateTimeFormat(runtime, lv.intl);
+   vm::defineIntlNumberFormat(runtime, lv.intl);

@@ -1,0 +1,26 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings and construction patch stages",
+  "patchSha256": "cbc75a85e8bae81e8acb4ac184bc2f51f671346330d3ca9ed9d331b0dc81c04d",
+  "files": [
+    {
+      "path": "external/icu-small/hermes_icu_glue.cpp",
+      "before": "a444cf7cca9698f0c550645968a9c16c2e98c2198b8b1d3af0f948ff45824036",
+      "after": "ba617502710eb67a494c2c814994a473033681b9cd0a2fbf29d49c9286744d1d"
+    },
+    {
+      "path": "lib/Platform/Intl/BCP47Parser.cpp",
+      "before": "ec05f29f10b0ec57e4a86e7124561bd63fecdcbe2a016d236bcf391d591b52b9",
+      "after": "6b3eadd9078461c277589cb078f873019a05494bac121b554314957059b78550"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp",
+      "before": "1c9a473735d526464ca799c6c2582621757ab5ec4dedad8d5f99085504121e06",
+      "after": "7ed7f1ac7b9e13e2ce69e54d794c9db876459cbd6492d9cf06d11884bbbcf464"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "bae8244bb5e52d5f5edcefa8c080f457015ba630ccd6f8ea96a2a2a9893660f6",
+      "after": "9eff7ff3f4b1893ecea94b1908543844f2eafa43be8c671672b5d27fc42852a7"
+    }
+  ]
+}

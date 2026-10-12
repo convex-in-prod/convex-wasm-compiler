@@ -1,0 +1,883 @@
+{
+  "patchSha256": "81e44b1c5c61b7e8bd3f1835bbdfd2cf32839a1ef7d163377b572355fcf86667",
+  "corpora": {
+    "probe": {
+      "totals": {
+        "cases": 1263,
+        "format": 1263,
+        "parts": 1263,
+        "resolved": 1263,
+        "raw": 1263,
+        "errors": 0
+      },
+      "groups": {
+        "date/0": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/1": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/2": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/3": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/4": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/5": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/6": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/7": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "date/8": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/0": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/1": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/2": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/3": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/4": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/5": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/6": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/7": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/8": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/9": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/10": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "number/11": {
+          "cases": 60,
+          "format": 60,
+          "parts": 60,
+          "resolved": 60,
+          "raw": 60,
+          "errors": 0
+        },
+        "locale-fallback": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "raw": 1,
+          "errors": 0
+        },
+        "exact-integer-string": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "raw": 1,
+          "errors": 0
+        },
+        "bigint": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "raw": 1,
+          "errors": 0
+        }
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 213511,
+          "sha256": "cbfd8743477db670b5ee92a06979261fb6bff11721192a52d2888f77d96490eb"
+        },
+        "wasm": {
+          "bytes": 38914963,
+          "sha256": "04c04d4c2c0ce2ddb0d7cfc64ac87db6d8bb963a31aab9c5cbaca3132b494e0d"
+        }
+      },
+      "beforeDateRefinement": {
+        "cases": 1263,
+        "format": 1263,
+        "parts": 1262,
+        "resolved": 1083,
+        "raw": 1082,
+        "errors": 0
+      }
+    },
+    "contracts": {
+      "totals": {
+        "cases": 4964,
+        "format": 4950,
+        "parts": 4950,
+        "resolved": 4950,
+        "propertyOrder": 4950,
+        "expectedErrors": 14,
+        "matchingErrors": 14,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "groups": {
+        "profile/0": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/1": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/2": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/3": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/4": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/5": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/6": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/7": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/8": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/9": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/10": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/11": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/12": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/13": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/14": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/15": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/16": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/17": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/18": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/19": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/20": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/21": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/22": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/23": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/24": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/25": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/26": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/27": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/28": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/29": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/30": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/31": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/32": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/33": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/34": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/35": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/36": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/37": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/38": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/39": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/40": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/41": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/42": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/43": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/44": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/45": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "profile/46": {
+          "cases": 105,
+          "format": 105,
+          "parts": 105,
+          "resolved": 105,
+          "propertyOrder": 105
+        },
+        "string": {
+          "cases": 11,
+          "format": 11,
+          "parts": 11,
+          "resolved": 11,
+          "propertyOrder": 11
+        },
+        "bigint": {
+          "cases": 2,
+          "format": 2,
+          "parts": 2,
+          "resolved": 2,
+          "propertyOrder": 2
+        },
+        "locale-list": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "propertyOrder": 1
+        },
+        "locale-extension": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "propertyOrder": 1
+        }
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 665461,
+          "sha256": "8a948b05e1d18b4721006d00ff287f8b1ef51f0f145350463629a8676df2a076"
+        },
+        "wasm": {
+          "bytes": 39312051,
+          "sha256": "7764a3326fd46982534e390e4b44e0b4b3d565a1553eb0df92372ca1ac50cdf0"
+        }
+      },
+      "beforeDateRefinement": {
+        "cases": 4962,
+        "format": 4950,
+        "parts": 4950,
+        "resolved": 4950,
+        "propertyOrder": 4950,
+        "expectedErrors": 12,
+        "matchingErrors": 12,
+        "unexpectedErrors": 0,
+        "numberPartsRoundtripFailures": 0
+      }
+    },
+    "dates": {
+      "totals": {
+        "cases": 1281,
+        "format": 1276,
+        "parts": 1276,
+        "resolved": 1276,
+        "propertyOrder": 1276,
+        "expectedErrors": 5,
+        "matchingErrors": 5,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "groups": {
+        "profile/0": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/1": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/2": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/3": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/4": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/5": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/6": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/7": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/8": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/9": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/10": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/11": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/12": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/13": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/14": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/15": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/16": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/17": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/18": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/19": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/20": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/21": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/22": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/23": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/24": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "profile/25": {
+          "cases": 49,
+          "format": 49,
+          "parts": 49,
+          "resolved": 49,
+          "propertyOrder": 49
+        },
+        "locale-list": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "propertyOrder": 1
+        },
+        "locale-extension": {
+          "cases": 1,
+          "format": 1,
+          "parts": 1,
+          "resolved": 1,
+          "propertyOrder": 1
+        }
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 175141,
+          "sha256": "4a9216e4d101df7f52c294ee3c88c1886cd5cf6b9e2841bf2e2f3cac9ffef79c"
+        },
+        "wasm": {
+          "bytes": 38897719,
+          "sha256": "7d8ad0173f06e043cdaa3f770f53d685d4802ce9626e1427d2466f7e2f893f83"
+        }
+      },
+      "beforeDateRefinement": {
+        "cases": 1281,
+        "format": 954,
+        "parts": 904,
+        "resolved": 799,
+        "propertyOrder": 1177,
+        "expectedErrors": 5,
+        "matchingErrors": 5,
+        "unexpectedErrors": 0,
+        "numberPartsRoundtripFailures": 49
+      }
+    }
+  },
+  "referenceVersions": {
+    "node": "24.15.0",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.8",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.3.1",
+    "merve": "1.2.2",
+    "modules": "137",
+    "napi": "10",
+    "nbytes": "0.1.3",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.68.0",
+    "openssl": "3.5.5",
+    "simdjson": "4.5.0",
+    "simdutf": "6.4.0",
+    "sqlite": "3.51.3",
+    "tz": "2026a",
+    "undici": "7.24.4",
+    "unicode": "17.0",
+    "uv": "1.51.0",
+    "uvwasi": "0.0.23",
+    "v8": "13.6.233.17-node.48",
+    "zlib": "1.3.1-e00f703",
+    "zstd": "1.5.7"
+  },
+  "scope": "Standalone native Hermes Intl through Emscripten; released compiler runtime unchanged.",
+  "matchingToMismatchingRegressions": 0
+}

@@ -1,0 +1,567 @@
+--- a/external/icu-small/hermes_icu_glue.cpp
++++ b/external/icu-small/hermes_icu_glue.cpp
+@@ -18,6 +18,7 @@
+ // and skips its own type definitions to avoid redefinition conflicts.
+ 
+ // ICU common headers
++#include <unicode/localebuilder.h>
+ #include "unicode/ubrk.h"
+ #include "unicode/uclean.h"
+ #include "unicode/ucurr.h"
+@@ -99,6 +100,7 @@
+   if (U_FAILURE(*err))
+     return 0;
+ 
++  loc = icu::LocaleBuilder().setLocale(loc).build(*err);
+   loc.canonicalize(*err);
+   if (U_FAILURE(*err))
+     return 0;
+--- a/lib/Platform/Intl/BCP47Parser.cpp
++++ b/lib/Platform/Intl/BCP47Parser.cpp
+@@ -46,7 +46,8 @@
+ bool isUnicodeVariantSubtag(const std::u16string &subtag) {
+   // = (alphanum{5,8} | digit alphanum{3});
+   return isCharType(subtag, 5, 8, &isASCIILetterOrDigit) ||
+-      isCharType(subtag, 3, 3, &isASCIILetterOrDigit);
++      (isCharType(subtag, 4, 4, &isASCIILetterOrDigit) &&
++       isASCIIDigit(subtag.front()));
+ }
+ bool isUnicodeExtensionAttribute(const std::u16string &subtag) {
+   // = alphanum{3,8};
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+@@ -94,128 +94,37 @@
+         vm::TwineChar16(locale.c_str()));
+   }
+ 
+-  // Step 2: Full CLDR canonicalization via ICU.
++  // Match the reference V8's fast path for canonical two-letter languages.
++  // All other inputs use ICU, including non-lowercase spellings of these tags.
++  static const std::unordered_set<std::u16string> legacyLanguages = {
++      u"in", u"iw", u"ji", u"jw", u"mo", u"sh", u"tl", u"no"};
++  if ((locale.size() == 2 && locale[0] >= u'a' && locale[0] <= u'z' &&
++       locale[1] >= u'a' && locale[1] <= u'z' && !legacyLanguages.count(locale)) ||
++      locale == u"fil")
++    return locale;
++
+   auto conversion = UTF16toUTF8(runtime, locale);
+-  if (LLVM_UNLIKELY(conversion == vm::ExecutionStatus::EXCEPTION))
+-    return vm::ExecutionStatus::EXCEPTION;
+-
+-  const std::string &langTag8 = conversion.getValue();
+-
+-  UErrorCode err = U_ZERO_ERROR;
+-  char result[kULOC_FULLNAME_CAPACITY] = {0};
+-  int32_t resultLength = 0;
+-
+-  if (icu->canonicalize_locale_tag) {
+-    // Preferred path: single-step CLDR canonicalization via ICU C++.
+-    // Uses Locale::forLanguageTag + canonicalize (AliasReplacer with full
+-    // CLDR alias data) + toLanguageTag. Handles language, script, territory,
+-    // subdivision, variant, and transformed-extension aliases.
+-    err = U_ZERO_ERROR;
+-    resultLength = icu->canonicalize_locale_tag(
+-        langTag8.c_str(), result, kULOC_FULLNAME_CAPACITY, &err);
+-    if (U_FAILURE(err)) {
+-      return runtime.raiseRangeError(
+-          vm::TwineChar16("Invalid language tag: ") +
+-          vm::TwineChar16(locale.c_str()));
+-    }
+-  } else {
+-    // Fallback: 3-step C API pipeline for providers without C++ access.
+-    // uloc_canonicalize only handles a small static alias table, so some
+-    // CLDR aliases (cmn->zh, SU->RU, etc.) will not be resolved.
+-
+-    // Step 2a: BCP47 -> ICU locale ID
+-    char localeID[kULOC_FULLNAME_CAPACITY] = {0};
+-    icu->uloc_forLanguageTag(
+-        langTag8.c_str(),
+-        localeID,
+-        kULOC_FULLNAME_CAPACITY,
+-        nullptr,
+-        &err);
+-    if (U_FAILURE(err)) {
+-      return runtime.raiseRangeError(
+-          vm::TwineChar16("Invalid language tag: ") +
+-          vm::TwineChar16(locale.c_str()));
+-    }
+-
+-    // Step 2b: Canonicalize ICU locale ID
+-    err = U_ZERO_ERROR;
+-    char canonID[kULOC_FULLNAME_CAPACITY] = {0};
+-    icu->uloc_canonicalize(
+-        localeID, canonID, kULOC_FULLNAME_CAPACITY, &err);
+-    if (U_FAILURE(err)) {
+-      return runtime.raiseRangeError(
+-          vm::TwineChar16("Invalid language tag: ") +
+-          vm::TwineChar16(locale.c_str()));
+-    }
+-
+-    // Step 2c: ICU locale ID -> BCP47
+-    err = U_ZERO_ERROR;
+-    resultLength = icu->uloc_toLanguageTag(
+-        canonID, result, kULOC_FULLNAME_CAPACITY, 1, &err);
+-    if (U_FAILURE(err) || resultLength <= 0) {
+-      return runtime.raiseRangeError(
+-          vm::TwineChar16("Invalid language tag: ") +
+-          vm::TwineChar16(locale.c_str()));
+-    }
+-  }
+-
+-  // Step 3: Re-parse ICU output and fix up known ICU deviations.
+-  auto canonParsed = ParsedLocaleIdentifier::parse(
+-      toUTF16ASCII(std::string(result, resultLength)));
+-  if (!canonParsed) {
+-    return runtime.raiseRangeError(
+-        vm::TwineChar16("Invalid language tag: ") +
+-        vm::TwineChar16(locale.c_str()));
+-  }
+-
+-  // Fix-up: ICU maps "yes" → "true" for ALL unicode extension keys, but
+-  // ECMA-402 only requires this for 5 boolean keys (kb/kc/kh/kk/kn).
+-  // For other keys, restore the original "yes" value.
+-  for (auto &[key, icuValue] : canonParsed->unicodeExtensionKeywords) {
+-    if (key != u"kb" && key != u"kc" && key != u"kh" && key != u"kk" &&
+-        key != u"kn") {
+-      auto origIt = parsed->unicodeExtensionKeywords.find(key);
+-      if (origIt != parsed->unicodeExtensionKeywords.end() &&
+-          origIt->second == u"yes" && icuValue.empty()) {
+-        icuValue = u"yes";
+-      }
+-    }
+-  }
+-
+-  // Fix-up: ICU maps some timezone aliases differently from CLDR BCP47
+-  // preferred values (e.g., "est" → "papty" instead of "utcw05").
+-  auto tzIt = canonParsed->unicodeExtensionKeywords.find(u"tz");
+-  if (tzIt != canonParsed->unicodeExtensionKeywords.end()) {
+-    auto origTzIt = parsed->unicodeExtensionKeywords.find(u"tz");
+-    if (origTzIt != parsed->unicodeExtensionKeywords.end()) {
+-      static const std::pair<std::u16string_view, std::u16string_view>
+-          tzAliases[] = {
+-              {u"aqams", u"nzakl"},    {u"cnckg", u"cnsha"},
+-              {u"cnhrb", u"cnsha"},    {u"cnkhg", u"cnurc"},
+-              {u"cuba", u"cuhav"},     {u"egypt", u"egcai"},
+-              {u"eire", u"iedub"},     {u"est", u"utcw05"},
+-              {u"gmt0", u"gmt"},       {u"hongkong", u"hkhkg"},
+-              {u"hst", u"utcw10"},     {u"iceland", u"isrey"},
+-              {u"iran", u"irthr"},     {u"israel", u"jeruslm"},
+-              {u"jamaica", u"jmkin"},  {u"japan", u"jptyo"},
+-              {u"libya", u"lytip"},    {u"mst", u"utcw07"},
+-              {u"navajo", u"usden"},   {u"poland", u"plwaw"},
+-              {u"portugal", u"ptlis"}, {u"prc", u"cnsha"},
+-              {u"roc", u"twtpe"},      {u"rok", u"krsel"},
+-              {u"turkey", u"trist"},   {u"uct", u"utc"},
+-              {u"usnavajo", u"usden"}, {u"zulu", u"utc"},
+-          };
+-      for (const auto &[alias, canonical] : tzAliases) {
+-        if (origTzIt->second == alias) {
+-          tzIt->second = std::u16string(canonical);
+-          break;
+-        }
+-      }
+-    }
+-  }
+-
+-  // Step 4: Produce the ECMA-402 canonical form via BCP47Parser.
+-  return canonParsed->canonicalize();
++  if (conversion == vm::ExecutionStatus::EXCEPTION) return conversion.getStatus();
++  auto langTag = toLowerASCII(*conversion);
++  assert(icu->canonicalize_locale_tag && "Static ICU canonicalizer is required");
++  std::vector<char> result(kULOC_FULLNAME_CAPACITY);
++  UErrorCode status = U_ZERO_ERROR;
++  int32_t length = icu->canonicalize_locale_tag(
++      langTag.c_str(), result.data(), result.size(), &status);
++  if (status == U_BUFFER_OVERFLOW_ERROR) {
++    if (length <= static_cast<int32_t>(result.size()))
++      return runtime.raiseError("ICU canonical locale size is invalid");
++    // The provider reports the required capacity including the terminator.
++    result.resize(length);
++    status = U_ZERO_ERROR;
++    length = icu->canonicalize_locale_tag(
++        langTag.c_str(), result.data(), result.size(), &status);
++  }
++  if (status == U_ILLEGAL_ARGUMENT_ERROR)
++    return runtime.raiseRangeError("Invalid language tag");
++  if (U_FAILURE(status) || length <= 0 || length >= static_cast<int32_t>(result.size()))
++    return runtime.raiseError("ICU locale canonicalization failed");
++  return toUTF16ASCII(std::string(result.data(), length));
+ }
+ 
+ vm::CallResult<std::vector<std::u16string>> canonicalizeLocaleList(
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -22,6 +22,8 @@
+ #include "hermes/Platform/Intl/hermes_icu.h"
+ 
+ #include <algorithm>
++#include <array>
++#include <memory>
+ #include <cassert>
+ #include <cmath>
+ #include <functional>
+@@ -57,59 +59,90 @@
+   const Options &options_;
+ };
+ 
+-/// Get all available ICU locales as BCP47, cached per vtable.
+-/// Returns a map from lowercased BCP47 key to properly-cased BCP47 value.
+-/// Different ICU providers may support different locale sets.
+-const std::unordered_map<std::string, std::string> &getAvailableLocales(
+-    const hermes_icu_vtable *icu) {
+-  // Cache keyed by vtable pointer. Entries are intentionally leaked
+-  // to avoid destruction order problems. Typically 1-2 entries.
++enum class LocaleResource { All, Calendar, NumberElements };
++using AvailableLocales = std::unordered_map<std::string, std::string>;
++
++vm::CallResult<bool> hasLocaleResource(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu,
++    const std::string &localeICU, const std::u16string &tag, const char *key) {
++  UErrorCode status = U_ZERO_ERROR;
++  auto *bundle = icu->ures_open(nullptr, localeICU.c_str(), &status);
++  bool found = false;
++  if (status == U_ZERO_ERROR && bundle) {
++    auto *resource = icu->ures_getByKey(bundle, key, nullptr, &status);
++    if (!resource && status == U_ZERO_ERROR) {
++      icu->ures_close(bundle);
++      return runtime.raiseError("ICU locale resource result is missing");
++    }
++    found = resource && status == U_ZERO_ERROR;
++    if (resource) icu->ures_close(resource);
++  }
++  if (bundle) icu->ures_close(bundle);
++  if ((U_FAILURE(status) && status != U_MISSING_RESOURCE_ERROR) ||
++      (status == U_ZERO_ERROR && !bundle))
++    return runtime.raiseError("ICU locale resource lookup failed");
++  if (found) return true;
++  auto parsed = ParsedLocaleIdentifier::parse(tag);
++  if (!parsed) return runtime.raiseError("ICU available locale is invalid");
++  auto &language = parsed->languageIdentifier;
++  if (!language.scriptSubtag.empty() && !language.regionSubtag.empty()) {
++    language.regionSubtag.clear();
++  } else if (!language.scriptSubtag.empty() || !language.regionSubtag.empty()) {
++    language.scriptSubtag.clear();
++    language.regionSubtag.clear();
++  } else {
++    return false;
++  }
++  auto parent = parsed->canonicalize();
++  return hasLocaleResource(runtime, icu, convertBCP47toICULocale(icu, parent), parent, key);
++}
++
++// The dataset is immutable. Cache each service's validated locale set, and
++// publish it only after all ICU resource checks succeed.
++vm::CallResult<const AvailableLocales *> getAvailableLocales(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu, LocaleResource resource) {
+   static std::mutex cacheMutex;
+-  static std::unordered_map<
+-      const hermes_icu_vtable *,
+-      std::unordered_map<std::string, std::string> *>
+-      cache;
+-
++  static std::unordered_map<const hermes_icu_vtable *,
++      std::array<std::unique_ptr<AvailableLocales>, 3>> cache;
+   std::lock_guard<std::mutex> lock(cacheMutex);
+-  auto it = cache.find(icu);
+-  if (it != cache.end())
+-    return *it->second;
+-
+-  auto *s = new std::unordered_map<std::string, std::string>();
++  auto &entry = cache[icu][static_cast<size_t>(resource)];
++  if (entry) return entry.get();
++  auto locales = std::make_unique<AvailableLocales>();
++  const char *key = resource == LocaleResource::Calendar ? "calendar" : "NumberElements";
+   int32_t count = icu->uloc_countAvailable();
+-  for (int32_t i = 0; i < count; i++) {
+-    const char *loc = icu->uloc_getAvailable(i);
+-    if (loc) {
+-      std::string bcp47 = convertICUtoBCP47Locale(icu, loc);
+-      s->emplace(toLowerASCII(bcp47), bcp47);
+-      // ICU enumerates script-qualified locales. Include their script-less
+-      // language/region forms too, matching V8's available-locale construction.
+-      auto parsed = ParsedLocaleIdentifier::parse(toUTF16ASCII(bcp47));
+-      if (parsed && !parsed->languageIdentifier.scriptSubtag.empty()) {
+-        auto shortened = parsed->languageIdentifier.languageSubtag;
+-        auto region = parsed->languageIdentifier.regionSubtag;
+-        if (!region.empty()) {
+-          for (auto &c : region) if (c >= u'a' && c <= u'z') c -= u'a' - u'A';
+-          shortened += u"-" + region;
+-        }
+-        const auto tag = toUTF8ASCII(shortened);
+-        s->emplace(toLowerASCII(tag), tag);
+-      }
+-    }
+-  }
+-  cache[icu] = s;
+-  return *s;
+-}
+-
+-/// Get available locales as a u16string vector (for supportedLocalesOf).
+-/// Converts ICU locale IDs to BCP47 format so they match canonicalized
+-/// requested locales in lookupSupportedLocales.
+-std::vector<std::u16string> getAvailableLocalesU16(
+-    vm::Runtime &runtime,
+-    const hermes_icu_vtable *icu) {
++  if (count <= 0) return runtime.raiseError("ICU available locale list is empty");
++  for (int32_t i = 0; i < count; ++i) {
++    const char *locale = icu->uloc_getAvailable(i);
++    if (!locale) return runtime.raiseError("ICU available locale entry is missing");
++    auto bcp47 = convertICUtoBCP47Locale(icu, locale);
++    if (resource != LocaleResource::All) {
++      auto supported = hasLocaleResource(runtime, icu, locale, toUTF16ASCII(bcp47), key);
++      if (supported == vm::ExecutionStatus::EXCEPTION) return supported.getStatus();
++      // Match V8's resource fallback for the Norwegian Bokmal alias.
++      if (!*supported && bcp47 == "nb")
++        supported = hasLocaleResource(runtime, icu, "no", u"no", key);
++      if (supported == vm::ExecutionStatus::EXCEPTION) return supported.getStatus();
++      if (!*supported) continue;
++    }
++    locales->emplace(toLowerASCII(bcp47), bcp47);
++    auto parsed = ParsedLocaleIdentifier::parse(toUTF16ASCII(bcp47));
++    if (!parsed) return runtime.raiseError("ICU available locale is invalid");
++    if (!parsed->languageIdentifier.scriptSubtag.empty()) {
++      parsed->languageIdentifier.scriptSubtag.clear();
++      const auto shortened = toUTF8ASCII(parsed->canonicalize());
++      locales->emplace(toLowerASCII(shortened), shortened);
++    }
++  }
++  entry = std::move(locales);
++  return entry.get();
++}
++
++vm::CallResult<std::vector<std::u16string>> getAvailableLocalesU16(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu, LocaleResource resource) {
++  auto available = getAvailableLocales(runtime, icu, resource);
++  if (available == vm::ExecutionStatus::EXCEPTION) return available.getStatus();
+   std::vector<std::u16string> result;
+-  for (const auto &entry : getAvailableLocales(icu))
+-    result.push_back(toUTF16ASCII(entry.second));
++  for (const auto &entry : **available) result.push_back(toUTF16ASCII(entry.second));
+   std::sort(result.begin(), result.end());
+   return result;
+ }
+@@ -117,9 +150,8 @@
+ /// ECMA-402 BestAvailableLocale (lookup algorithm).
+ /// Returns properly-cased BCP47 locale string from the available set.
+ std::string bestAvailableLocaleICU(
+-    const hermes_icu_vtable *icu,
++    const AvailableLocales &avail,
+     std::u16string_view locale) {
+-  const auto &avail = getAvailableLocales(icu);
+   std::string candidate = toLowerASCII(toUTF8ASCII(std::u16string(locale)));
+   while (true) {
+     auto it = avail.find(candidate);
+@@ -142,53 +174,6 @@
+     return std::nullopt;
+   std::string bcp47 = convertICUtoBCP47Locale(icu, defLoc);
+   return ParsedLocaleIdentifier::parse(toUTF16ASCII(bcp47));
+-}
+-
+-/// Best-fit locale matching via uloc_acceptLanguage.
+-/// Falls back to bestAvailableLocaleICU when optional ICU functions are
+-/// not available (e.g. system icu.dll with limited exports).
+-std::string bestFitBestAvailableLocale(
+-    const hermes_icu_vtable *icu,
+-    const std::u16string &localeNoExt) {
+-  const auto &available = getAvailableLocales(icu);
+-  auto exact = available.find(toLowerASCII(toUTF8ASCII(localeNoExt)));
+-  if (exact != available.end()) return exact->second;
+-
+-  // uloc_openAvailableByType and uloc_acceptLanguage are optional vtable
+-  // entries — they may be nullptr when using a limited ICU provider
+-  // (e.g. the Windows system icu.dll).
+-  if (!icu->uloc_openAvailableByType || !icu->uloc_acceptLanguage) {
+-    return bestAvailableLocaleICU(icu, localeNoExt);
+-  }
+-
+-  std::string localeICU = convertBCP47toICULocale(icu, localeNoExt);
+-  const char *acceptList[1]{localeICU.c_str()};
+-
+-  UErrorCode err = U_ZERO_ERROR;
+-  UEnumeration *availEnum =
+-      icu->uloc_openAvailableByType(ULOC_AVAILABLE_DEFAULT, &err);
+-  if (U_FAILURE(err) || !availEnum)
+-    return std::string();
+-
+-  char result[kULOC_FULLNAME_CAPACITY + 1] = {0};
+-  int32_t outResult = ULOC_ACCEPT_FAILED;
+-  err = U_ZERO_ERROR;
+-  int32_t resultLength = icu->uloc_acceptLanguage(
+-      result,
+-      kULOC_FULLNAME_CAPACITY,
+-      &outResult,
+-      acceptList,
+-      1,
+-      availEnum,
+-      &err);
+-
+-  icu->uenum_close(availEnum);
+-
+-  if (U_SUCCESS(err) && outResult != ULOC_ACCEPT_FAILED &&
+-      resultLength > 0) {
+-    return convertICUtoBCP47Locale(icu, result);
+-  }
+-  return std::string();
+ }
+ 
+ /// Get the locale string without Unicode extensions, with canonical BCP47
+@@ -261,37 +246,18 @@
+     std::pair<std::u16string, std::map<std::u16string, std::u16string>>>;
+ 
+ /// Lookup matcher: find best locale from requested list.
+-ResolvedLocaleResult lookupMatcher(
+-    const hermes_icu_vtable *icu,
+-    const ParsedLocaleList &requestedLocales) {
++vm::CallResult<ResolvedLocaleResult> lookupMatcher(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu,
++    const ParsedLocaleList &requestedLocales, LocaleResource resource) {
++  auto available = getAvailableLocales(runtime, icu, resource);
++  if (available == vm::ExecutionStatus::EXCEPTION) return available.getStatus();
+   for (const auto &[localeNoExt, extMap] : requestedLocales) {
+-    std::string avail = bestAvailableLocaleICU(icu, localeNoExt);
+-    if (!avail.empty()) {
+-      return {toUTF16ASCII(avail), extMap, {}};
+-    }
+-  }
+-  auto defLocale = getDefaultLocale(icu);
+-  if (defLocale) {
+-    return {getLocaleNoExt(*defLocale), {}, {}};
+-  }
+-  return {u"en", {}, {}};
+-}
+-
+-/// Best-fit matcher: use ICU's uloc_acceptLanguage.
+-ResolvedLocaleResult bestFitMatcher(
+-    const hermes_icu_vtable *icu,
+-    const ParsedLocaleList &requestedLocales) {
+-  for (const auto &[localeNoExt, extMap] : requestedLocales) {
+-    std::string avail = bestFitBestAvailableLocale(icu, localeNoExt);
+-    if (!avail.empty()) {
+-      return {toUTF16ASCII(avail), extMap, {}};
+-    }
+-  }
+-  auto defLocale = getDefaultLocale(icu);
+-  if (defLocale) {
+-    return {getLocaleNoExt(*defLocale), {}, {}};
+-  }
+-  return {u"en", {}, {}};
++    auto matched = bestAvailableLocaleICU(**available, localeNoExt);
++    if (!matched.empty()) return ResolvedLocaleResult{toUTF16ASCII(matched), extMap, {}};
++  }
++  auto defaultLocale = getDefaultLocale(icu);
++  if (!defaultLocale) return runtime.raiseError("ICU default locale is invalid");
++  return ResolvedLocaleResult{getLocaleNoExt(*defaultLocale), {}, {}};
+ }
+ 
+ /// ECMA-402 Table 2: Sanctioned simple unit identifiers.
+@@ -440,19 +406,18 @@
+     const std::u16string & /* localeNoExt */)>;
+ 
+ /// ECMA-402 ResolveLocale algorithm.
+-ResolvedLocaleResult resolveLocale(
+-    const hermes_icu_vtable *icu,
++vm::CallResult<ResolvedLocaleResult> resolveLocale(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu,
+     const ParsedLocaleList &requestedLocales,
+     const Options &opt,
+     llvh::ArrayRef<std::u16string_view> relevantExtensionKeys,
+-    const ExtTypeValidator &isExtensionTypeSupported) {
+-  auto matcherIt = opt.find(u"localeMatcher");
+-  bool useLookup = matcherIt != opt.end() &&
+-      matcherIt->second.getString() == u"lookup";
+-
+-  ResolvedLocaleResult matched = useLookup
+-      ? lookupMatcher(icu, requestedLocales)
+-      : bestFitMatcher(icu, requestedLocales);
++    const ExtTypeValidator &isExtensionTypeSupported,
++    LocaleResource resource) {
++  // The reference V8 implements both modes as lookup by default. Its distinct
++  // best-fit implementation remains behind an experimental runtime flag.
++  auto matchResult = lookupMatcher(runtime, icu, requestedLocales, resource);
++  if (matchResult == vm::ExecutionStatus::EXCEPTION) return matchResult.getStatus();
++  auto &matched = *matchResult;
+ 
+   std::map<std::u16string, std::u16string> supportedExts;
+   for (const auto &[key, val] : matched.extensions) {
+@@ -581,12 +546,15 @@
+     if (U_FAILURE(status)) validationStatus = status;
+     return found;
+   };
+-  auto resolved = resolveLocale(icu, *requested, opt, keys, supported);
++  auto resolved = resolveLocale(runtime, icu, *requested, opt, keys, supported,
++      std::find(keys.begin(), keys.end(), u"ca") != keys.end()
++          ? LocaleResource::Calendar : LocaleResource::NumberElements);
++  if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+   if (U_FAILURE(validationStatus))
+     return runtime.raiseError("ICU locale-option resolution failed");
+   if (options.count(u"hour12")) {
+-    resolved.extensions.erase(u"hc");
+-    resolved.resolvedOpts.erase(u"hc");
++    resolved->extensions.erase(u"hc");
++    resolved->resolvedOpts.erase(u"hc");
+   }
+   return resolved;
+ }
+@@ -889,9 +857,12 @@
+                        const std::u16string &localeNoExt) {
+     return isCollatorExtensionTypeSupported(icu_, key, type, localeNoExt);
+   };
+-  ResolvedLocaleResult result = resolveLocale(
++  auto resultRes = resolveLocale(
++      runtime,
+       icu_, requestedLocalesRes.getValue(), opt, relevantExtensionKeys,
+-      validator);
++      validator, LocaleResource::All);
++  if (resultRes == vm::ExecutionStatus::EXCEPTION) return resultRes.getStatus();
++  auto &result = *resultRes;
+ 
+   // 20. Set locale
+   resolvedLocale_ = result.getCanonicalizedLocaleId();
+@@ -1011,12 +982,13 @@
+     const Options &options) noexcept {
+   const hermes_icu_vtable *icu = getIcuVtableForRuntime(runtime);
+ 
+-  auto availableLocales = getAvailableLocalesU16(runtime, icu);
++  auto availableLocales = getAvailableLocalesU16(runtime, icu, LocaleResource::All);
++  if (availableLocales == vm::ExecutionStatus::EXCEPTION) return availableLocales.getStatus();
+   auto requestedLocales = getCanonicalLocales(runtime, locales);
+   if (LLVM_UNLIKELY(requestedLocales == vm::ExecutionStatus::EXCEPTION))
+     return vm::ExecutionStatus::EXCEPTION;
+   return supportedLocales(
+-      runtime, availableLocales, requestedLocales.getValue(), options);
++      runtime, *availableLocales, requestedLocales.getValue(), options);
+ }
+ 
+ vm::CallResult<std::unique_ptr<Collator>> Collator::create(
+@@ -1150,12 +1122,13 @@
+     const Options &options) noexcept {
+   const hermes_icu_vtable *icu = getIcuVtableForRuntime(runtime);
+ 
+-  auto availableLocales = getAvailableLocalesU16(runtime, icu);
++  auto availableLocales = getAvailableLocalesU16(runtime, icu, LocaleResource::Calendar);
++  if (availableLocales == vm::ExecutionStatus::EXCEPTION) return availableLocales.getStatus();
+   auto requestedLocales = getCanonicalLocales(runtime, locales);
+   if (LLVM_UNLIKELY(requestedLocales == vm::ExecutionStatus::EXCEPTION))
+     return vm::ExecutionStatus::EXCEPTION;
+   return supportedLocales(
+-      runtime, availableLocales, requestedLocales.getValue(), options);
++      runtime, *availableLocales, requestedLocales.getValue(), options);
+ }
+ 
+ vm::ExecutionStatus DateTimeFormatIcuProvider::initialize(
+@@ -2263,12 +2236,13 @@
+     const Options &options) noexcept {
+   const hermes_icu_vtable *icu = getIcuVtableForRuntime(runtime);
+ 
+-  auto availableLocales = getAvailableLocalesU16(runtime, icu);
++  auto availableLocales = getAvailableLocalesU16(runtime, icu, LocaleResource::NumberElements);
++  if (availableLocales == vm::ExecutionStatus::EXCEPTION) return availableLocales.getStatus();
+   auto requestedLocales = getCanonicalLocales(runtime, locales);
+   if (LLVM_UNLIKELY(requestedLocales == vm::ExecutionStatus::EXCEPTION))
+     return vm::ExecutionStatus::EXCEPTION;
+   return supportedLocales(
+-      runtime, availableLocales, requestedLocales.getValue(), options);
++      runtime, *availableLocales, requestedLocales.getValue(), options);
+ }
+ 
+ vm::CallResult<std::unique_ptr<NumberFormat>> NumberFormat::create(
