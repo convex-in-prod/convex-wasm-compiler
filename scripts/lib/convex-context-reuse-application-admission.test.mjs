@@ -8,6 +8,7 @@ import {
   authenticateConvexContextReuseApplicationAdmission,
   authenticateConvexContextReuseApplicationAdmissionPolicy,
   captureContextReuseExternalDependencyIdentities,
+  dependencyMaterial,
   loadConvexContextReuseApplicationAdmissionPolicy,
 } from "./convex-context-reuse-application-admission.mjs";
 import {
@@ -96,6 +97,53 @@ test("external dependency capture identifies Node builtins without a package man
     "node:crypto": { packageName: "node:crypto", version: process.version },
   });
   assert.equal(captured.externalDependencyManifestPaths.size, 0);
+});
+
+test("bundled dependency identities distinguish nested versions of the same import", async (context) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "convex-context-reuse-versions-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  const boundaries = [
+    "node_modules/@fixture/shared",
+    "node_modules/parent/node_modules/@fixture/shared",
+  ];
+  for (const [index, boundary] of boundaries.entries()) {
+    await fs.mkdir(join(root, boundary), { recursive: true });
+    await fs.writeFile(join(root, boundary, "package.json"), JSON.stringify({
+      name: "@fixture/shared",
+      version: `${index + 1}.0.0`,
+    }));
+  }
+  const imports = boundaries.map((boundary) => ({
+    external: false,
+    original: "@fixture/shared",
+    path: `${boundary}/index.js`,
+  }));
+  const metafile = { inputs: Object.fromEntries(imports.map((dependency, index) => [
+    `functions/entry${index}.js`, { imports: [dependency] },
+  ])) };
+  const captured = captureContextReuseExternalDependencyIdentities(root, metafile);
+  assert.deepEqual(captured.externalDependencies, {
+    [imports[0].path]: { packageName: "@fixture/shared", version: "1.0.0" },
+    [imports[1].path]: { packageName: "@fixture/shared", version: "2.0.0" },
+  });
+  assert.deepEqual(captured.externalDependencyManifestPaths,
+    new Set(boundaries.map((boundary) => join(root, boundary, "package.json"))));
+  for (const [key, identity] of Object.entries(captured.externalDependencies)) {
+    assert.deepEqual(dependencyMaterial(root, key,
+      captured.externalDependencyResolutions[key]).identity, identity);
+  }
+  await fs.writeFile(join(root, boundaries[1], "package.json"), JSON.stringify({
+    name: "@fixture/shared", version: "3.0.0",
+  }));
+  const changed = captureContextReuseExternalDependencyIdentities(root, metafile);
+  assert.deepEqual(changed.externalDependencies[imports[0].path],
+    captured.externalDependencies[imports[0].path]);
+  assert.equal(changed.externalDependencies[imports[1].path].version, "3.0.0");
+  await fs.writeFile(join(root, boundaries[1], "package.json"), JSON.stringify({
+    name: "different-package", version: "3.0.0",
+  }));
+  assert.throws(() => captureContextReuseExternalDependencyIdentities(root, metafile),
+    /Resolved dependency .* has package name/u);
 });
 
 test("application admission policy accepts explicit first-party roots", () => {

@@ -6278,7 +6278,12 @@ fn analyze_context_reuse_with_encoding_and_policy(
                     });
                 }
                 Some(ResolvedReference::Local(target)) if is_third_party_source(&target) => {
-                    let dependency = input.external_dependencies.get(&reference.specifier);
+                    // Bundled identities follow the resolved install path. Retain
+                    // bare-specifier lookup for callers using the earlier input shape.
+                    let dependency = input
+                        .external_dependencies
+                        .get(&target)
+                        .or_else(|| input.external_dependencies.get(&reference.specifier));
                     let identity = dependency.map_or_else(
                         || target.clone(),
                         |dependency| {
@@ -6297,7 +6302,10 @@ fn analyze_context_reuse_with_encoding_and_policy(
                     });
                 }
                 Some(ResolvedReference::Local(target)) => {
-                    let dependency = input.external_dependencies.get(&reference.specifier);
+                    let dependency = input
+                        .external_dependencies
+                        .get(&target)
+                        .or_else(|| input.external_dependencies.get(&reference.specifier));
                     let package_identity = dependency.map(|dependency| {
                         dependency.version.as_ref().map_or_else(
                             || dependency.package_name.clone(),
@@ -11097,6 +11105,87 @@ void value;
             .find(|diagnostic| diagnostic.rule == "unsupported-runtime-dependency")
             .expect("external edge must produce a boundary diagnostic");
         assert_eq!(diagnostic.severity, "hard");
+    }
+
+    #[test]
+    fn bundled_dependency_diagnostics_use_each_resolved_install_identity() {
+        let (root, mut input) = repeated_finding_analysis_input(2);
+        input.metafile.inputs.clear();
+        let targets = [
+            "node_modules/shared-package/index.js",
+            "node_modules/parent/node_modules/shared-package/index.js",
+        ];
+        // Legacy callers may still supply a bare identity. It must not replace
+        // a more precise identity for the actual resolved installation.
+        input.external_dependencies.insert(
+            "shared-package".to_string(),
+            super::ExternalDependency {
+                package_name: "shared-package".to_string(),
+                version: Some("9.0.0".to_string()),
+            },
+        );
+        for (index, target) in targets.iter().enumerate() {
+            let entry = &input.entry_candidates[index];
+            fs::write(root.0.join(entry),
+                "import { value } from 'shared-package';\nexport const experimental_reuseContext = true;\nvoid value;\n").unwrap();
+            let version = format!("{}.0.0", index + 1);
+            let package = root.0.join(target).parent().unwrap().to_path_buf();
+            fs::create_dir_all(&package).unwrap();
+            fs::write(package.join("index.js"), "export const value = 1;\n").unwrap();
+            fs::write(
+                package.join("package.json"),
+                serde_json::to_vec(&serde_json::json!({"name": "shared-package", "version": version}))
+                    .unwrap(),
+            )
+            .unwrap();
+            input.metafile.inputs.insert(
+                entry.clone(),
+                EsbuildInput {
+                    imports: vec![EsbuildImport {
+                        path: (*target).to_string(),
+                        kind: "import-statement".to_string(),
+                        original: Some("shared-package".to_string()),
+                        external: false,
+                    }],
+                },
+            );
+            input.metafile.inputs.insert(
+                (*target).to_string(),
+                EsbuildInput {
+                    imports: Vec::new(),
+                },
+            );
+            input.external_dependencies.insert(
+                (*target).to_string(),
+                super::ExternalDependency {
+                    package_name: "shared-package".to_string(),
+                    version: Some(version),
+                },
+            );
+        }
+        let output = analyze_context_reuse(
+            &input,
+            &root.0.join("cache"),
+            &mut PhaseMeasurements::default(),
+            Instant::now(),
+        )
+        .unwrap();
+        for (index, target) in targets.iter().enumerate() {
+            let diagnostic = output
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic.rule == "unsupported-runtime-dependency" && diagnostic.file == *target
+                })
+                .expect("unreviewed package must retain its boundary diagnostic");
+            assert_eq!(diagnostic.severity, "unsupported");
+            assert!(
+                diagnostic
+                    .message
+                    .contains(&format!("shared-package@{}.0.0", index + 1))
+            );
+            assert!(!diagnostic.message.contains("shared-package@9.0.0"));
+        }
     }
 
     #[test]

@@ -259,7 +259,10 @@ function packageNameFromBoundary(packageBoundary) {
   return first;
 }
 export function dependencyMaterial(repoRoot, specifier, resolvedInputPath) {
-  const requestedName = packageName(specifier);
+  const requestedName =
+    specifier === resolvedInputPath && specifier.startsWith("node_modules/")
+      ? undefined
+      : packageName(specifier);
   if (specifier.startsWith("node:")) {
     return {
       identity: { packageName: requestedName, version: process.version },
@@ -348,14 +351,18 @@ export function captureContextReuseExternalDependencyIdentities(repoRoot, metafi
       if (dependencySpecifier === undefined) continue;
       const material = dependencyMaterial(resolve(repoRoot), dependencySpecifier, dependency.path);
       const identity = material.identity;
-      const previous = externalDependencies[dependencySpecifier];
+      // Bundled imports resolve relative to their importer. The same bare name
+      // can select different installed versions; bind each resolved target.
+      // Truly external imports retain their unresolved specifier identity.
+      const identityKey = dependency.external ? dependencySpecifier : dependency.path;
+      const previous = externalDependencies[identityKey];
       if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(identity)) {
         throw new Error(
-          `Runtime dependency ${dependencySpecifier} resolves to inconsistent installed package identities.`
+          `Runtime dependency ${identityKey} resolves to inconsistent installed package identities.`
         );
       }
-      externalDependencies[dependencySpecifier] = identity;
-      externalDependencyResolutions[dependencySpecifier] ??= dependency.path;
+      externalDependencies[identityKey] = identity;
+      externalDependencyResolutions[identityKey] ??= dependency.path;
       if (material.packageJsonPath !== undefined) {
         externalDependencyManifestPaths.add(material.packageJsonPath);
       }
