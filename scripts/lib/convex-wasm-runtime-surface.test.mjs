@@ -570,7 +570,7 @@ ${convexWasmApplicationGlobalThisBinding}.console.warn("facade");
   }
   assert.deepEqual(convexWasmTargetRuntimeSurfacePolicy.console, {
     formatting: {
-      browserBundleSha256: "d0f14730c84f853d6e1f262ff82f9e7b3f9f29bcc0eb049a3d841650cb3d5a0c",
+      browserBundleSha256: "c6a687251b8df8bce919ae2b40b7c3f0ecae02b630fdfe0ce58d6a6fb260a389",
       customInspect: true,
       implementation: "shared-untyped-runtime-support-bundle",
       indent: 2,
@@ -599,7 +599,7 @@ test("admits shared deterministic runtime globals through every ordinary read sh
     `const DateTimeFormat = Intl.DateTimeFormat;
      return new DateTimeFormat("en-US", {timeZone: "UTC"}).format(args.timestamp);`,
     `const NumberFormat = Intl["NumberFormat"];
-     return new NumberFormat("ru-RU", {maximumFractionDigits: 2}).format(args.value);`,
+     return new NumberFormat("de-DE", {maximumFractionDigits: 2}).format(args.value);`,
     `return ${convexWasmApplicationGlobalThisBinding}.DOMException;`,
     `return new ${convexWasmApplicationGlobalThisBinding}.URL(args.value, args.base);`,
     `const facade = ${convexWasmApplicationGlobalThisBinding};
@@ -628,19 +628,10 @@ test("admits shared deterministic runtime globals through every ordinary read sh
     convexWasmTargetRuntimeSurfacePolicy.webStandards.runtimeSupportIdentitySha256,
     /^[a-f0-9]{64}$/u
   );
-  assert.deepEqual(convexWasmTargetRuntimeSurfacePolicy.intl.locales, [
-    "en",
-    "en-CA",
-    "en-US",
-    "ru-RU",
-  ]);
-  assert.deepEqual(convexWasmTargetRuntimeSurfacePolicy.intl.timeZoneData, {
-    aliases: 162,
-    canonicalZones: 436,
-    dataSha256: "ab71488450bcde8a12089115a1efc8f0e4da4ee49eb134230805fab384095495",
-    licenseSha256: "6154bb6c9ac34c2ac3ff4217c948fd6b431e3e122a3428d665bebd6f730e9f69",
-    sourceSha256: "af5c1d3bebe136d372c131bb1a45725f955a8cc2a5ae2fc5a31d3b372e145f49",
-    version: "2026c",
-  });
+  assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.locales, "icu-service-resources-with-locale-fallback");
+  assert.deepEqual(convexWasmTargetRuntimeSurfacePolicy.intl.constructors, ["Collator", "DateTimeFormat", "NumberFormat"]);
+  assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.installation, "native-engine-global");
+  assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.data.timeZoneVersion, "2025c");
+  assert.match(convexWasmTargetRuntimeSurfacePolicy.intl.data.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.state, "implemented");
 });

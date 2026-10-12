@@ -1,6 +1,6 @@
 export const gateRevisions = Object.freeze({
   emsdk: "dfb9d1a46c3bb8f52e1e6324be23123b9d73c190",
-  hermes: "4ae2b227fd777b46008e84bf695daeb4586c5f63",
+  hermes: "1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117",
   wasmtime: "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81",
 });
 

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { convexWasmNativeUrlSupportIdentity } from "./convex-wasm-native-url-support.mjs";
 
-const BROWSER_BUNDLE_SHA256 = "d0f14730c84f853d6e1f262ff82f9e7b3f9f29bcc0eb049a3d841650cb3d5a0c";
+const BROWSER_BUNDLE_SHA256 = "c6a687251b8df8bce919ae2b40b7c3f0ecae02b630fdfe0ce58d6a6fb260a389";
 const browserBundle = readFileSync(
   new URL("../vendor/convex-wasm-runtime-support/browser-bundle.js.txt", import.meta.url),
   "utf8"
@@ -11,10 +11,6 @@ const licenseIdentities = Object.freeze({
   "domexception@4.0.0": Object.freeze({
     file: "domexception-4.0.0-LICENSE.txt",
     sha256: "ed71a70f6fae0f721d7d1ed623e842c442b9625ed74930edff98d22257ca727c",
-  }),
-  "iana-tzdata@2026c": Object.freeze({
-    file: "iana-tzdata-2026c-LICENSE.txt",
-    sha256: "6154bb6c9ac34c2ac3ff4217c948fd6b431e3e122a3428d665bebd6f730e9f69",
   }),
   "punycode@2.3.1": Object.freeze({
     file: "punycode-2.3.1-LICENSE-MIT.txt",
@@ -33,24 +29,7 @@ const licenseIdentities = Object.freeze({
     sha256: "db480f236292a093e77a83c35431a8496624e1e664a3547768a9ce2bdde39877",
   }),
 });
-const materialIdentities = Object.freeze({
-  intlSubsetSource: Object.freeze({
-    file: "intl-subset.js.txt",
-    sha256: "dcc25551a8226d71c4a5f0f6cc34bb00afdc6c6213a91b46d2df2b56016b8376",
-    size: 27_235,
-  }),
-  timeZoneData: Object.freeze({
-    aliasCount: 162,
-    canonicalZoneCount: 436,
-    file: "iana-tzdata-2026c.json",
-    sha256: "ab71488450bcde8a12089115a1efc8f0e4da4ee49eb134230805fab384095495",
-    size: 286_916,
-    sourceFile: "iana-tzdata-2026c.zi",
-    sourceSha256: "af5c1d3bebe136d372c131bb1a45725f955a8cc2a5ae2fc5a31d3b372e145f49",
-    sourceSize: 111_358,
-    version: "2026c",
-  }),
-});
+const materialIdentities = Object.freeze({});
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -87,8 +66,8 @@ for (const [name, material] of Object.entries(materialIdentities)) {
 export const convexWasmRuntimeSupportIdentity = Object.freeze({
   browserBundleSha256: BROWSER_BUNDLE_SHA256,
   bundler: Object.freeze({ package: "esbuild@0.27.0", target: "es2020" }),
-  globals: Object.freeze(["DOMException", "Intl", "URL", "URLSearchParams"]),
-  kind: "convex-wasm-shared-untyped-runtime-support-v3",
+  globals: Object.freeze(["DOMException", "URL", "URLSearchParams"]),
+  kind: "convex-wasm-shared-untyped-runtime-support-v4",
   nativeUrl: convexWasmNativeUrlSupportIdentity,
   licenses: licenseIdentities,
   materials: materialIdentities,

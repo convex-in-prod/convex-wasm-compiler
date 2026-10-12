@@ -160,6 +160,7 @@
     "scripts/lib/convex-wasm-native-capability-runtime-main.cpp",
     "scripts/lib/convex-wasm-native-command-runner.mjs",
     "scripts/lib/convex-wasm-native-duplicate-work.mjs",
+    "scripts/lib/convex-wasm-native-intl.mjs",
     "scripts/lib/convex-wasm-native-launch-scheduling.mjs",
     "scripts/lib/convex-wasm-native-object-build.mjs",
     "scripts/lib/convex-wasm-native-package-acquisition.mjs",
@@ -246,6 +247,8 @@
     "scripts/vendor/binaryen/bounded-stackir.patch",
     "scripts/vendor/binaryen/cumulative-inline-budget.patch",
     "scripts/vendor/binaryen/source.json",
+    "scripts/vendor/convex-wasm-native-intl/ADAPTER-LICENSE.txt",
+    "scripts/vendor/convex-wasm-native-intl/ICU-LICENSE.txt",
     "scripts/vendor/convex-wasm-runtime-support/native-url-impl.js.txt",
     "scripts/verify-convex-wasm-source-to-aot.mjs"
   ],

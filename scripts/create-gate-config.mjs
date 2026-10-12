@@ -362,6 +362,7 @@ export function createStaticHermesGateArtifactConfig({
       archives: [
         resolve(gateRoot, "build-wasm", "lib", "libhermesvm_a.a"),
         resolve(gateRoot, "build-wasm", "jsi", "libjsi.a"),
+        resolve(gateRoot, "build-wasm", "external", "icu-small", "libhermesStaticIcu.a"),
       ],
       compileFlags: [
         "-O2",

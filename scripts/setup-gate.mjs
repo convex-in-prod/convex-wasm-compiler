@@ -33,6 +33,9 @@ const runnerName = "convex-wasm-wasmtime-runner";
 // those helpers do not fall back to the bytecode interpreter.
 const staticHermesRuntimeCmakeFlags = [
   "-DHERMESVM_INTERNAL_JAVASCRIPT_NATIVE=ON",
+  "-DHERMES_ENABLE_INTL=ON",
+  "-DHERMES_USE_STATIC_INTL_PROVIDER=ON",
+  "-DHERMES_ICU_FAIL_STOP_ALLOCATION=ON",
 ];
 const staticHermesWasmExceptionFlags = "-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -483,11 +486,17 @@ async function checkGate(root) {
     requireFile(join(root, "build-host", "bin", "shermes"), "Static Hermes compiler", true),
     requireFile(join(root, "build-wasm", "lib", "libhermesvm_a.a"), "Wasm Hermes archive"),
     requireFile(join(root, "build-wasm", "jsi", "libjsi.a"), "Wasm JSI archive"),
+    requireFile(join(root, "build-wasm", "external", "icu-small", "libhermesStaticIcu.a"), "Wasm ICU code and data archive"),
     requireFile(join(root, "build-wasm", "lib", "config", "libhermesvm-config.h"), "Wasm Hermes configuration"),
   ]);
   await Promise.all((await staticHermesHostArchives(join(root, "build-host"))).map((path) =>
     requireFile(path, "Static Hermes host archive")
   ));
+  for (const key of ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"]) {
+    if (!(await cmakeCacheHas(join(root, "build-wasm", "CMakeCache.txt"), key, "ON"))) {
+      throw new Error(`Wasm Hermes archive requires ${key}=ON`);
+    }
+  }
   if (
     !(await cmakeCacheHas(
       join(root, "build-wasm", "CMakeCache.txt"),
@@ -542,7 +551,7 @@ async function checkGate(root) {
       join(root, "build-host"),
       ["shermes", "hermesc", "hermesvm_a", "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi"],
     ],
-    ["wasm", join(root, "build-wasm"), ["hermesvm_a", "jsi"]],
+    ["wasm", join(root, "build-wasm"), ["hermesvm_a", "jsi", "hermesStaticIcu"]],
   ]) {
     if (await buildTargetsPending(buildRoot, targets)) {
       throw new Error(
@@ -622,6 +631,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   const wasmBuildOutputs = [
     join(wasm, "lib", "libhermesvm_a.a"),
     join(wasm, "jsi", "libjsi.a"),
+    join(wasm, "external", "icu-small", "libhermesStaticIcu.a"),
     join(wasm, "lib", "config", "libhermesvm-config.h"),
   ];
   const wasmBuildOutputStates = await Promise.all(
@@ -643,7 +653,14 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       process.env.PATH,
     ].join(":"),
   };
-  const wasmNeedsConfiguration = wasmBuildOutputStates.some((state) => state === null) ||
+  const wasmNativeIntlReady = (await Promise.all(
+    ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"].map(key =>
+      cmakeCacheHas(join(wasm, "CMakeCache.txt"), key, "ON").catch(error => {
+        if (error?.code === "ENOENT") return false;
+        throw error;
+      }))
+  )).every(Boolean);
+  const wasmNeedsConfiguration = !wasmNativeIntlReady || wasmBuildOutputStates.some((state) => state === null) ||
     !(await cmakeCacheHas(
       join(wasm, "CMakeCache.txt"),
       "HERMESVM_INTERNAL_JAVASCRIPT_NATIVE",
@@ -675,7 +692,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   if (wasmNeedsConfiguration) {
     await run(join(emsdk, "upstream", "emscripten", "emcmake"), [
       "cmake", "-S", hermes, "-B", wasm, "-G", "Ninja",
-      "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=OFF",
+      "-DCMAKE_BUILD_TYPE=Release",
       "-DHERMES_ENABLE_NAPI=OFF", "-DHERMES_ENABLE_TOOLS=OFF",
       "-DHERMES_UNICODE_LITE=ON",
       "-DHERMES_ENABLE_TEST_SUITE=OFF",
@@ -688,12 +705,12 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   // Emscripten can generate sysroot headers during the first build, making objects
   // compiled earlier in that build stale. Finish the resulting incremental work.
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await run("cmake", ["--build", wasm, "--target", "hermesvm_a", "jsi", "--parallel", String(jobs)], {
+    await run("cmake", ["--build", wasm, "--target", "hermesvm_a", "jsi", "hermesStaticIcu", "--parallel", String(jobs)], {
       cwd: gateRoot,
       env: wasmBuildEnv,
       timeoutMs: buildTimeoutMs,
     });
-    if (!(await buildTargetsPending(wasm, ["hermesvm_a", "jsi"]))) break;
+    if (!(await buildTargetsPending(wasm, ["hermesvm_a", "jsi", "hermesStaticIcu"]))) break;
   }
   if ((await runnerStatus(gateRoot)) !== "verified") {
     await buildRunner(gateRoot, jobs);

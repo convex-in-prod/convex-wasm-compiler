@@ -5,6 +5,7 @@
 #include <exception>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #ifdef INTL_PROBE_STANDALONE
 #include <cstddef>
 #include <cstdlib>
@@ -125,17 +126,33 @@ int main() {
     icuTrackingInitialized = true;
   }
 #endif
-  // The standalone harness fixes defaults explicitly; production must provide
-  // the same contract without consulting host process locale or timezone state.
-  UErrorCode defaultsError = U_ZERO_ERROR;
-  uloc_setDefault("en_US", &defaultsError);
-  ucal_setDefaultTimeZone(u"UTC", &defaultsError);
-  if (U_FAILURE(defaultsError)) {
-    std::fprintf(stderr, "ICU probe default configuration failed\n");
-    return 1;
+#ifdef INTL_PROBE_BOOTSTRAP
+  // Simulate embedding-process defaults before the provider first starts.
+  // Later runtimes must retain the provider defaults in the same Wasm instance.
+  static bool poisonedDefaults = false;
+  if (!poisonedDefaults) {
+    UErrorCode status = U_ZERO_ERROR;
+    uloc_setDefault("de_DE", &status);
+    ucal_setDefaultTimeZone(u"Pacific/Honolulu", &status);
+    if (U_FAILURE(status)) {
+      std::fprintf(stderr, "ICU ambient-default test setup failed\n");
+      return 1;
+    }
+    poisonedDefaults = true;
   }
-  auto runtime = facebook::hermes::makeHermesRuntime(
-      hermes::vm::RuntimeConfig::Builder().withIntl(true).build());
+#endif
+  // Exercise the same Static Hermes initialization interface and runtime flags
+  // as the compiler's capability runtime, including default Intl enablement.
+  char program[] = "intl-provider-probe";
+  char initHeap[] = "--gc-init-heap=4MiB";
+  char maxHeap[] = "--gc-max-heap=64MiB";
+  char allocYoung[] = "--gc-alloc-young=true";
+  char revertYoung[] = "--gc-revert-to-yg-at-tti=false";
+  char registerStack[] = "--max-register-stack=16384";
+  char nativePromise[] = "-Xnative-promise";
+  char *argv[] = {program, initHeap, maxHeap, allocYoung, revertYoung, registerStack, nativePromise};
+  const std::unique_ptr<SHRuntime, decltype(&_sh_done)> owner(_sh_init(7, argv), _sh_done);
+  auto *runtime = _sh_get_hermes_runtime(owner.get());
   const auto initialized = std::chrono::steady_clock::now();
   auto &js = *runtime;
   using namespace facebook::jsi;
@@ -266,6 +283,22 @@ extern "C" void intl_probe_allocation_failure_configure(int caseIndex, int alloc
 extern "C" int intl_probe_allocation_failures_run() {
   const int status = intl_probe_run();
   icuFailAtAllocation = 0;
+  const int cleanup = cleanupTrackedIcu();
+  return status ? status : cleanup;
+}
+
+extern "C" void intl_probe_cold_allocation_configure(int allocationIndex) {
+  // This entry is called once, before creating any runtime in a fresh instance.
+  if (icuTrackingInitialized || allocationIndex < 0 || allocationIndex > 1000000)
+    std::abort();
+  icuAllocationAttempts = 0;
+  icuFailAtAllocation = static_cast<size_t>(allocationIndex);
+}
+
+extern "C" int intl_probe_cold_allocations_run() {
+  const int status = intl_probe_run();
+  icuFailAtAllocation = 0;
+  std::fprintf(stderr, "{\"coldAllocationAttempts\":%zu}\n", icuAllocationAttempts);
   const int cleanup = cleanupTrackedIcu();
   return status ? status : cleanup;
 }

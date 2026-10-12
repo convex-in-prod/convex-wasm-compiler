@@ -16,14 +16,6 @@ const objectInspectSourceUrl = new URL(
   import.meta.url
 );
 const objectInspectSource = await readFile(objectInspectSourceUrl, "utf8");
-const intlSource = await readFile(
-  new URL("./vendor/convex-wasm-runtime-support/intl-subset.js.txt", import.meta.url),
-  "utf8"
-);
-const intlTimeZoneData = await readFile(
-  new URL("./vendor/convex-wasm-runtime-support/iana-tzdata-2026c.json", import.meta.url),
-  "utf8"
-);
 const unsupportedAsyncIteratorPrototype =
   "const AsyncIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf(async function* () {}).prototype);";
 
@@ -42,15 +34,12 @@ async function loadTargetWebIdlUtilities(path) {
 }
 const entrySource = String.raw`
 import inspect from "convex-wasm-object-inspect";
-import {createIntl} from "convex-wasm-intl-subset";
-import timeZoneData from "convex-wasm-iana-time-zone-data";
 import DOMException from "domexception";
 import {URL, URLSearchParams} from "whatwg-url";
 
 globalThis.__convexWasmApplicationInstallRuntimeSupport(Object.freeze({
   consoleFormatter: inspect,
   DOMException,
-  Intl: createIntl(timeZoneData),
   URL,
   URLSearchParams,
 }));
@@ -87,14 +76,6 @@ const result = await esbuild.build({
           `,
           loader: "js",
         }));
-        build.onResolve({ filter: /^convex-wasm-intl-subset$/ }, () => ({
-          namespace: "convex-wasm-intl-subset",
-          path: "convex-wasm-intl-subset",
-        }));
-        build.onResolve({ filter: /^convex-wasm-iana-time-zone-data$/ }, () => ({
-          namespace: "convex-wasm-iana-time-zone-data",
-          path: "convex-wasm-iana-time-zone-data",
-        }));
         build.onResolve({ filter: /^convex-wasm-object-inspect$/ }, () => ({
           namespace: "convex-wasm-object-inspect",
           path: "object-inspect@1.13.4",
@@ -112,14 +93,6 @@ const result = await esbuild.build({
         }));
         build.onLoad({ filter: /.*/, namespace: "convex-wasm-object-inspect-util" }, () => ({
           contents: "module.exports = {};",
-          loader: "js",
-        }));
-        build.onLoad({ filter: /.*/, namespace: "convex-wasm-intl-subset" }, () => ({
-          contents: intlSource,
-          loader: "js",
-        }));
-        build.onLoad({ filter: /.*/, namespace: "convex-wasm-iana-time-zone-data" }, () => ({
-          contents: `export default ${intlTimeZoneData}`,
           loader: "js",
         }));
         build.onLoad(

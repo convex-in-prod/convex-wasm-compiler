@@ -176,6 +176,7 @@ python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage date-ranges
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage collator
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage locale-errors
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage icu-allocation-policy
+python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage provider-bootstrap
 python3 build.py runtime --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
 node make-corpus.mjs
 node number-contracts.mjs
@@ -301,8 +302,8 @@ and invalid receivers. Forced collection occurs after otherwise-unreferenced
 numeric option objects have been read; later coercion reenters Intl. The three
 formatter corpora still pass all 7,508 cases after this change.
 
-The standalone harness pins ICU defaults to `en-US` and `UTC`; reference and
-Node execution also use UTC. This avoids host-dependent default-zone metadata
+The earlier standalone harness pinned ICU defaults to `en-US` and `UTC`; reference and
+Node execution also used UTC. This avoided host-dependent default-zone metadata
 from Emscripten glue. It does not establish the production runtime's default
 contract. `binding-result-summary.json` retains counts and hashes separately
 from the completed formatter baseline.
@@ -415,6 +416,55 @@ failure artifact's 11 import signatures match the unchanged compiler allowlist.
 The selected ten-stage chain reconstructs 16 source files exactly; the exploratory
 13-file nullable-recovery patch is excluded.
 
+## Provider bootstrap and compiler source adoption
+
+`provider-bootstrap.patch` moves default locale/timezone initialization into the
+provider and embeds the verified dataset in `libhermesStaticIcu.a`. The harness
+now uses `_sh_init`/`_sh_done` with the capability runtime's flags, a 512 KiB stack
+and a 2 MiB initial heap. The 512 MiB linear-memory cap remains a diagnostic
+limit. These replace the earlier manual defaults and 128 MiB initial memory.
+
+Wasmtime passes 528 default-behavior executions and 8,224 binding executions over
+16 runtimes each. The default test deliberately starts ICU with different ambient
+locale/zone settings before provider initialization. Retained allocations stay
+constant, and final cleanup reaches zero. Unchanged configuration/build and
+changed JavaScript corpora preserve the ICU archive, data object and timestamps;
+Ninja reports no work for the unchanged build.
+
+The cold first-use baseline makes 26,706 ICU allocation calls. A bounded sample
+injects 383 failures: the first and last 128 calls plus 127 evenly spaced interior
+points. Every selected failure traps immediately in a fresh instance, which the
+harness discards. This sample is not an exhaustive cold sweep. Reproduce with:
+
+```sh
+LANG=en_US.UTF-8 node bootstrap-contracts.mjs
+LANG=en_US.UTF-8 node cold-allocation-contracts.mjs
+python3 build.py cold-allocations --standalone --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
+node --expose-gc run-cold-allocation-traps.mjs
+```
+
+Maintained Hermes source `1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117` contains the
+native provider as an opt-in Emscripten implementation. The compiler source now
+selects it, authenticates its archive in the global inventory and links that
+archive into the runtime. Host compiler builds keep native Intl disabled. The
+JavaScript support bundle no longer provides Intl or a second timezone dataset;
+its emitted support unit falls from 353,208 to 54,997 bytes. Generic compatibility
+documentation and authenticated adapter/ICU notices accompany the change.
+
+All 13 standalone import signatures remain within the existing host allowlist.
+The refreshed global probe observes native Intl through the mechanical typed
+bridge. The compiler-generated hardening prelude passes 240 Wasmtime executions,
+covering native formatting, subclassing, legacy receivers, extension rejection
+and descriptor-mutation detection. The native support unit and typed capability
+bridge compile. All 122 lowering tests, 39 runtime-policy tests (three optional
+native tests skipped), seven gate tests and two support tests pass.
+
+`provider-bootstrap-result-summary.json` retains the source and artifact
+identities. The eleven-stage experimental chain reconstructs 16 implementation
+files; the maintained source additionally declares the Emscripten-only CMake
+option and documents the provider contract. No release or deployment follows
+from this local source adoption.
+
 ## Limits and integration boundary
 
 Date/number options now use an ordered reader with the bounded coverage above.
@@ -423,19 +473,19 @@ date and number ranges have the coverage above.
 Collator uses the ordered reader with the directed coverage above. These matrices
 do not establish full Test262 conformance or compatibility with V8's experimental
 best-fit matcher. Shared locale conversions now size and check their outputs.
-The allocation policy covers ICU malloc/realloc failures; cold initialization,
-non-ICU allocation, and production discard/accounting still need acceptance.
+The allocation policy covers ICU malloc/realloc failures, including the cold
+sample above. Non-ICU allocation and production discard/accounting still need
+acceptance.
 
 The date-range-stage original-corpus Wasm is 38,938,617 bytes (about 37.13 MiB), including the full
 33,107,248-byte ICU dataset. Its data SHA-256 is
 `a3d49eacd189624769dc77457c6aa1789a89219fb217a6d87d5b076c269aaf1f`.
-Wasm uses 128 MiB initial memory and a 512 MiB cap. No performance or incremental
+That earlier Wasm used 128 MiB initial memory and a 512 MiB cap. No performance or incremental
 backend-cost claim follows from this correctness experiment.
 
-Production integration still requires authenticated compiler imports/builds and
-hardening, deterministic defaults, code/data packaging, native-memory and GC
-lifecycle accounting, cold/native allocation-failure checks, trapped-instance
-discard, and cancellation/fuel behavior.
+Remaining integration acceptance covers the complete compiler/host artifact
+path, native descriptor snapshots, non-ICU/native-memory accounting, actual host
+memory limits, trapped-instance discard, and cancellation/fuel behavior.
 Explicit final GC and the bounded repeated-runtime lifecycle check pass.
 Forced mid-initialization collection with deferred numeric values also passes.
 ICU/CLDR match the local reference but timezone datasets differ. Compare with the

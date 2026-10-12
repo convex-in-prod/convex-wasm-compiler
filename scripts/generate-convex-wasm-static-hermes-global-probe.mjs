@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { fingerprintJson } from "./lib/convex-wasm-artifact-contract.mjs";
 
-const KIND = "convex-wasm-static-hermes-global-probe-report-v2";
+const KIND = "convex-wasm-static-hermes-global-probe-report-v3";
 const runtimeArguments = Object.freeze([
   "--gc-init-heap=4MiB",
   "--gc-max-heap=64MiB",
@@ -235,6 +235,7 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
     ]);
     const wasmArchivePath = resolve(options.wasmBuildPath, "lib/libhermesvm_a.a");
     const jsiArchivePath = resolve(options.wasmBuildPath, "jsi/libjsi.a");
+    const icuArchivePath = resolve(options.wasmBuildPath, "external/icu-small/libhermesStaticIcu.a");
     const linkFlags = [
       "-O2",
       "--profiling-funcs",
@@ -252,6 +253,7 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
       runtimeObjectPath,
       wasmArchivePath,
       jsiArchivePath,
+      icuArchivePath,
       "-o",
       wasmPath,
       ...linkFlags,
@@ -282,6 +284,11 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
       fs.readFile(wasmCmakePath, "utf8"),
       Promise.resolve(run("git", ["rev-parse", "HEAD"], { cwd: options.hermesSourcePath })),
     ]);
+    for (const flag of ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"]) {
+      if (!new RegExp(`^${flag}:BOOL=ON$`, "mu").test(wasmCmakeSource)) {
+        throw new Error(`Native Intl probe requires ${flag}=ON`);
+      }
+    }
     const payload = {
       build: {
         buildRevision: options.buildRevision,
@@ -312,8 +319,9 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
         initialization: "_sh_init",
         reusedObservationCount: 2,
       },
-      schemaVersion: 2,
+      schemaVersion: 3,
       target: {
+        icuArchive: await fileIdentity(icuArchivePath),
         jsiArchive: await fileIdentity(jsiArchivePath),
         wasm: await fileIdentity(wasmPath),
         wasmLibhermesvmArchive: await fileIdentity(wasmArchivePath),
@@ -361,6 +369,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       hostShermesSha256: report.tools.shermes.sha256,
       wasmCmakeCacheSha256: report.build.cmake.wasm.identity.sha256,
       wasmLibhermesvmArchiveSha256: report.target.wasmLibhermesvmArchive.sha256,
+      wasmIcuArchiveSha256: report.target.icuArchive.sha256,
     };
     inventory.targetRuntimeProbe.reportFileSha256 = sha256(reportBytes);
     inventory.targetRuntimeProbe.reportSha256 = report.reportSha256;

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const INVENTORY_KIND = "convex-wasm-static-hermes-global-inventory";
-const GLOBAL_PROBE_REPORT_KIND = "convex-wasm-static-hermes-global-probe-report-v2";
+const GLOBAL_PROBE_REPORT_KIND = "convex-wasm-static-hermes-global-probe-report-v3";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const globalProbeReportPath = new URL(
   "../convex-wasm-static-hermes-global-probe-report.json",
@@ -143,7 +143,7 @@ function validateGlobalProbeReport(report, inventory) {
     ],
     "Static Hermes global probe report"
   );
-  if (report.kind !== GLOBAL_PROBE_REPORT_KIND || report.schemaVersion !== 2) {
+  if (report.kind !== GLOBAL_PROBE_REPORT_KIND || report.schemaVersion !== 3) {
     throw new Error("Static Hermes global probe report kind or schema version changed.");
   }
   const reportPayload = { ...report };
@@ -218,7 +218,8 @@ function validateGlobalProbeReport(report, inventory) {
     report.build.cmake.wasm.identity.sha256 !== inventory.sourceIdentity.wasmCmakeCacheSha256 ||
     report.tools.shermes.sha256 !== inventory.sourceIdentity.hostShermesSha256 ||
     report.target.wasmLibhermesvmArchive.sha256 !==
-      inventory.sourceIdentity.wasmLibhermesvmArchiveSha256
+      inventory.sourceIdentity.wasmLibhermesvmArchiveSha256 ||
+    report.target.icuArchive.sha256 !== inventory.sourceIdentity.wasmIcuArchiveSha256
   ) {
     throw new Error("Static Hermes global probe build materials disagree with the inventory.");
   }
@@ -230,7 +231,7 @@ function validateGlobalProbeReport(report, inventory) {
   };
   if (
     canonicalConvexWasmStaticHermesGlobalInventoryJson(report.build.cmake.host.flags) !==
-      canonicalConvexWasmStaticHermesGlobalInventoryJson(expectedFlags) ||
+      canonicalConvexWasmStaticHermesGlobalInventoryJson({ ...expectedFlags, HERMES_ENABLE_INTL: false }) ||
     canonicalConvexWasmStaticHermesGlobalInventoryJson(report.build.cmake.wasm.flags) !==
       canonicalConvexWasmStaticHermesGlobalInventoryJson(expectedFlags)
   ) {
@@ -302,6 +303,7 @@ export function validateConvexWasmStaticHermesGlobalInventory(
       "typedArraysDeclarationSha256",
       "wasmCmakeCacheSha256",
       "wasmLibhermesvmArchiveSha256",
+      "wasmIcuArchiveSha256",
     ],
     "Static Hermes global inventory sourceIdentity"
   );
@@ -329,7 +331,7 @@ export function validateConvexWasmStaticHermesGlobalInventory(
     value.buildConfiguration.coreExtensions !== true ||
     value.buildConfiguration.contribExtensions !== true ||
     value.buildConfiguration.debugger !== false ||
-    value.buildConfiguration.intl !== false
+    value.buildConfiguration.intl !== true
   ) {
     throw new Error("Static Hermes global inventory build flags changed without review.");
   }

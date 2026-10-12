@@ -9,7 +9,7 @@ import subprocess
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges", "date-ranges", "collator", "allocation-failures", "allocation-boundaries"])
+parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges", "date-ranges", "collator", "bootstrap", "hardening", "cold-allocations", "allocation-failures", "allocation-boundaries"])
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--host-build", required=True, type=Path)
 parser.add_argument("--emsdk", required=True, type=Path)
@@ -116,29 +116,23 @@ else:
     run("main-standalone-compile" if args.standalone else "main-compile", [
         em / "em++", *common, "-std=c++17", *includes,
         *(["-DINTL_PROBE_STANDALONE"] if args.standalone else []),
-        *(["-DINTL_PROBE_ALLOCATION_FAILURES"] if variant == "allocation-failures" and args.standalone else []),
+        *(["-DINTL_PROBE_BOOTSTRAP"] if variant == "bootstrap" else []),
+        *(["-DINTL_PROBE_ALLOCATION_FAILURES"] if variant in ["allocation-failures", "cold-allocations"] and args.standalone else []),
         "-c", root / "main.cpp", "-o", main_object,
     ])
-    # Keep data assembly explicit: the parent Hermes project does not enable ASM.
-    data = build / "external/icu-small/icudt78l.dat"
-    (root / "icudata.s").write_text(
-        '.section .rodata.icudt78_dat,"",@\n.p2align 4\n.globl icudt78_dat\n'
-        '.type icudt78_dat,@object\nicudt78_dat:\n.incbin "' + str(data) +
-        '"\n.size icudt78_dat, .-icudt78_dat\n'
-    )
-    run("data-compile", [em / "emcc", "-c", root / "icudata.s", "-o", root / "icudata.o"])
     link_mode = [
         "--no-entry", "-sSTANDALONE_WASM=1", "-sFILESYSTEM=0",
         "-sSUPPORT_LONGJMP=wasm", "-Wl,--export=intl_probe_run",
         "-Wl,--export=intl_probe_lifecycle_run",
         *(["-Wl,--export=intl_probe_allocation_failures_run", "-Wl,--export=intl_probe_allocation_failure_configure"] if variant == "allocation-failures" else []),
+        *(["-Wl,--export=intl_probe_cold_allocations_run", "-Wl,--export=intl_probe_cold_allocation_configure"] if variant == "cold-allocations" else []),
     ] if args.standalone else ["-sENVIRONMENT=node", "-sEXIT_RUNTIME=1"]
     run(artifact + "-link", [
         em / "em++", *common, main_object, root / (variant + ".o"),
-        root / "icudata.o", build / "lib/libhermesvm_a.a", build / "jsi/libjsi.a",
+        build / "lib/libhermesvm_a.a", build / "jsi/libjsi.a",
         build / "external/icu-small/libhermesStaticIcu.a",
-        "-sALLOW_MEMORY_GROWTH=1", "-sSTACK_SIZE=8388608",
-        "-sINITIAL_MEMORY=134217728", "-sMAXIMUM_MEMORY=536870912",
+        "-sALLOW_MEMORY_GROWTH=1", "-sSTACK_SIZE=512KB",
+        "-sINITIAL_HEAP=2MB", "-sMAXIMUM_MEMORY=536870912",
         *(["--emit-symbol-map"] if variant == "allocation-failures" else []),
         *link_mode, "-o", root / (artifact + (".wasm" if args.standalone else ".mjs")),
     ])

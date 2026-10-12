@@ -35,10 +35,8 @@ test("runtime support is reproducible with its required native URL service", () 
   });
   assert.equal(new installed.URL("/next", "https://example.test/base").href, "https://example.test/next");
   assert.equal(new installed.DOMException("closed", "AbortError").name, "AbortError");
-  assert.equal(
-    new installed.Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric" }).format(0),
-    "1970"
-  );
+  assert.equal(Object.hasOwn(installed, "Intl"), false);
+
 });
 
 test("runtime support rejects a missing native URL service", () => {

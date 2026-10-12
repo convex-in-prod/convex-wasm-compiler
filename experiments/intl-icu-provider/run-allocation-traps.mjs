@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, createWriteStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { WASI } from 'node:wasi';
+import { runProbe } from './probe-wasi.mjs';
 import { finished } from 'node:stream/promises';
 
 const root = new URL('./', process.env.INTL_EXPERIMENT_URL);
@@ -13,34 +13,12 @@ assert.equal(reference.rows.length, 6, 'Incomplete allocation-failure reference'
 const log = createWriteStream(new URL('allocation-traps-evidence.jsonl', root));
 
 function run(caseIndex, allocationIndex) {
-  const stdout = [], stderr = [];
-  const wasi = new WASI({ version: 'preview1', args: [], env: {}, preopens: {} });
-  let instance;
-  const imports = wasi.getImportObject();
-  // Capture writes immediately: a Wasm trap bypasses guest stdio cleanup.
-  imports.wasi_snapshot_preview1.fd_write = (fd, vectors, count, written) => {
-    if (fd !== 1 && fd !== 2) return 8;
-    const data = new DataView(instance.exports.memory.buffer);
-    let total = 0;
-    for (let index = 0; index < count; ++index) {
-      const pointer = data.getUint32(vectors + index * 8, true);
-      const length = data.getUint32(vectors + index * 8 + 4, true);
-      const value = Buffer.from(new Uint8Array(instance.exports.memory.buffer, pointer, length));
-      (fd === 1 ? stdout : stderr).push(value);
-      total += length;
-    }
-    data.setUint32(written, total, true);
-    return 0;
-  };
-  imports.env = { emscripten_notify_memory_growth() {}, __syscall_unlinkat() { return -2; } };
-  instance = new WebAssembly.Instance(module, imports);
-  wasi.initialize(instance);
-  instance.exports.intl_probe_allocation_failure_configure(caseIndex, allocationIndex);
-  let status, error;
-  try { status = instance.exports.intl_probe_allocation_failures_run(); }
-  catch (caught) { error = caught; }
-  const output = Buffer.concat(stdout).toString('utf8').trim().split('\n').map(JSON.parse);
-  const evidence = Buffer.concat(stderr).toString('utf8').trim().split('\n').map(JSON.parse);
+  const result = runProbe(module,
+    exports => exports.intl_probe_allocation_failure_configure(caseIndex, allocationIndex),
+    'intl_probe_allocation_failures_run');
+  const { status, error } = result;
+  const output = result.stdout.trim().split('\n').map(JSON.parse);
+  const evidence = result.stderr.trim().split('\n').map(JSON.parse);
   assert.equal(output.length, 1, 'Missing or extra baseline output');
   const expected = reference.rows[caseIndex];
   assert.equal(output[0].id, expected.id);

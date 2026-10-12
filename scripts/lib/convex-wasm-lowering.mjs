@@ -5356,10 +5356,9 @@ function __convexWasmFormatterInstallRuntimeSupport(support) {
   }
   const supportKeys = Reflect.ownKeys(support);
   if (
-    supportKeys.length !== 5 ||
+    supportKeys.length !== 4 ||
     !Object.hasOwn(support, "consoleFormatter") ||
     !Object.hasOwn(support, "DOMException") ||
-    !Object.hasOwn(support, "Intl") ||
     !Object.hasOwn(support, "URL") ||
     !Object.hasOwn(support, "URLSearchParams")
   ) {
@@ -5368,13 +5367,6 @@ function __convexWasmFormatterInstallRuntimeSupport(support) {
   if (
     typeof support.consoleFormatter !== "function" ||
     typeof support.DOMException !== "function" ||
-    support.Intl === null ||
-    typeof support.Intl !== "object" ||
-    Reflect.ownKeys(support.Intl).length !== 2 ||
-    !Object.hasOwn(support.Intl, "DateTimeFormat") ||
-    !Object.hasOwn(support.Intl, "NumberFormat") ||
-    typeof support.Intl.DateTimeFormat !== "function" ||
-    typeof support.Intl.NumberFormat !== "function" ||
     typeof support.URL !== "function" ||
     typeof support.URLSearchParams !== "function"
   ) {
@@ -5382,9 +5374,6 @@ function __convexWasmFormatterInstallRuntimeSupport(support) {
   }
   Object.freeze(support.consoleFormatter);
   __convexWasmFormatterHardenConstructor(support.DOMException);
-  __convexWasmFormatterHardenConstructor(support.Intl.DateTimeFormat);
-  __convexWasmFormatterHardenConstructor(support.Intl.NumberFormat);
-  Object.freeze(support.Intl);
   __convexWasmFormatterHardenConstructor(support.URL);
   __convexWasmFormatterHardenConstructor(support.URLSearchParams);
   __convexWasmBridgeInstallRuntimeSupport(support);
@@ -5427,14 +5416,6 @@ function ${convexWasmApplicationInstallRuntimeSupportBinding}(support: any): voi
   if (typeof support.DOMException !== "function") {
     throw new Error("Convex Wasm runtime support has an invalid DOMException");
   }
-  if (
-    support.Intl === null ||
-    typeof support.Intl !== "object" ||
-    typeof support.Intl.DateTimeFormat !== "function" ||
-    typeof support.Intl.NumberFormat !== "function"
-  ) {
-    throw new Error("Convex Wasm runtime support has an invalid Intl");
-  }
   if (typeof support.URL !== "function") {
     throw new Error("Convex Wasm runtime support has an invalid URL");
   }
@@ -5442,9 +5423,6 @@ function ${convexWasmApplicationInstallRuntimeSupportBinding}(support: any): voi
     throw new Error("Convex Wasm runtime support has an invalid URLSearchParams");
   }
   if (Object.getOwnPropertyDescriptor(__convexTargetGlobal, "DOMException") !== undefined) {
-    throw new Error("Convex Wasm runtime-support global is unexpectedly present");
-  }
-  if (Object.getOwnPropertyDescriptor(__convexTargetGlobal, "Intl") !== undefined) {
     throw new Error("Convex Wasm runtime-support global is unexpectedly present");
   }
   if (Object.getOwnPropertyDescriptor(__convexTargetGlobal, "URL") !== undefined) {
@@ -5457,11 +5435,6 @@ function ${convexWasmApplicationInstallRuntimeSupportBinding}(support: any): voi
     !Object.isFrozen(support.consoleFormatter) ||
     !Object.isFrozen(support.DOMException) ||
     !Object.isFrozen(support.DOMException.prototype) ||
-    !Object.isFrozen(support.Intl) ||
-    !Object.isFrozen(support.Intl.DateTimeFormat) ||
-    !Object.isFrozen(support.Intl.DateTimeFormat.prototype) ||
-    !Object.isFrozen(support.Intl.NumberFormat) ||
-    !Object.isFrozen(support.Intl.NumberFormat.prototype) ||
     !Object.isFrozen(support.URL) ||
     !Object.isFrozen(support.URL.prototype) ||
     !Object.isFrozen(support.URLSearchParams) ||
@@ -5472,11 +5445,6 @@ function ${convexWasmApplicationInstallRuntimeSupportBinding}(support: any): voi
   Object.defineProperty(__convexTargetGlobal, "DOMException", {
     configurable: false,
     value: support.DOMException,
-    writable: false,
-  });
-  Object.defineProperty(__convexTargetGlobal, "Intl", {
-    configurable: false,
-    value: support.Intl,
     writable: false,
   });
   Object.defineProperty(__convexTargetGlobal, "URL", {
@@ -5492,10 +5460,6 @@ function ${convexWasmApplicationInstallRuntimeSupportBinding}(support: any): voi
   Object.defineProperty(${convexWasmApplicationGlobalThisBinding}, "DOMException", {
     enumerable: true,
     value: support.DOMException,
-  });
-  Object.defineProperty(${convexWasmApplicationGlobalThisBinding}, "Intl", {
-    enumerable: true,
-    value: support.Intl,
   });
   Object.defineProperty(${convexWasmApplicationGlobalThisBinding}, "URL", {
     enumerable: true,

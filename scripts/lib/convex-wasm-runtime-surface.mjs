@@ -19,7 +19,9 @@ import {
   convexWasmRuntimeSupportIdentitySha256,
 } from "./convex-wasm-runtime-support.mjs";
 
-const POLICY_KIND = "convex-wasm-target-runtime-surface-policy-v11";
+import { convexWasmNativeIntlIdentity } from "./convex-wasm-native-intl.mjs";
+
+const POLICY_KIND = "convex-wasm-target-runtime-surface-policy-v12";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const VIRTUAL_SOURCE_PATH = "/convex-wasm-target-compile-profile.js";
 export const convexWasmApplicationGlobalThisBinding = "__convexWasmApplicationGlobalThis";
@@ -243,42 +245,14 @@ export const convexWasmTargetRuntimeSurfacePolicy = freezeJson({
     sha256: convexWasmStaticHermesGlobalPolicySha256,
   },
   intl: {
-    dateTimeFormat: {
-      calendar: "gregory",
-      defaultTimeZone: "UTC",
-      fields: {
-        day: ["numeric", "2-digit"],
-        hour: ["numeric", "2-digit"],
-        minute: ["numeric", "2-digit"],
-        month: ["numeric", "2-digit"],
-        second: ["numeric", "2-digit"],
-        weekday: ["short"],
-        year: ["numeric", "2-digit"],
-      },
-      hourCycle: "h23",
-      methods: ["format", "formatToParts", "resolvedOptions"],
-      numberingSystem: "latn",
-    },
-    implementation: "shared-untyped-runtime-support-bundle",
-    installation: "one-time-hidden-bridge-handoff",
-    locales: ["en", "en-CA", "en-US", "ru-RU"],
-    numberFormat: {
-      fractionDigits: [0, 2],
-      methods: ["format", "resolvedOptions"],
-      numberingSystem: "latn",
-      style: "decimal",
-    },
-    runtimeSupportIdentitySha256: convexWasmRuntimeSupportIdentitySha256,
+    ...convexWasmNativeIntlIdentity,
+    constructors: ["Collator", "DateTimeFormat", "NumberFormat"],
+    methods: ["getCanonicalLocales"],
+    locales: "icu-service-resources-with-locale-fallback",
+    installation: "native-engine-global",
+    formatting: "native-icu-with-v8-compatibility-rules",
+    compatibility: "bounded-differential-coverage-not-complete-ecma402-or-all-v8-versions",
     state: "implemented",
-    timeZoneData: {
-      aliases: convexWasmRuntimeSupportIdentity.materials.timeZoneData.aliasCount,
-      canonicalZones: convexWasmRuntimeSupportIdentity.materials.timeZoneData.canonicalZoneCount,
-      dataSha256: convexWasmRuntimeSupportIdentity.materials.timeZoneData.sha256,
-      licenseSha256: convexWasmRuntimeSupportIdentity.licenses["iana-tzdata@2026c"].sha256,
-      sourceSha256: convexWasmRuntimeSupportIdentity.materials.timeZoneData.sourceSha256,
-      version: convexWasmRuntimeSupportIdentity.materials.timeZoneData.version,
-    },
-    unsupportedSurface: "explicit-rejection",
   },
   kind: POLICY_KIND,
   mathRandom: {

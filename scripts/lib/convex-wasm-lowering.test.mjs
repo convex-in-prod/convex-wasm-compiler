@@ -773,7 +773,6 @@ function nativeConsoleHarness({
   };
   sandbox.__convexTargetGlobal = sandbox;
   sandbox.__convexWasmApplicationGlobalThis = Object.create(null);
-  runInNewContext("delete globalThis.Intl;", sandbox);
   const javascript = ts.transpileModule(renderNativeRuntimeSupportAdapter(), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -3766,20 +3765,20 @@ var __convexWasmCompileProfile = {
   assert.equal(formatterJavascript, renderNativeRuntimeSupportUnit());
   assert.equal(
     sha256(formatterJavascript),
-    "f28595267678618f45ae6a378541f2b5d222efb07f6db6945dc91efcd9677ba1"
+    "5dca47db9c39dbf0bcc53695351512c61b034d53e0512ce40d10a0ef5ab410f8"
   );
-  assert.equal(Buffer.byteLength(formatterJavascript), 353_208);
+  assert.equal(Buffer.byteLength(formatterJavascript), 54997);
   assert.match(
     formatterJavascript,
     /globalThis\.__convexWasmApplicationInstallRuntimeSupport\(Object\.freeze\(\{consoleFormatter:/u
   );
   assert.match(
     formatterJavascript,
-    /const supportKeys = Reflect\.ownKeys\(support\);[\s\S]*?supportKeys\.length !== 5/u
+    /const supportKeys = Reflect\.ownKeys\(support\);[\s\S]*?supportKeys\.length !== 4/u
   );
   assert.match(
     formatterJavascript,
-    /Object\.freeze\(support\.consoleFormatter\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.DOMException\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.Intl\.DateTimeFormat\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.Intl\.NumberFormat\);[\s\S]*?Object\.freeze\(support\.Intl\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.URL\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.URLSearchParams\);/u
+    /Object\.freeze\(support\.consoleFormatter\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.DOMException\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.URL\);[\s\S]*?__convexWasmFormatterHardenConstructor\(support\.URLSearchParams\);/u
   );
   assert.doesNotMatch(formatterJavascript, /var applicationArray = \[\]/u);
 
@@ -3799,7 +3798,7 @@ var __convexWasmCompileProfile = {
   assert.doesNotMatch(bridgeInstaller, /(?:const|let|var)\s+\w+\s*=\s*\[/u);
   assert.match(
     bridgeInstaller,
-    /!Object\.isFrozen\(support\.consoleFormatter\)[\s\S]*?!Object\.isFrozen\(support\.DOMException\)[\s\S]*?!Object\.isFrozen\(support\.DOMException\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.Intl\)[\s\S]*?!Object\.isFrozen\(support\.Intl\.DateTimeFormat\)[\s\S]*?!Object\.isFrozen\(support\.Intl\.DateTimeFormat\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.Intl\.NumberFormat\)[\s\S]*?!Object\.isFrozen\(support\.Intl\.NumberFormat\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.URL\)[\s\S]*?!Object\.isFrozen\(support\.URL\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.URLSearchParams\)[\s\S]*?!Object\.isFrozen\(support\.URLSearchParams\.prototype\)/u
+    /!Object\.isFrozen\(support\.consoleFormatter\)[\s\S]*?!Object\.isFrozen\(support\.DOMException\)[\s\S]*?!Object\.isFrozen\(support\.DOMException\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.URL\)[\s\S]*?!Object\.isFrozen\(support\.URL\.prototype\)[\s\S]*?!Object\.isFrozen\(support\.URLSearchParams\)[\s\S]*?!Object\.isFrozen\(support\.URLSearchParams\.prototype\)/u
   );
   assert.doesNotMatch(bridgeInstaller, /Object\.freeze\(support\./u);
 
@@ -3933,9 +3932,12 @@ test("runtime support rejects extra string and symbol surface keys before bridge
   }
 });
 
-test("shared guest runtime support implements Intl, DOMException, and the WHATWG URL family", () => {
+test("shared guest runtime support preserves native Intl and implements DOMException and the WHATWG URL family", () => {
   const harness = nativeConsoleHarness();
   const evaluateJson = (source) => JSON.parse(harness.evaluate(`JSON.stringify(${source})`));
+  assert.equal(harness.evaluate('typeof Intl.Collator'), 'function');
+  assert.equal(harness.evaluate('typeof Intl.getCanonicalLocales'), 'function');
+
 
   assert.deepEqual(
     evaluateJson(`(() => {
@@ -4016,9 +4018,6 @@ return [value.href, [...value.searchParams]];
   assert.equal(
     harness.evaluate(`
 Object.isFrozen(DOMException) && Object.isFrozen(DOMException.prototype) &&
-Object.isFrozen(Intl) &&
-Object.isFrozen(Intl.DateTimeFormat) && Object.isFrozen(Intl.DateTimeFormat.prototype) &&
-Object.isFrozen(Intl.NumberFormat) && Object.isFrozen(Intl.NumberFormat.prototype) &&
 Object.isFrozen(URL) && Object.isFrozen(URL.prototype) &&
 Object.isFrozen(URLSearchParams) && Object.isFrozen(URLSearchParams.prototype) &&
 Object.isExtensible(__convexWasmApplicationGlobalThis) &&
@@ -4536,7 +4535,7 @@ test("authenticates exact runtime implementations and rejects named target gaps"
     capabilityGlobals: ["Convex", "Date", "console", "crypto", "performance", "process"],
     engineGlobals: convexWasmTargetRuntimeSurfacePolicy.globalObject.application.engineGlobals,
     implementation: "inventory-derived-extensible-null-prototype-immutable-builtins-facade",
-    runtimeSupportGlobals: ["DOMException", "Intl", "URL", "URLSearchParams"],
+    runtimeSupportGlobals: ["DOMException", "URL", "URLSearchParams"],
     selfReference: "globalThis",
     state: "implemented",
   });

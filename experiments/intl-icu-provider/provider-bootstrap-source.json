@@ -1,0 +1,16 @@
+{
+  "base": "prepare.py, fix-adapter.py, then formatters, bindings, construction, locales, number-ranges, icu-cleanup, date-ranges, collator, locale-errors and icu-allocation-policy; excludes the optional icu-allocation-errors diagnostic patch",
+  "patchSha256": "1569ef913a1f4f94997b6dc85ea9cffa50ab1ebf62665d72c950ac7c90cc8e5a",
+  "files": [
+    {
+      "path": "external/icu-small/CMakeLists.txt",
+      "before": "15870285fe26caaef258a1d68f82f995f5a0c8b4179dc7ab2a9b0ec4db9c4995",
+      "after": "404c58a4f940625a0d00f495bb853f8699dc5ee225304ae24510f032da8bc186"
+    },
+    {
+      "path": "external/icu-small/hermes_icu_glue.cpp",
+      "before": "ba617502710eb67a494c2c814994a473033681b9cd0a2fbf29d49c9286744d1d",
+      "after": "a67bd2377a9872368356a761fcf05d4b4afb58c872371e50213f19f8bb4e115b"
+    }
+  ]
+}

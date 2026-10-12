@@ -42,6 +42,7 @@ test("provenance refresh preserves both policies and emitted hardening while evi
     "scripts/lib/convex-wasm-intrinsic-hardening.mjs",
     "scripts/lib/convex-wasm-runtime-support.mjs",
     "scripts/lib/convex-wasm-native-url-support.mjs",
+    "scripts/lib/convex-wasm-native-intl.mjs",
     "scripts/lib/convex-wasm-native-url.h",
     "scripts/lib/convex-wasm-native-url.cpp",
     "scripts/convex-wasm-static-hermes-engine-globals.json",
@@ -84,6 +85,7 @@ test("provenance refresh preserves both policies and emitted hardening while evi
     ["hostShermesSha256", report.tools.shermes],
     ["wasmCmakeCacheSha256", report.build.cmake.wasm.identity],
     ["wasmLibhermesvmArchiveSha256", report.target.wasmLibhermesvmArchive],
+    ["wasmIcuArchiveSha256", report.target.icuArchive],
   ]) {
     material.sha256 = inventory.sourceIdentity[field] = "2".repeat(64);
   }
@@ -131,7 +133,7 @@ test("provenance refresh preserves both policies and emitted hardening while evi
 });
 
 test("admits ordinary pinned runtime globals from availability and access policy", () => {
-  assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.length, 71);
+  assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.length, 72);
   assert.equal(convexWasmStaticHermesGlobalInventorySha256.length, 64);
   for (const name of ["TextDecoder", "atob", "btoa", "queueMicrotask"]) {
     assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.includes(name), true, name);
@@ -153,7 +155,7 @@ test("admits ordinary pinned runtime globals from availability and access policy
   }
   assert.equal(convexWasmStaticHermesTypedDeclarationGlobals.includes("Worker"), true);
   assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.includes("Worker"), false);
-  for (const name of ["DOMException", "Intl", "URL", "URLSearchParams"]) {
+  for (const name of ["DOMException", "URL", "URLSearchParams"]) {
     assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.includes(name), false, name);
     assert.equal(convexWasmStaticHermesTypedDeclarationGlobals.includes(name), false, name);
     assert.equal(convexWasmSharedRuntimeSupportGlobals.includes(name), true, name);
@@ -169,6 +171,10 @@ test("admits ordinary pinned runtime globals from availability and access policy
       name
     );
   }
+  assert.equal(convexWasmStaticHermesTargetRuntimeGlobals.includes("Intl"), true);
+  assert.equal(convexWasmSharedRuntimeSupportGlobals.includes("Intl"), false);
+  assert.equal(convexWasmApplicationGlobalFacadeEngineGlobals.includes("Intl"), true);
+  assert.equal(convexWasmStaticHermesGlobalInventory.semantics.Intl.provider, "engine-runtime-untyped+typed-bridge");
   assert.equal(convexWasmAdmittedStaticHermesGlobals.includes("TextEncoder"), true);
   assert.equal(convexWasmRoutingEligibleStaticHermesGlobals.includes("TextEncoder"), true);
   assert.equal(convexWasmStaticHermesGlobalInventory.semantics.TextDecoder.access, undefined);
@@ -355,6 +361,7 @@ test("binds authenticated build sources to the observed checkout", () => {
     "hostShermesSha256",
     "wasmCmakeCacheSha256",
     "wasmLibhermesvmArchiveSha256",
+    "wasmIcuArchiveSha256",
   ]) {
     assert.match(identity[field], /^[a-f0-9]{64}$/u, field);
   }

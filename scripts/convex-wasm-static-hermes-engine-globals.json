@@ -1,22 +1,23 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "4ae2b227fd777b46008e84bf695daeb4586c5f63",
-    "sourceRevision": "4ae2b227fd777b46008e84bf695daeb4586c5f63",
-    "observedCheckoutRevision": "4ae2b227fd777b46008e84bf695daeb4586c5f63",
+    "buildRevision": "1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117",
+    "sourceRevision": "1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117",
+    "observedCheckoutRevision": "1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
-    "hostCmakeCacheSha256": "5dd90f62453e607d0d90a924a0cf4267836836fa515208dd3c89dd2cac8516e8",
+    "hostCmakeCacheSha256": "61652480293f0d1ab3281094546f4fbe96b50da47778a230585eb02b5d67043a",
     "hostShermesSha256": "467a556c44ec0d49b3bd3a7333aa138d04b42a030ea63c56f80f1dc37b60e4a8",
-    "wasmCmakeCacheSha256": "9c0a5f75f1e9508919a878327955db7a99df6d3a5240036ba23d0fd5051650d2",
-    "wasmLibhermesvmArchiveSha256": "8b378a951d13343bee684176926a1b73dbf7dcb5aacde7b651f2b1879f8fcf90"
+    "wasmCmakeCacheSha256": "c630d8cc4f802533cdfb8dc5f69fe7b6936402d6208a4d8ce306ee5770c86fcd",
+    "wasmLibhermesvmArchiveSha256": "eb7de58f2ce279c7ae9df4b69739fdcb2c771e0f3266c907566f92a20e4dc14a",
+    "wasmIcuArchiveSha256": "47750aeca21fdfcea5203c3a5f1a750365ed4373a63daa2541c8219098b9266b"
   },
   "buildConfiguration": {
     "coreExtensions": true,
     "contribExtensions": true,
     "debugger": false,
-    "intl": false
+    "intl": true
   },
   "registrationConditions": {
     "coreExtensions": {
@@ -51,8 +52,8 @@
       ]
     },
     "intlBuildAndRuntime": {
-      "enabled": false,
-      "omittedGlobals": [
+      "enabled": true,
+      "globals": [
         "Intl"
       ]
     },
@@ -73,8 +74,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "083378e4b4c6fa42c3cd57d2c306b61587d596c48901807a2001105cc896246c",
-    "reportSha256": "3453fcd53bb7c664c4f657b20a3eca8e6422449c975ab41013f6fffb30497d4a",
+    "reportFileSha256": "d70eee9f78f828569590dd05133777539fec4389565314762199045374425470",
+    "reportSha256": "b2fb85ad8887c07b5f0ae36b5f1af5e8f36ce2d4d78c0ef7aca3d7d5ff3fc01f",
     "globals": [
       "$SHBuiltin",
       "AggregateError",
@@ -99,6 +100,7 @@
       "Int16Array",
       "Int32Array",
       "Int8Array",
+      "Intl",
       "Iterator",
       "JSON",
       "Map",
@@ -219,7 +221,6 @@
   },
   "reviewedAbsentGlobals": [
     "DOMException",
-    "Intl",
     "URL",
     "URLSearchParams"
   ],
@@ -409,7 +410,7 @@
     },
     "Intl": {
       "class": "deterministic-ecmascript",
-      "provider": "shared-untyped-runtime-support",
+      "provider": "engine-runtime-untyped+typed-bridge",
       "read": {
         "state": "admitted"
       }

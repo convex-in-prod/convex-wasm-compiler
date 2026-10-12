@@ -1,0 +1,50 @@
+--- a/external/icu-small/CMakeLists.txt
++++ b/external/icu-small/CMakeLists.txt
+@@ -8,10 +8,25 @@
+     "${CMAKE_CURRENT_SOURCE_DIR}/source/data/in/icudt78l.dat.bz2" "${ICU_DAT}"
+     COMMAND_ERROR_IS_FATAL ANY)
+ endif()
++file(SHA256 "${ICU_DAT}" ICU_DATA_SHA256)
++if(NOT ICU_DATA_SHA256 STREQUAL "a3d49eacd189624769dc77457c6aa1789a89219fb217a6d87d5b076c269aaf1f")
++  message(FATAL_ERROR "Pinned ICU locale data digest differs")
++endif()
++# Code and data form one reusable archive. Application module edits do not
++# regenerate this assembly or rebuild the data object.
++set(ICU_DATA_ASSEMBLY "${CMAKE_CURRENT_BINARY_DIR}/hermes_icu_data.s")
++set(ICU_DATA_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/hermes_icu_data.o")
++file(GENERATE OUTPUT "${ICU_DATA_ASSEMBLY}" CONTENT
++  ".section .rodata.icudt78_dat,\"\",@\n.p2align 4\n.globl icudt78_dat\n.type icudt78_dat,@object\nicudt78_dat:\n.incbin \"${ICU_DAT}\"\n.size icudt78_dat, .-icudt78_dat\n")
++add_custom_command(OUTPUT "${ICU_DATA_OBJECT}"
++  COMMAND "${CMAKE_C_COMPILER}" -c "${ICU_DATA_ASSEMBLY}" -o "${ICU_DATA_OBJECT}"
++  DEPENDS "${ICU_DATA_ASSEMBLY}" "${ICU_DAT}"
++  VERBATIM)
++set_source_files_properties("${ICU_DATA_OBJECT}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+ file(GLOB ICU_COMMON_SOURCES source/common/*.cpp source/common/*.c)
+ file(GLOB ICU_I18N_SOURCES source/i18n/*.cpp source/i18n/*.c)
+ add_library(hermesStaticIcu STATIC ${ICU_COMMON_SOURCES} ${ICU_I18N_SOURCES}
+-  hermes_icu_glue.cpp)
++  hermes_icu_glue.cpp "${ICU_DATA_OBJECT}")
+ target_include_directories(hermesStaticIcu BEFORE PRIVATE source/common source/i18n ${CMAKE_SOURCE_DIR}/include)
+ target_compile_definitions(hermesStaticIcu PRIVATE U_STATIC_IMPLEMENTATION=1 U_DISABLE_RENAMING=1
+   U_ENABLE_DYLOAD=0 UCONFIG_NO_SERVICE=1 U_HAVE_STD_STRING=1 U_ATTRIBUTE_DEPRECATED=)
+--- a/external/icu-small/hermes_icu_glue.cpp
++++ b/external/icu-small/hermes_icu_glue.cpp
+@@ -458,5 +458,18 @@
+ 
+ extern "C" HERMES_ICU_API const hermes_icu_vtable *HERMES_ICU_CDECL
+ hermes_icu_get_vtable(void) {
++  // These defaults are part of the provider contract, independent of the
++  // embedding process environment. The provider owns ICU for this instance;
++  // full ICU cleanup is only valid when the instance is being discarded.
++  static const bool configured = [] {
++    UErrorCode status = U_ZERO_ERROR;
++    uloc_setDefault("en_US", &status);
++    ucal_setDefaultTimeZone(u"UTC", &status);
++    if (U_FAILURE(status)) {
++      __builtin_trap();
++    }
++    return true;
++  }();
++  (void)configured;
+   return &s_vtable;
+ }

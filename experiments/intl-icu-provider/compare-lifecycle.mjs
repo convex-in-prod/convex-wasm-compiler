@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 const root = new URL('./', process.env.INTL_EXPERIMENT_URL);
 const name = process.argv[2] ?? 'bindings';
-if (!['bindings', 'construction', 'ranges', 'date-ranges', 'collator'].includes(name)) throw new Error('Unknown lifecycle corpus');
+if (!['bindings', 'construction', 'ranges', 'date-ranges', 'collator', 'bootstrap', 'hardening'].includes(name)) throw new Error('Unknown lifecycle corpus');
 const expected = JSON.parse(readFileSync(new URL(name + '-reference.json', root)));
 const evidence = readFileSync(new URL('lifecycle-stderr.jsonl', root), 'utf8').trim().split('\n').map(JSON.parse);
 if (evidence.length !== 33) throw new Error('Incomplete lifecycle evidence');
