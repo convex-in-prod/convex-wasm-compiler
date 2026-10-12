@@ -169,6 +169,10 @@ std::array<ChunkApplicationUnitSlot, kMaxApplicationUnitSlots>
 std::array<std::unique_ptr<Value>, kMaxApplicationEntrySlots>
     pending_application_exports;
 bool official_chunk_initialization_dirty = false;
+// Only loader callbacks and reset mutate the chunk slot table. Invalidate before
+// those writes; unchanged invocations can reuse its complete validation. Entry
+// publication, dirty state and the other retained-runtime checks remain live.
+int32_t validated_chunk_slot_count = 0;
 #endif
 
 constexpr int32_t kSelectedUdfKindQuery = 1;
@@ -1891,6 +1895,7 @@ void expose_official_chunk_unit_bindings(Runtime &js, int32_t unit_slot) {
             throw JSError(
                 js, "Official chunk registered invalid CommonJS exports");
           }
+          validated_chunk_slot_count = 0;
           unit.namespace_value = std::make_unique<Value>(js, arguments[0]);
           return Value::undefined();
         } catch (...) {
@@ -1915,6 +1920,7 @@ void expose_official_chunk_unit_bindings(Runtime &js, int32_t unit_slot) {
               !Value::strictEquals(js, *unit.namespace_value, arguments[0])) {
             throw JSError(js, "Official chunk published an invalid namespace");
           }
+          validated_chunk_slot_count = 0;
           unit.published = true;
           return Value::undefined();
         } catch (...) {
@@ -1975,12 +1981,14 @@ Value initialize_official_chunk_unit(Runtime &js, int32_t unit_slot) {
     throw JSError(js, "Official chunk unit factory is unavailable");
   }
   try {
+    validated_chunk_slot_count = 0;
     slot.state = ChunkApplicationUnitState::Initializing;
     expose_official_chunk_unit_bindings(js, unit_slot);
     evaluate_application_initializer(js, factory, unit_slot);
     if (!slot.published || slot.namespace_value == nullptr) {
       throw JSError(js, "Official chunk unit did not publish its namespace");
     }
+    validated_chunk_slot_count = 0;
     slot.state = ChunkApplicationUnitState::Initialized;
     // The wrapper captures these host callbacks as IIFE parameters. Clearing the
     // global properties before returning lets a nested or deferred literal
@@ -2741,6 +2749,7 @@ void reset_runtime_state() {
     application_slot.unit_initialization_count = 0;
   }
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
+  validated_chunk_slot_count = 0;
   for (auto &unit_slot : chunk_application_unit_slots) {
     unit_slot.namespace_value.reset();
     unit_slot.state = ChunkApplicationUnitState::Uninitialized;
@@ -2869,21 +2878,24 @@ bool retained_runtime_state_is_valid() {
 #endif
   }
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
-  for (int32_t unit_slot = 0; unit_slot < kMaxApplicationUnitSlots;
-       ++unit_slot) {
-    const auto &unit = chunk_application_unit_slots[unit_slot];
-    const bool chunk = unit_slot < chunk_slot_count;
-    const bool initialized =
-        unit.state == ChunkApplicationUnitState::Initialized;
-    if (chunk
-            ? initialized
-                  ? !unit.published || unit.namespace_value == nullptr
-                  : unit.state != ChunkApplicationUnitState::Uninitialized ||
-                        unit.published || unit.namespace_value != nullptr
-            : unit.state != ChunkApplicationUnitState::Uninitialized ||
-                  unit.published || unit.namespace_value != nullptr) {
-      return false;
+  if (validated_chunk_slot_count != chunk_slot_count) {
+    for (int32_t unit_slot = 0; unit_slot < kMaxApplicationUnitSlots;
+         ++unit_slot) {
+      const auto &unit = chunk_application_unit_slots[unit_slot];
+      const bool chunk = unit_slot < chunk_slot_count;
+      const bool initialized =
+          unit.state == ChunkApplicationUnitState::Initialized;
+      if (chunk
+              ? initialized
+                    ? !unit.published || unit.namespace_value == nullptr
+                    : unit.state != ChunkApplicationUnitState::Uninitialized ||
+                          unit.published || unit.namespace_value != nullptr
+              : unit.state != ChunkApplicationUnitState::Uninitialized ||
+                    unit.published || unit.namespace_value != nullptr) {
+        return false;
+      }
     }
+    validated_chunk_slot_count = chunk_slot_count;
   }
   for (const auto &pending_export : pending_application_exports) {
     if (pending_export != nullptr) {

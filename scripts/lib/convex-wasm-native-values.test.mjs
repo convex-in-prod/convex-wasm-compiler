@@ -16,7 +16,7 @@ import { staticHermesHostArchives } from "./convex-wasm-static-hermes-host-archi
 
 // This executes the actual adapter with a built host Hermes runtime. Run under
 // the same native-build resource guard used for the Hermes build.
-test("native adapter materializes packed values and validates hardened intrinsics", async (context) => {
+test("native adapter validates packed values, intrinsics and retained chunks", async (context) => {
   const source = process.env.CONVEX_HERMES_TEST_SOURCE_ROOT;
   const build = process.env.CONVEX_HERMES_TEST_BUILD_ROOT;
   if (source === undefined || build === undefined) {
@@ -76,12 +76,13 @@ test("native adapter materializes packed values and validates hardened intrinsic
       ).outputText,
     );
     const executable = join(temporary, "native-values");
-    run(process.env.CXX ?? "c++", [
+    const compileArguments = [
       "-std=c++17",
       "-O1",
       "-ffunction-sections",
       "-fdata-sections",
       "-Wno-attributes",
+      "-DNDEBUG",
       "-DSTATIC_HERMES",
       "-DFLATBUFFERS_LOCALE_INDEPENDENT=0",
       "-DCONVEX_WASM_BRIDGE_EXPORTED_UNIT=test_bridge",
@@ -107,7 +108,8 @@ test("native adapter materializes packed values and validates hardened intrinsic
       "-licudata",
       "-ldl",
       "-lpthread",
-    ]);
+    ];
+    run(process.env.CXX ?? "c++", compileArguments);
     assert.match(
       run(executable, [
         join(temporary, "hardening.js"),
@@ -118,6 +120,42 @@ test("native adapter materializes packed values and validates hardened intrinsic
       ]),
       /native values and intrinsic validation passed/u,
     );
+    const chunkObjects = [];
+    for (const kind of ["valid", "failed"]) {
+      const generated = join(temporary, `${kind}-chunk.c`);
+      const object = `${generated}.o`;
+      run(join(build, "bin/shermes"), [
+        "-O",
+        "-emit-c",
+        `-exported-unit=test_${kind}_chunk`,
+        `-o=${generated}`,
+        join(root, `scripts/test-fixtures/native-values/${kind}-chunk.js`),
+      ]);
+      run(process.env.CC ?? "cc", [
+        "-O1",
+        "-DNDEBUG",
+        "-DSTATIC_HERMES",
+        `-I${join(source, "include")}`,
+        `-I${join(source, "public")}`,
+        `-I${join(build, "lib/config")}`,
+        "-c", generated, "-o", object,
+      ]);
+      chunkObjects.push(object);
+    }
+    const retainedExecutable = join(temporary, "retained-chunks");
+    const retainedArguments = compileArguments.map((argument) => {
+      if (argument === executable) return retainedExecutable;
+      if (argument === join(root, "scripts/test-fixtures/native-values/main.cpp")) {
+        return join(root, "scripts/test-fixtures/native-values/retained-chunks.cpp");
+      }
+      return argument;
+    });
+    run(process.env.CXX ?? "c++", [
+      "-DCONVEX_WASM_CHUNK_APPLICATION_UNIT",
+      ...chunkObjects,
+      ...retainedArguments,
+    ]);
+    assert.match(run(retainedExecutable, []), /retained chunk validation passed/u);
   } finally {
     rmSync(temporary, { force: true, recursive: true });
   }
