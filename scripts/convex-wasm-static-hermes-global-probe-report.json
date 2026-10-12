@@ -1,17 +1,17 @@
 {
   "build": {
-    "buildRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
+    "buildRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
     "cmake": {
       "host": {
         "flags": {
           "HERMES_ENABLE_CONTRIB_EXTENSIONS": true,
           "HERMES_ENABLE_CORE_EXTENSIONS": true,
           "HERMES_ENABLE_DEBUGGER": false,
-          "HERMES_ENABLE_INTL": false
+          "HERMES_ENABLE_INTL": true
         },
         "identity": {
-          "bytes": 36794,
-          "sha256": "61652480293f0d1ab3281094546f4fbe96b50da47778a230585eb02b5d67043a"
+          "bytes": 37901,
+          "sha256": "aaf08bfb7a39220340327a337ed34e8a354961b257fb46d7df8ac64a924c5b13"
         }
       },
       "wasm": {
@@ -22,12 +22,12 @@
           "HERMES_ENABLE_INTL": true
         },
         "identity": {
-          "bytes": 28571,
-          "sha256": "c630d8cc4f802533cdfb8dc5f69fe7b6936402d6208a4d8ce306ee5770c86fcd"
+          "bytes": 28550,
+          "sha256": "f5f077efcfcfe7621a436b4e4ed07c779395f9093de4a36f9bf53b03b414d43b"
         }
       }
     },
-    "observedCheckoutRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
+    "observedCheckoutRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
     "sourceMaterials": {
       "globalObject": {
         "path": "lib/VM/JSLib/GlobalObject.cpp",
@@ -42,7 +42,7 @@
         "sha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352"
       }
     },
-    "sourceRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2"
+    "sourceRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f"
   },
   "harness": {
     "generatedC": {
@@ -50,8 +50,8 @@
       "sha256": "0fa3e86595853b0d36a3c6b475efb497dc32f2b3209985ef64a6ba1fc9fae707"
     },
     "generator": {
-      "bytes": 14548,
-      "sha256": "d9b5868eece2ac5ebf165cb0a16b511b213a88931de0ee69b92649bc1a859a7e"
+      "bytes": 14668,
+      "sha256": "9fa0aaf17db0690705a64dfd72156cf8a2fa2ae94d0a5314f1664343a0d427c8"
     },
     "guest": {
       "bytes": 118,
@@ -627,5 +627,5 @@
     ],
     "kind": "libhermes-runtime-declarations-plus-typed-arrays-v1"
   },
-  "reportSha256": "a12e77cdcf0bc9128c32a5770f3d2da82aa2c2e0e1a20339c4294fb1fc05600f"
+  "reportSha256": "85424af9fb18779b2fe72513ae533b0932704f83807644a2126e835271980fec"
 }

@@ -1,15 +1,15 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
-    "sourceRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
-    "observedCheckoutRevision": "45727c91fa0152c5b7d0a798334a80c921ab26d2",
+    "buildRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
+    "sourceRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
+    "observedCheckoutRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
-    "hostCmakeCacheSha256": "61652480293f0d1ab3281094546f4fbe96b50da47778a230585eb02b5d67043a",
+    "hostCmakeCacheSha256": "aaf08bfb7a39220340327a337ed34e8a354961b257fb46d7df8ac64a924c5b13",
     "hostShermesSha256": "467a556c44ec0d49b3bd3a7333aa138d04b42a030ea63c56f80f1dc37b60e4a8",
-    "wasmCmakeCacheSha256": "c630d8cc4f802533cdfb8dc5f69fe7b6936402d6208a4d8ce306ee5770c86fcd",
+    "wasmCmakeCacheSha256": "f5f077efcfcfe7621a436b4e4ed07c779395f9093de4a36f9bf53b03b414d43b",
     "wasmLibhermesvmArchiveSha256": "ef3be66b58e4aba24abec68f30071204ecde6fe15758e6e4df3e9e29c3143e1d",
     "wasmIcuArchiveSha256": "47750aeca21fdfcea5203c3a5f1a750365ed4373a63daa2541c8219098b9266b"
   },
@@ -74,8 +74,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "f4f33c0447262b1ee987632166458657daacbce5a9171f5073695bd054b2c9a0",
-    "reportSha256": "a12e77cdcf0bc9128c32a5770f3d2da82aa2c2e0e1a20339c4294fb1fc05600f",
+    "reportFileSha256": "4ccafa53865cb94d195f98a1790f7ec925d14f02fd0eb71a6825df3951d5556c",
+    "reportSha256": "85424af9fb18779b2fe72513ae533b0932704f83807644a2126e835271980fec",
     "globals": [
       "$SHBuiltin",
       "AggregateError",

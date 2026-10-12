@@ -231,7 +231,7 @@ function validateGlobalProbeReport(report, inventory) {
   };
   if (
     canonicalConvexWasmStaticHermesGlobalInventoryJson(report.build.cmake.host.flags) !==
-      canonicalConvexWasmStaticHermesGlobalInventoryJson({ ...expectedFlags, HERMES_ENABLE_INTL: false }) ||
+      canonicalConvexWasmStaticHermesGlobalInventoryJson(expectedFlags) ||
     canonicalConvexWasmStaticHermesGlobalInventoryJson(report.build.cmake.wasm.flags) !==
       canonicalConvexWasmStaticHermesGlobalInventoryJson(expectedFlags)
   ) {

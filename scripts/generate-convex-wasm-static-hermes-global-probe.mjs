@@ -284,9 +284,11 @@ export async function generateConvexWasmStaticHermesGlobalProbe(options) {
       fs.readFile(wasmCmakePath, "utf8"),
       Promise.resolve(run("git", ["rev-parse", "HEAD"], { cwd: options.hermesSourcePath })),
     ]);
-    for (const flag of ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"]) {
-      if (!new RegExp(`^${flag}:BOOL=ON$`, "mu").test(wasmCmakeSource)) {
-        throw new Error(`Native Intl probe requires ${flag}=ON`);
+    for (const [target, cmakeSource] of [["host", hostCmakeSource], ["Wasm", wasmCmakeSource]]) {
+      for (const flag of ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"]) {
+        if (!new RegExp(`^${flag}:BOOL=ON$`, "mu").test(cmakeSource)) {
+          throw new Error(`Native Intl probe requires ${target} ${flag}=ON`);
+        }
       }
     }
     const payload = {

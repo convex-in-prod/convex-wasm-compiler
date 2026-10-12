@@ -468,6 +468,32 @@ export async function buildBinaryen(gateRoot, jobs) {
   }
 }
 
+const nativeIntlCmakeOptions = ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"];
+
+async function nativeIntlConfigured(buildRoot) {
+  return (await Promise.all(nativeIntlCmakeOptions.map(key =>
+    cmakeCacheHas(join(buildRoot, "CMakeCache.txt"), key, "ON").catch(error => {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    })))).every(Boolean);
+}
+
+export async function verifyStaticHermesHostCompilerImport(wasmBuild, hostBuild) {
+  const imported = await cmakeCacheValue(join(wasmBuild, "CMakeCache.txt"), "IMPORT_HOST_COMPILERS");
+  if (typeof imported !== "string" || imported.length === 0) {
+    throw new Error("Wasm Hermes archive was built without imported host compilers");
+  }
+  // Reused build directories can be reached through a gate-local symlink. Bind
+  // the actual import file, not the spelling CMake recorded when configuring it.
+  const [actual, expected] = await Promise.all([
+    fs.realpath(imported),
+    fs.realpath(join(hostBuild, "ImportHostCompilers.cmake")),
+  ]);
+  if (actual !== expected) {
+    throw new Error("Wasm Hermes archive was built with different imported host compilers");
+  }
+}
+
 async function checkGate(root) {
   for (const name of Object.keys(sources)) {
     const actual = await run("git", ["-C", join(root, name), "rev-parse", "HEAD"], {
@@ -492,9 +518,9 @@ async function checkGate(root) {
   await Promise.all((await staticHermesHostArchives(join(root, "build-host"))).map((path) =>
     requireFile(path, "Static Hermes host archive")
   ));
-  for (const key of ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"]) {
-    if (!(await cmakeCacheHas(join(root, "build-wasm", "CMakeCache.txt"), key, "ON"))) {
-      throw new Error(`Wasm Hermes archive requires ${key}=ON`);
+  for (const build of ["build-host", "build-wasm"]) {
+    if (!(await nativeIntlConfigured(join(root, build)))) {
+      throw new Error(`Static Hermes ${build} build is stale: native Intl configuration is required`);
     }
   }
   if (
@@ -506,13 +532,7 @@ async function checkGate(root) {
   ) {
     throw new Error("Wasm Hermes archive was built without native InternalJavaScript support");
   }
-  const hostCompilerImport = join(root, "build-host", "ImportHostCompilers.cmake");
-  if (
-    (await cmakeCacheValue(join(root, "build-wasm", "CMakeCache.txt"), "IMPORT_HOST_COMPILERS")) !==
-    hostCompilerImport
-  ) {
-    throw new Error("Wasm Hermes archive was built without imported host compilers");
-  }
+  await verifyStaticHermesHostCompilerImport(join(root, "build-wasm"), join(root, "build-host"));
   for (const key of ["CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS"]) {
     if ((await cmakeCacheValue(join(root, "build-wasm", "CMakeCache.txt"), key)) !== staticHermesWasmExceptionFlags) {
       throw new Error("Wasm Hermes archive was built with legacy exception lowering");
@@ -549,7 +569,7 @@ async function checkGate(root) {
     [
       "host",
       join(root, "build-host"),
-      ["shermes", "hermesc", "hermesvm_a", "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi"],
+      ["shermes", "hermesc", "hermesvm_a", "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi", "hermesStaticIcu"],
     ],
     ["wasm", join(root, "build-wasm"), ["hermesvm_a", "jsi", "hermesStaticIcu"]],
   ]) {
@@ -609,6 +629,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
   const hostCompiler = join(host, "bin", "shermes");
   const hostBytecodeCompiler = join(host, "bin", "hermesc");
   const hostCompilerImport = join(host, "ImportHostCompilers.cmake");
+  let hostNeedsConfiguration = !(await nativeIntlConfigured(host));
   try {
     await Promise.all([
       requireFile(hostCompiler, "Static Hermes compiler", true),
@@ -617,14 +638,17 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
     ]);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    await run("cmake", ["-S", hermes, "-B", host, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=OFF", "-DHERMES_ENABLE_TEST_SUITE=OFF", "-DHERMES_ENABLE_NAPI=OFF"], {
+    hostNeedsConfiguration = true;
+  }
+  if (hostNeedsConfiguration) {
+    await run("cmake", ["-S", hermes, "-B", host, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", ...nativeIntlCmakeOptions.map(key => `-D${key}=ON`), "-DHERMES_ENABLE_TEST_SUITE=OFF", "-DHERMES_ENABLE_NAPI=OFF"], {
       cwd: gateRoot,
       timeoutMs: 10 * 60 * 1000,
     });
   }
   await run("cmake", [
     "--build", host, "--target", "shermes", "hermesc", "hermesvm_a",
-    "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi",
+    "hermesVMRuntime", "hermesapi", "hermesPublic", "boost_context", "jsi", "hermesStaticIcu",
     "--parallel", String(jobs),
   ], { cwd: gateRoot, timeoutMs: buildTimeoutMs });
 
@@ -653,13 +677,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       process.env.PATH,
     ].join(":"),
   };
-  const wasmNativeIntlReady = (await Promise.all(
-    ["HERMES_ENABLE_INTL", "HERMES_USE_STATIC_INTL_PROVIDER", "HERMES_ICU_FAIL_STOP_ALLOCATION"].map(key =>
-      cmakeCacheHas(join(wasm, "CMakeCache.txt"), key, "ON").catch(error => {
-        if (error?.code === "ENOENT") return false;
-        throw error;
-      }))
-  )).every(Boolean);
+  const wasmNativeIntlReady = await nativeIntlConfigured(wasm);
   const wasmNeedsConfiguration = !wasmNativeIntlReady || wasmBuildOutputStates.some((state) => state === null) ||
     !(await cmakeCacheHas(
       join(wasm, "CMakeCache.txt"),

@@ -29,5 +29,6 @@ export async function staticHermesHostArchives(hostBuildPath) {
     resolve(hostBuildPath, "public/hermes/Public/libhermesPublic.a"),
     available[0],
     resolve(hostBuildPath, "jsi/libjsi.a"),
+    resolve(hostBuildPath, "external/icu-small/libhermesStaticIcu.a"),
   ];
 }

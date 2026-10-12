@@ -446,7 +446,11 @@ node --expose-gc run-cold-allocation-traps.mjs
 Maintained Hermes source `1ff7e35eadf9a9e0b3bf4b1ada1ba9e441db5117` contains the
 native provider as an opt-in Emscripten implementation. The compiler source now
 selects it, authenticates its archive in the global inventory and links that
-archive into the runtime. Host compiler builds keep native Intl disabled. The
+archive into the runtime. The original host build kept native Intl disabled;
+the integrated gate now enables the same provider and pinned data in its native
+host archives so codec and request acceptance execute the same Intl contract.
+Linux and Apple data objects use their native object formats, while Emscripten
+retains its Wasm data object and exception flags. The
 JavaScript support bundle no longer provides Intl or a second timezone dataset;
 its emitted support unit falls from 353,208 to 54,997 bytes. Generic compatibility
 documentation and authenticated adapter/ICU notices accompany the change.
@@ -461,8 +465,8 @@ native tests skipped), seven gate tests and two support tests pass.
 
 `provider-bootstrap-result-summary.json` retains the source and artifact
 identities. The eleven-stage experimental chain reconstructs 16 implementation
-files; the maintained source additionally declares the Emscripten-only CMake
-option and documents the provider contract. No release or deployment follows
+files; the maintained source additionally declares the static-provider CMake
+option and supports native host validation. No release or deployment follows
 from this local source adoption.
 
 ## Limits and integration boundary

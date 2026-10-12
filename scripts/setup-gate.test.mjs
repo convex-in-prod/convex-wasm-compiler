@@ -10,10 +10,32 @@ import { promisify } from "node:util";
 import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
 import {
   binaryenHelperNames, binaryenInputSha256, binaryenStatus,
-  runnerInputSha256, verifyBinaryenSource,
+  runnerInputSha256, verifyBinaryenSource, verifyStaticHermesHostCompilerImport,
 } from "./setup-gate.mjs";
 
 const execute = promisify(execFile);
+
+test("imported host compilers accept aliases of the same file but reject other builds", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "hermes-imported-host-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const host = join(root, "host");
+  const alias = join(root, "alias");
+  const wasm = join(root, "wasm");
+  const other = join(root, "other");
+  await Promise.all([host, wasm, other].map((path) => fs.mkdir(path)));
+  await Promise.all([host, other].map((path) =>
+    fs.writeFile(join(path, "ImportHostCompilers.cmake"), "# imported targets\n")));
+  await fs.symlink(host, alias);
+  const cache = join(wasm, "CMakeCache.txt");
+  await fs.writeFile(cache, `IMPORT_HOST_COMPILERS:FILEPATH=${join(host, "ImportHostCompilers.cmake")}\n`);
+  await verifyStaticHermesHostCompilerImport(wasm, alias);
+  await fs.writeFile(cache, `IMPORT_HOST_COMPILERS:FILEPATH=${join(alias, "ImportHostCompilers.cmake")}\n`);
+  await verifyStaticHermesHostCompilerImport(wasm, host);
+  await fs.writeFile(cache, `IMPORT_HOST_COMPILERS:FILEPATH=${join(other, "ImportHostCompilers.cmake")}\n`);
+  await assert.rejects(verifyStaticHermesHostCompilerImport(wasm, alias), /different imported host compilers/u);
+  await fs.writeFile(cache, "# no imported targets\n");
+  await assert.rejects(verifyStaticHermesHostCompilerImport(wasm, host), /without imported host compilers/u);
+});
 
 test("runner freshness covers shared WASI and vendored compiler sources", async (t) => {
   const crate = await fs.mkdtemp(join(tmpdir(), "wasm-runner-inputs-"));

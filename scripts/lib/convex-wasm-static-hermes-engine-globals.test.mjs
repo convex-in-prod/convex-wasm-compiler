@@ -109,6 +109,12 @@ test("provenance refresh preserves both policies and emitted hardening while evi
   assert.throws(inspect, /probe report is not bound by the inventory/u);
   writeEvidence();
 
+  report.build.cmake.host.flags.HERMES_ENABLE_INTL = false;
+  writeEvidence();
+  assert.throws(inspect, /CMake flags disagree with the inventory/u);
+  report.build.cmake.host.flags.HERMES_ENABLE_INTL = true;
+  writeEvidence();
+
   // A real surface change must invalidate the stored identity and both emitted
   // validators, even if all build provenance stays the same.
   inventory.targetRuntimeProbe.globals.push("zFixtureGlobal");

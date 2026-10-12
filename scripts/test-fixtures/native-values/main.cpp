@@ -25,6 +25,13 @@ int main(int argc, char **argv) {
       "Object.getOwnPropertyNames(new Promise(function() {})).length === 0 && "
       "!('createNativePromiseCore' in HermesInternal) && "
       "typeof HermesInternal.drainJobs === 'undefined'").getBool());
+  // Exercise the linked provider data, not only the presence of Intl globals.
+  require(evaluate(
+      "new Intl.NumberFormat('de-DE').format(1234.5) === '1.234,5' && "
+      "new Intl.DateTimeFormat('en-GB', {timeZone: 'UTC', year: 'numeric', "
+      "month: '2-digit', day: '2-digit'}).format(0) === '01/01/1970' && "
+      "new Intl.Collator('en', {sensitivity: 'base'}).compare('caf\\u00e9', 'cafe') === 0"
+      ).getBool());
   auto array_buffer = js.global().getPropertyAsFunction(js, "ArrayBuffer");
   const QueryAbiProperties query_properties(js);
   const Value pending = Value::undefined();
