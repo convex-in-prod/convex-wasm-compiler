@@ -1,0 +1,406 @@
+--- a/include/hermes/Platform/Intl/PlatformIntl.h
++++ b/include/hermes/Platform/Intl/PlatformIntl.h
+@@ -177,6 +177,8 @@
+ #ifdef HERMES_USE_STATIC_INTL_PROVIDER
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, double jsTimeValue) noexcept;
+   vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, double jsTimeValue) noexcept;
++  vm::CallResult<std::u16string> formatRange(vm::Runtime &runtime, double start, double end) noexcept;
++  vm::CallResult<std::vector<Part>> formatRangeToParts(vm::Runtime &runtime, double start, double end) noexcept;
+ #else
+   std::u16string format(double jsTimeValue) noexcept;
+   std::vector<Part> formatToParts(double jsTimeValue) noexcept;
+--- a/include/hermes/VM/NativeFunctions.def
++++ b/include/hermes/VM/NativeFunctions.def
+@@ -446,6 +446,9 @@
+ NATIVE_FUNCTION(intlDateTimeFormatSupportedLocalesOf)
+ NATIVE_FUNCTION(intlDateTimeFormatPrototypeFormatGetter)
+ NATIVE_FUNCTION(intlDateTimeFormatPrototypeFormatToParts)
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++NATIVE_FUNCTION(intlDateTimeFormatPrototypeFormatRange)
++#endif
+ NATIVE_FUNCTION(intlDateTimeFormatPrototypeResolvedOptions)
+ 
+ NATIVE_FUNCTION(intlNumberFormatConstructor)
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -1071,6 +1071,22 @@
+   return pattern;
+ }
+ 
++vm::CallResult<std::u16string> readDateSkeleton(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu, const std::u16string &pattern) {
++  UErrorCode status = U_ZERO_ERROR;
++  const int32_t length = icu->udatpg_getSkeleton(nullptr,
++      reinterpret_cast<const UChar *>(pattern.data()), pattern.size(), nullptr, 0, &status);
++  if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0)
++    return runtime.raiseError("ICU date-skeleton retrieval failed");
++  std::u16string skeleton(length, u'\0');
++  status = U_ZERO_ERROR;
++  icu->udatpg_getSkeleton(nullptr,
++      reinterpret_cast<const UChar *>(pattern.data()), pattern.size(),
++      reinterpret_cast<UChar *>(skeleton.data()), length, &status);
++  if (U_FAILURE(status)) return runtime.raiseError("ICU date-skeleton retrieval failed");
++  return skeleton;
++}
++
+ char16_t hourCycleSymbol(const std::u16string &cycle) {
+   if (cycle == u"h11") return u'K';
+   if (cycle == u"h12") return u'h';
+@@ -1115,8 +1131,13 @@
+   Options resolvedOptions() noexcept;
+   vm::CallResult<std::u16string> format(vm::Runtime &runtime, double jsTimeValue) noexcept;
+   vm::CallResult<std::vector<Part>> formatToParts(vm::Runtime &runtime, double x) noexcept;
++  vm::CallResult<std::u16string> formatRange(vm::Runtime &runtime, double start, double end) noexcept;
++  vm::CallResult<std::vector<Part>> formatRangeToParts(vm::Runtime &runtime, double start, double end) noexcept;
+ 
+  private:
++  vm::CallResult<const UFormattedValue *> formatRangeValue(vm::Runtime &runtime, double start, double end) noexcept;
++  UDateIntervalFormat *interval_ = nullptr;
++  UFormattedDateInterval *intervalResult_ = nullptr;
+   std::u16string locale_;
+   std::u16string timeZone_;
+   std::u16string weekday_;
+@@ -1144,6 +1165,8 @@
+ } // namespace
+ 
+ DateTimeFormatIcuProvider::~DateTimeFormatIcuProvider() {
++  if (intervalResult_) icu_->udtitvfmt_closeResult(intervalResult_);
++  if (interval_) icu_->udtitvfmt_close(interval_);
+   if (dtf_ && icu_) {
+     icu_->udat_close(dtf_);
+   }
+@@ -1613,17 +1636,9 @@
+     if (matches) return formatter.release();
+     // Switching between 12/24-hour styles also changes day-period placement
+     // and punctuation. Regenerate from the style's skeleton, as V8 does.
+-    status = U_ZERO_ERROR;
+-    const int32_t length = icu_->udatpg_getSkeleton(nullptr,
+-        reinterpret_cast<const UChar *>(pattern->data()), pattern->size(),
+-        nullptr, 0, &status);
+-    if (status != U_BUFFER_OVERFLOW_ERROR || length <= 0) return nullptr;
+-    skeleton.resize(length);
+-    status = U_ZERO_ERROR;
+-    icu_->udatpg_getSkeleton(nullptr,
+-        reinterpret_cast<const UChar *>(pattern->data()), pattern->size(),
+-        reinterpret_cast<UChar *>(skeleton.data()), length, &status);
+-    if (U_FAILURE(status)) return nullptr;
++    auto skeletonResult = readDateSkeleton(runtime, icu_, *pattern);
++    if (skeletonResult == vm::ExecutionStatus::EXCEPTION) return nullptr;
++    skeleton = std::move(*skeletonResult);
+     skeleton.erase(std::remove_if(skeleton.begin(), skeleton.end(),
+         [](char16_t c) { return c == u'a' || c == u'b' || c == u'B'; }), skeleton.end());
+     for (auto &c : skeleton)
+@@ -1676,6 +1691,55 @@
+   return formatter.release();
+ }
+ 
++namespace {
++struct IntlFieldRange { int32_t begin, end, type; };
++
++const char16_t *rangeSource(const std::vector<IntlFieldRange> &sources, int32_t begin, int32_t end) {
++  std::array<const IntlFieldRange *, 2> latest{nullptr, nullptr};
++  for (const auto &source : sources) latest[source.type] = &source;
++  // ICU interval spans can overlap. V8 keeps each endpoint's most recent span
++  // and gives the start endpoint precedence over the end endpoint.
++  for (size_t index = 0; index < latest.size(); ++index)
++    if (latest[index] && latest[index]->begin <= begin && latest[index]->end >= end)
++      return index == 0 ? u"startRange" : u"endRange";
++  return u"shared";
++}
++
++
++vm::CallResult<std::vector<Part>> partitionDateFields(
++    vm::Runtime &runtime, const std::u16string &formatted,
++    std::vector<IntlFieldRange> fields, const std::vector<IntlFieldRange> &sources,
++    bool outputSource) {
++  for (const auto *ranges : std::array<const std::vector<IntlFieldRange> *, 2>{&fields, &sources})
++    for (const auto &range : *ranges)
++      if (range.begin < 0 || range.begin >= range.end || static_cast<size_t>(range.end) > formatted.size())
++        return runtime.raiseError("ICU returned an invalid date field range");
++  for (const auto &source : sources)
++    if (source.type != 0 && source.type != 1)
++      return runtime.raiseError("ICU returned an invalid date-range source");
++  std::sort(fields.begin(), fields.end(), [](const IntlFieldRange &a, const IntlFieldRange &b) {
++    return a.begin < b.begin;
++  });
++  std::vector<Part> parts;
++  auto addPart = [&](int32_t begin, int32_t end, std::u16string type) {
++    Part part{{u"type", std::move(type)}, {u"value", formatted.substr(begin, end - begin)}};
++    if (outputSource) {
++      part.emplace(u"source", rangeSource(sources, begin, end));
++    }
++    parts.push_back(std::move(part));
++  };
++  int32_t position = 0;
++  for (const auto &field : fields) {
++    if (field.begin < position) return runtime.raiseError("ICU returned overlapping date fields");
++    if (field.begin > position) addPart(position, field.begin, u"literal");
++    addPart(field.begin, field.end, dateFieldToPartType(field.type));
++    position = field.end;
++  }
++  if (static_cast<size_t>(position) < formatted.size()) addPart(position, formatted.size(), u"literal");
++  return parts;
++}
++} // namespace
++
+ vm::CallResult<std::vector<Part>> DateTimeFormatIcuProvider::formatToParts(
+     vm::Runtime &runtime, double jsTimeValue) noexcept {
+   assert(icu_ && dtf_);
+@@ -1692,31 +1756,127 @@
+   icu_->udat_formatForFields(dtf_, jsTimeValue,
+       reinterpret_cast<UChar *>(formatted.data()), length, fields.get(), &status);
+   if (U_FAILURE(status)) return runtime.raiseError("ICU date field formatting failed");
+-  struct Field { int32_t begin, end, type; };
+-  std::vector<Field> ranges;
++  std::vector<IntlFieldRange> ranges;
+   int32_t begin, end, type;
+-  while ((type = icu_->ufieldpositer_next(fields.get(), &begin, &end)) >= 0) {
+-    if (begin < 0 || begin >= end || end > length)
+-      return runtime.raiseError("ICU returned an invalid date field range");
++  while ((type = icu_->ufieldpositer_next(fields.get(), &begin, &end)) >= 0)
+     ranges.push_back({begin, end, type});
+-  }
+-  std::sort(ranges.begin(), ranges.end(), [](const Field &a, const Field &b) {
+-    return a.begin < b.begin;
+-  });
+-  std::vector<Part> parts;
+-  int32_t position = 0;
+-  for (const auto &field : ranges) {
+-    if (field.begin < position)
+-      return runtime.raiseError("ICU returned overlapping date fields");
+-    if (field.begin > position)
+-      parts.push_back({{u"type", u"literal"}, {u"value", formatted.substr(position, field.begin - position)}});
+-    parts.push_back({{u"type", dateFieldToPartType(field.type)},
+-        {u"value", formatted.substr(field.begin, field.end - field.begin)}});
+-    position = field.end;
+-  }
+-  if (position < length)
+-    parts.push_back({{u"type", u"literal"}, {u"value", formatted.substr(position)}});
+-  return parts;
++  return partitionDateFields(runtime, formatted, std::move(ranges), {}, false);
++}
++
++vm::CallResult<const UFormattedValue *> DateTimeFormatIcuProvider::formatRangeValue(
++    vm::Runtime &runtime, double start, double end) noexcept {
++  UErrorCode status = U_ZERO_ERROR;
++  if (!interval_) {
++    auto pattern = readDatePattern(runtime, icu_, dtf_);
++    if (pattern == vm::ExecutionStatus::EXCEPTION) return pattern.getStatus();
++    auto skeleton = readDateSkeleton(runtime, icu_, *pattern);
++    if (skeleton == vm::ExecutionStatus::EXCEPTION) return skeleton.getStatus();
++    icu::Locale locale(locale8_.c_str());
++    // DateIntervalFormat needs the resolved hour cycle in the locale as well
++    // as the skeleton, including explicit h11/h24 selection.
++    if (!hourCycle_.empty()) {
++      const std::string hourCycle(hourCycle_.begin(), hourCycle_.end());
++      locale.setUnicodeKeywordValue("hc", hourCycle, status);
++    }
++    const auto zone = !timeZone_.empty() && (timeZone_[0] == u'+' || timeZone_[0] == u'-')
++        ? u"GMT" + timeZone_ : timeZone_;
++    std::unique_ptr<UDateIntervalFormat, decltype(icu_->udtitvfmt_close)> formatter(
++        icu_->udtitvfmt_open(locale.getName(), reinterpret_cast<const UChar *>(skeleton->data()),
++            skeleton->size(), reinterpret_cast<const UChar *>(zone.data()), zone.size(), &status),
++        icu_->udtitvfmt_close);
++    if (U_FAILURE(status) || !formatter)
++      return runtime.raiseError("ICU date-range formatter initialization failed");
++    std::unique_ptr<UFormattedDateInterval, decltype(icu_->udtitvfmt_closeResult)> result(
++        icu_->udtitvfmt_openResult(&status), icu_->udtitvfmt_closeResult);
++    if (U_FAILURE(status) || !result)
++      return runtime.raiseError("ICU date-range result allocation failed");
++    interval_ = formatter.release();
++    intervalResult_ = result.release();
++  }
++  // Clone the actual formatter calendar, preserving its proleptic Gregorian
++  // cutover, locale/calendar options and timezone across both endpoints.
++  std::unique_ptr<UCalendar, decltype(icu_->ucal_close)> first(
++      icu_->ucal_clone(icu_->udat_getCalendar(dtf_), &status), icu_->ucal_close);
++  std::unique_ptr<UCalendar, decltype(icu_->ucal_close)> second(
++      icu_->ucal_clone(icu_->udat_getCalendar(dtf_), &status), icu_->ucal_close);
++  if (U_FAILURE(status) || !first || !second)
++    return runtime.raiseError("ICU date-range calendar allocation failed");
++  icu_->ucal_setMillis(first.get(), std::trunc(start), &status);
++  icu_->ucal_setMillis(second.get(), std::trunc(end), &status);
++  // This ICU C API preserves calendar settings; the older date-only provider
++  // entry point constructs fresh calendars and loses the Gregorian adjustment.
++  udtitvfmt_formatCalendarToResult(interval_, first.get(), second.get(), intervalResult_, &status);
++  if (U_FAILURE(status)) return runtime.raiseTypeError("ICU date-range formatting failed");
++  const auto *value = icu_->udtitvfmt_resultAsValue(intervalResult_, &status);
++  if (U_FAILURE(status) || !value) return runtime.raiseError("ICU date-range result retrieval failed");
++  return value;
++}
++
++vm::CallResult<std::u16string> DateTimeFormatIcuProvider::formatRange(
++    vm::Runtime &runtime, double start, double end) noexcept {
++  auto value = formatRangeValue(runtime, start, end);
++  if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  std::unique_ptr<UConstrainedFieldPosition, decltype(icu_->ucfpos_close)> position(
++      icu_->ucfpos_open(&status), icu_->ucfpos_close);
++  if (U_FAILURE(status) || !position) return runtime.raiseError("ICU date-range iterator allocation failed");
++  bool hasRange = false;
++  while (icu_->ufmtval_nextPosition(*value, position.get(), &status))
++    if (icu_->ucfpos_getCategory(position.get(), &status) == UFIELD_CATEGORY_DATE_INTERVAL_SPAN) hasRange = true;
++  if (U_FAILURE(status)) return runtime.raiseError("ICU date-range field retrieval failed");
++  // Collapsed intervals use the original single-date formatter, preserving its
++  // widths and V8's string-only spacing compatibility rule.
++  if (!hasRange) return format(runtime, std::trunc(start));
++  int32_t length;
++  const auto *text = icu_->ufmtval_getString(*value, &length, &status);
++  if (U_FAILURE(status) || !text) return runtime.raiseError("ICU date-range string retrieval failed");
++  return std::u16string(reinterpret_cast<const char16_t *>(text), length);
++}
++
++vm::CallResult<std::vector<Part>> DateTimeFormatIcuProvider::formatRangeToParts(
++    vm::Runtime &runtime, double start, double end) noexcept {
++  auto value = formatRangeValue(runtime, start, end);
++  if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
++  UErrorCode status = U_ZERO_ERROR;
++  int32_t length;
++  const auto *text = icu_->ufmtval_getString(*value, &length, &status);
++  if (U_FAILURE(status) || !text) return runtime.raiseError("ICU date-range string retrieval failed");
++  std::u16string formatted(reinterpret_cast<const char16_t *>(text), length);
++  std::unique_ptr<UConstrainedFieldPosition, decltype(icu_->ucfpos_close)> position(
++      icu_->ucfpos_open(&status), icu_->ucfpos_close);
++  if (U_FAILURE(status) || !position) return runtime.raiseError("ICU date-range iterator allocation failed");
++  std::vector<IntlFieldRange> fields, sources;
++  while (icu_->ufmtval_nextPosition(*value, position.get(), &status)) {
++    IntlFieldRange field;
++    icu_->ucfpos_getIndexes(position.get(), &field.begin, &field.end, &status);
++    field.type = icu_->ucfpos_getField(position.get(), &status);
++    const auto category = icu_->ucfpos_getCategory(position.get(), &status);
++    if (U_FAILURE(status)) return runtime.raiseError("ICU date-range field retrieval failed");
++    if (category == UFIELD_CATEGORY_DATE_INTERVAL_SPAN) sources.push_back(field);
++    else if (category == UFIELD_CATEGORY_DATE) fields.push_back(field);
++    else return runtime.raiseError("ICU date-range field category is invalid");
++  }
++  if (U_FAILURE(status)) return runtime.raiseError("ICU date-range field retrieval failed");
++  if (sources.empty()) {
++    // Reference V8's FormatRangeCommon passes the original, unclipped start to
++    // its parts fallback. For negative fractional milliseconds this can differ
++    // from both formatRange() and the ordinary formatToParts() binding.
++    auto parts = formatToParts(runtime, start);
++    if (parts == vm::ExecutionStatus::EXCEPTION) return parts.getStatus();
++    for (auto &part : *parts) part.emplace(u"source", u"shared");
++    return std::move(*parts);
++  }
++  return partitionDateFields(runtime, formatted, std::move(fields), sources, true);
++}
++
++vm::CallResult<std::u16string> DateTimeFormat::formatRange(
++    vm::Runtime &runtime, double start, double end) noexcept {
++  return static_cast<DateTimeFormatIcuProvider *>(this)->formatRange(runtime, start, end);
++}
++
++vm::CallResult<std::vector<Part>> DateTimeFormat::formatRangeToParts(
++    vm::Runtime &runtime, double start, double end) noexcept {
++  return static_cast<DateTimeFormatIcuProvider *>(this)->formatRangeToParts(runtime, start, end);
+ }
+ 
+ vm::CallResult<std::vector<Part>> DateTimeFormat::formatToParts(
+@@ -2200,12 +2360,10 @@
+   return std::u16string(reinterpret_cast<const char16_t *>(text), length);
+ }
+ 
+-struct NumberFieldRange { int32_t begin, end, type; };
+-
+ vm::CallResult<std::vector<Part>> partitionNumberFields(
+     vm::Runtime &runtime, const std::u16string &formatted,
+-    const std::vector<NumberFieldRange> &fields,
+-    const std::vector<NumberFieldRange> &sources, bool outputSource,
++    const std::vector<IntlFieldRange> &fields,
++    const std::vector<IntlFieldRange> &sources, bool outputSource,
+     bool isNaN, bool styleIsUnit) {
+   const int32_t length = formatted.size();
+   std::vector<int32_t> endpoints{0, length};
+@@ -2229,16 +2387,14 @@
+   std::vector<Part> parts;
+   for (size_t i = 1; i < endpoints.size(); ++i) {
+     const auto begin = endpoints[i - 1], end = endpoints[i];
+-    const NumberFieldRange *selected = nullptr;
++    const IntlFieldRange *selected = nullptr;
+     for (const auto &field : fields)
+       if (field.begin <= begin && field.end >= end &&
+           (!selected || field.end - field.begin < selected->end - selected->begin ||
+            (field.end - field.begin == selected->end - selected->begin && field.type > selected->type)))
+         selected = &field;
+-    std::u16string type = u"literal", source = u"shared";
+-    for (const auto &span : sources)
+-      if (span.begin <= begin && span.end >= end)
+-        source = span.type == 0 ? u"startRange" : u"endRange";
++    std::u16string type = u"literal";
++    std::u16string source = rangeSource(sources, begin, end);
+     auto segment = formatted.substr(begin, end - begin);
+     if (selected) {
+       type = numberFieldToPartType(selected->type);
+@@ -2283,7 +2439,7 @@
+     icu_->ufieldpositer_close(positions);
+     return runtime.raiseError("ICU number-field retrieval failed");
+   }
+-  std::vector<NumberFieldRange> fields;
++  std::vector<IntlFieldRange> fields;
+   int32_t begin, end, type;
+   while ((type = icu_->ufieldpositer_next(positions, &begin, &end)) >= 0)
+     fields.push_back({begin, end, type});
+@@ -2334,10 +2490,10 @@
+   if (value == vm::ExecutionStatus::EXCEPTION) return value.getStatus();
+   UErrorCode status = U_ZERO_ERROR;
+   auto text = value->toString(status);
+-  std::vector<NumberFieldRange> fields, sources;
++  std::vector<IntlFieldRange> fields, sources;
+   icu::ConstrainedFieldPosition position;
+   while (value->nextPosition(position, status)) {
+-    NumberFieldRange field{position.getStart(), position.getLimit(), position.getField()};
++    IntlFieldRange field{position.getStart(), position.getLimit(), position.getField()};
+     if (position.getCategory() == UFIELD_CATEGORY_NUMBER_RANGE_SPAN) sources.push_back(field);
+     else if (position.getCategory() == UFIELD_CATEGORY_NUMBER) fields.push_back(field);
+     else return runtime.raiseError("ICU number-range field category is invalid");
+--- a/lib/VM/JSLib/Intl.cpp
++++ b/lib/VM/JSLib/Intl.cpp
+@@ -1270,6 +1270,12 @@
+       nullptr,
+       intlDateTimeFormatPrototypeFormatToParts,
+       1);
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++  defineMethod(runtime, prototype, Predefined::getSymbolID(Predefined::formatRange),
++      nullptr, intlDateTimeFormatPrototypeFormatRange, 2);
++  defineMethod(runtime, prototype, Predefined::getSymbolID(Predefined::formatRangeToParts),
++      reinterpret_cast<void *>(1), intlDateTimeFormatPrototypeFormatRange, 2);
++#endif
+ 
+   defineMethod(
+       runtime,
+@@ -1451,6 +1457,34 @@
+   return partsToJS(runtime, (*dateTimeFormatRes)->formatToParts(*dateRes));
+ #endif
+ }
++
++#ifdef HERMES_USE_STATIC_INTL_PROVIDER
++CallResult<HermesValue> intlDateTimeFormatPrototypeFormatRange(void *context, Runtime &runtime) {
++  const auto args = runtime.getCurrentFrame().getNativeArgs();
++  auto formatter = verifyDecoration<platform_intl::DateTimeFormat>(runtime,
++      args.dyncastThis<DecoratedObject>(), "Intl.DateTimeFormat range method");
++  if (formatter == ExecutionStatus::EXCEPTION) return formatter.getStatus();
++  if (args.getArg(0).isUndefined() || args.getArg(1).isUndefined())
++    return runtime.raiseTypeError("Intl date range requires both endpoints");
++  auto start = toNumber_RJS(runtime, args.getArgHandle(0));
++  if (start == ExecutionStatus::EXCEPTION) return start.getStatus();
++  const double x = start->getNumber();
++  auto end = toNumber_RJS(runtime, args.getArgHandle(1));
++  if (end == ExecutionStatus::EXCEPTION) return end.getStatus();
++  // Both observable conversions precede TimeClip and invalid-date rejection.
++  const double clippedStart = timeClip(x), clippedEnd = timeClip(end->getNumber());
++  if (std::isnan(clippedStart) || std::isnan(clippedEnd))
++    return runtime.raiseRangeError("Invalid date range endpoint");
++  if (context) {
++    auto result = (*formatter)->formatRangeToParts(runtime, x, end->getNumber());
++    if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++    return partsToJS(runtime, std::move(*result));
++  }
++  auto result = (*formatter)->formatRange(runtime, x, end->getNumber());
++  if (result == ExecutionStatus::EXCEPTION) return result.getStatus();
++  return StringPrimitive::createEfficient(runtime, std::move(*result));
++}
++#endif
+ 
+ CallResult<HermesValue> intlDateTimeFormatPrototypeResolvedOptions(
+     void *,

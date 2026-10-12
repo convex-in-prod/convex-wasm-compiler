@@ -1,0 +1,21 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction, locales, number-ranges icu-cleanup and date-ranges patch stages",
+  "patchSha256": "3317714b4a78a0f77bf68726f18a58ad55729a8633df3dc9d0c79fcb657d0e26",
+  "files": [
+    {
+      "path": "include/hermes/Platform/Intl/PlatformIntl.h",
+      "before": "abb3fc74e5b1acb94802effd2f87cdfc19ba9aff92e864ebae7970e657cfc004",
+      "after": "eebf1177b6faa05123ff1716688f75812984f040f8b78b6750adef5b78ef2305"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "56ef99b397e0d41e52c2a599236c891e2ea630bb9cb85499a619db35c5c796c4",
+      "after": "e14b475d5733c4c7b3d61ab63afbbb07e0ab35674cbdc59d9c975e8a585500df"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "66b928a2ca33aaf9d0b4495c76b4795f4dcf716853c5cd60da67c340b7807370",
+      "after": "3ab20023f54fe0b7c10160a63ac9ab64b2595ba5f3c97a7a110f1c9d68400664"
+    }
+  ]
+}

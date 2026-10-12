@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 const root = new URL('./', process.env.INTL_EXPERIMENT_URL);
 const name = process.argv.slice(2).find(value => !value.startsWith('--')) ?? 'bindings';
-if (!['bindings', 'construction', 'locales', 'ranges'].includes(name)) throw new Error('Unknown binding corpus');
+if (!['bindings', 'construction', 'locales', 'ranges', 'date-ranges', 'collator'].includes(name)) throw new Error('Unknown binding corpus');
 const expected = JSON.parse(readFileSync(new URL(name + '-reference.json', root))).rows;
 const actual = JSON.parse(readFileSync(new URL(name + '-actual.json', root))).rows;
 if (expected.length !== actual.length) throw new Error('Case count differs');

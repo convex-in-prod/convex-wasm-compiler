@@ -1,0 +1,26 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction, locales, number-ranges and icu-cleanup patch stages",
+  "patchSha256": "bb7fad2da7e29b296143a20acea56c2b54d45c2d2a0a5c4b219a6527cb7b7d46",
+  "files": [
+    {
+      "path": "include/hermes/Platform/Intl/PlatformIntl.h",
+      "before": "06d52cb1eda95970f2fac43b8e1304a1179c3d993d152ca037173347d48bd8e8",
+      "after": "abb3fc74e5b1acb94802effd2f87cdfc19ba9aff92e864ebae7970e657cfc004"
+    },
+    {
+      "path": "include/hermes/VM/NativeFunctions.def",
+      "before": "a726c922d11c6f267c84d9bc27fdb166013c2d23ad38553e8df79cc16c081bb8",
+      "after": "c2a6c841fa1efca1ff0b46309173210d65c540a6fef7826031e7524cba31be2b"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "f2c3e0bb0c4e48f9125772418d8e489d567beac39ce1df0c239a6c534bcaac41",
+      "after": "56ef99b397e0d41e52c2a599236c891e2ea630bb9cb85499a619db35c5c796c4"
+    },
+    {
+      "path": "lib/VM/JSLib/Intl.cpp",
+      "before": "a029fa46beac22aae4e9faed13dc9a71ac7cd36a50d66b03364d7c9862f0b0e2",
+      "after": "66b928a2ca33aaf9d0b4495c76b4795f4dcf716853c5cd60da67c340b7807370"
+    }
+  ]
+}

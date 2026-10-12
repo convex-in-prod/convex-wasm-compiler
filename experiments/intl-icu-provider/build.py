@@ -9,7 +9,7 @@ import subprocess
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges"])
+parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges", "date-ranges", "collator"])
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--host-build", required=True, type=Path)
 parser.add_argument("--emsdk", required=True, type=Path)

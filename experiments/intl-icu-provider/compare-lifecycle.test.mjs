@@ -55,3 +55,14 @@ test('rejects changed output in a later runtime', () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /output differs at cycle 15/);
 });
+
+for (const count of [15, 17]) {
+  test('rejects ' + count + ' runtime outputs', () => {
+    const result = compare(outputs => {
+      if (count === 15) outputs.pop();
+      else outputs.push(structuredClone(outputs[0]));
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Incomplete lifecycle evidence/);
+  });
+}

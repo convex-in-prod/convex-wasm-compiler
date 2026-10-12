@@ -74,6 +74,23 @@ their earlier cleanup slot. Locale cleanup now follows the unified cache and
 precedes resource-bundle cleanup. The code patch is separate from the unchanged
 pinned locale dataset.
 
+`date-ranges.patch` follows ICU cleanup. It adds both date-range methods with
+strict receivers, ordered conversion and lazy interval formatter reuse. Calendar
+clones preserve the single-date formatter's timezone, calendar and Gregorian
+cutover. Shared date field partitioning emits source-labelled parts. Collapsed
+parts deliberately preserve the reference V8's original fractional timestamp;
+for negative fractional milliseconds their date can differ from the range string.
+Overlapping endpoint spans give the start endpoint precedence. These are tested
+engine compatibility rules, not locale-specific output exceptions.
+
+`collator.patch` follows date ranges. Collator constructors and `localeCompare`
+now use ordered option reads. Service-specific ICU resources determine available
+locales; resolved metadata comes from actual collator attributes and V8's locale
+selection rule. Absent punctuation options preserve ICU defaults. ICU canonical
+mapping replaces the adapter's collation alias table. Failed initialization or
+attribute operations raise errors; they no longer silently select a root collator
+or fall back to binary string comparison.
+
 Number strings and parts use the same modern ICU `unumf` formatter and formatted
 value APIs. The implementation handles units, currencies, accounting signs,
 scientific/engineering/compact notation, grouping, fraction/significant precision,
@@ -132,6 +149,8 @@ python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage construction
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage locales
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage number-ranges
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage icu-cleanup
+python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage date-ranges
+python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage collator
 python3 build.py runtime --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
 node make-corpus.mjs
 node number-contracts.mjs
@@ -140,7 +159,9 @@ node --expose-gc binding-contracts.mjs
 node --expose-gc construction-contracts.mjs
 node locale-contracts.mjs
 node --expose-gc number-range-contracts.mjs
-for variant in probe contracts dates bindings construction locales ranges; do
+node --expose-gc date-range-contracts.mjs
+node --expose-gc collator-contracts.mjs
+for variant in probe contracts dates bindings construction locales ranges date-ranges collator; do
   python3 build.py "$variant" --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
   node run-probe.mjs "$variant" > "$INTL_EXPERIMENT_ROOT/$variant-actual.json" 2> "$INTL_EXPERIMENT_ROOT/$variant-stderr.log"
 done
@@ -151,12 +172,14 @@ node compare-bindings.mjs --require-parity
 node compare-bindings.mjs construction --require-parity
 node compare-bindings.mjs locales --require-parity
 node compare-bindings.mjs ranges --require-parity
+node compare-bindings.mjs date-ranges --require-parity
+node compare-bindings.mjs collator --require-parity
 ```
 
 The comparators save complete differences and exit unsuccessfully when a row
 differs under `--require-parity`. Expected errors compare exception classes,
-not implementation-specific messages. Capability inventory still records missing
-date-range methods; number-range support does not imply complete Intl coverage.
+not implementation-specific messages. Passing date/number range checks does not
+imply complete Intl coverage.
 
 To reproduce historical variants, build/run the original corpus before
 `fix-adapter.py`, then after that script and before `apply-formatters.py`.
@@ -173,7 +196,7 @@ and check repeated runtime destruction in one Wasm instance:
 ```sh
 export INTL_WASMTIME_RUNNER=/absolute/path/to/convex-wasm-wasmtime-runner
 export RAYON_NUM_THREADS=2
-for variant in construction bindings ranges; do
+for variant in construction bindings ranges date-ranges collator; do
   python3 build.py "$variant" --standalone --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
   mkdir -p "$INTL_EXPERIMENT_ROOT/standalone-$variant"
   cp "$INTL_EXPERIMENT_ROOT/$variant-reference.json" "$INTL_EXPERIMENT_ROOT/standalone-$variant/$variant-reference.json"
@@ -284,17 +307,53 @@ host import signatures. Earlier corpus artifacts were built at the number-range
 stage; the final standalone artifact also includes the cleanup fix and accounting
 harness. All six patch stages reconstruct the 15 modified source files exactly.
 
+Date ranges now pass **11,422 / 11,422** cases, including 100 matching
+expected errors. All eight corpora pass **29,821** cases against the date-range
+source stage. Wasmtime passes **182,752** date-range executions across 16 runtime
+lifecycles. After every runtime destruction, ICU retains exactly **3,134,618
+requested bytes / 14,090 allocations**; aggregate allocator bytes stay at
+**3,438,440**. One ICU shutdown then leaves zero tracked allocations. This is
+bounded retention evidence, not production memory-budget integration.
+
+The first date-range run matched 10,943 cases. Its 479 differences comprised 448
+fractional-timestamp fallback cases, 28 ICU calendar-limit error classes and
+three overlapping source-span cases. The corpus covers seven locales, four zones,
+27 profiles and 15 endpoint pairs, plus coercion/receiver/reflection/GC controls.
+`date-range-result-summary.json` records the final source stage, corpus and
+artifact hashes, unchanged 11 allowed imports and lifecycle evidence. All seven
+patch stages reconstruct the 15 modified source files exactly. The lifecycle
+comparator streams runtime outputs to avoid holding sixteen large corpora in
+memory; its eight tests reject retention growth, incomplete runs and wrong output.
+
+The Collator follow-up passes **1,224 / 1,224** cases, including ordered getters,
+validation, locale support, metadata, string comparisons, convenience calls and
+forced GC. The initial corpus matched 826 of 1,179; the final corpus strengthens
+the prototype check and adds mixed-case collation-option controls. Relevant
+binding, locale and mixed formatter regressions also pass **8,663** cases. These
+are the regressions rerun at this source stage; the date/number range and other
+formatter/construction evidence retains its preceding date-range source identity.
+
+Wasmtime passes **19,584** Collator executions across 16 runtimes. ICU retains
+**724,630 requested bytes / 8,075 allocations** after each destruction,
+and explicit shutdown leaves zero tracked ICU allocations. The eight authenticated
+patch stages reconstruct all 15 modified source files exactly. This establishes
+bounded compatibility and retention, not failure safety or production readiness.
+
+`collator-result-summary.json` records this checkpoint, including source, harness,
+artifact and host-import identities. Source-stage boundaries remain explicit in
+the historical result summaries.
+
 ## Limits and integration boundary
 
 Date/number options now use an ordered reader with the bounded coverage above.
 Constructor/reflection and locale behavior have the directed coverage above;
-date-range methods remain absent. Number ranges have the coverage above.
-Collator still uses the old eager option map. These matrices do not establish
-full Test262 conformance or compatibility with V8's experimental best-fit matcher.
-Additional ICU fallback/error paths in shared locale and collator code remain
-outside this formatter audit.
+date and number ranges have the coverage above.
+Collator uses the ordered reader with the directed coverage above. These matrices
+do not establish full Test262 conformance or compatibility with V8's experimental
+best-fit matcher. Shared locale-conversion helpers still have fixed-capacity
+buffers and fallbacks that need replacement and allocation-failure coverage.
 
-The original-corpus Wasm is 38,914,963 bytes (about 37.11 MiB), including the full
+The date-range-stage original-corpus Wasm is 38,938,617 bytes (about 37.13 MiB), including the full
 33,107,248-byte ICU dataset. Its data SHA-256 is
 `a3d49eacd189624769dc77457c6aa1789a89219fb217a6d87d5b076c269aaf1f`.
 Wasm uses 128 MiB initial memory and a 512 MiB cap. No performance or incremental
