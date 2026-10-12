@@ -1,0 +1,64 @@
+--- a/external/icu-small/CMakeLists.txt
++++ b/external/icu-small/CMakeLists.txt
+@@ -19,3 +19,7 @@
+ set_property(SOURCE ${ICU_I18N_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS U_I18N_IMPLEMENTATION=1)
+ target_compile_options(hermesStaticIcu PRIVATE -fexceptions -frtti -fwasm-exceptions
+   -Wno-deprecated-declarations -Wno-sign-compare -Wno-unused-variable)
++
++option(HERMES_ICU_FAIL_STOP_ALLOCATION "Trap rather than return null after ICU allocation exhaustion" ON)
++set_property(SOURCE source/common/cmemory.cpp APPEND PROPERTY COMPILE_DEFINITIONS
++  HERMES_ICU_FAIL_STOP_ALLOCATION=$<BOOL:${HERMES_ICU_FAIL_STOP_ALLOCATION}>)
+--- a/external/icu-small/source/common/cmemory.cpp
++++ b/external/icu-small/source/common/cmemory.cpp
+@@ -41,6 +41,17 @@
+ static long b=0; 
+ #endif
+ 
++// The sandbox must discard an instance after native allocation exhaustion.
++// Returning null allows some ICU paths to select unrelated formatting defaults.
++static void *checkedAllocation(void *memory) {
++#if HERMES_ICU_FAIL_STOP_ALLOCATION
++    if (memory == nullptr) {
++        __builtin_trap();
++    }
++#endif
++    return memory;
++}
++
+ U_CAPI void * U_EXPORT2
+ uprv_malloc(size_t s) {
+ #if U_DEBUG && defined(UPRV_MALLOC_COUNT)
+@@ -53,9 +64,9 @@
+ #endif
+     if (s > 0) {
+         if (pAlloc) {
+-            return (*pAlloc)(pContext, s);
++            return checkedAllocation((*pAlloc)(pContext, s));
+         } else {
+-            return uprv_default_malloc(s);
++            return checkedAllocation(uprv_default_malloc(s));
+         }
+     } else {
+         return (void *)zeroMem;
+@@ -79,9 +90,9 @@
+         return (void *)zeroMem;
+     } else {
+         if (pRealloc) {
+-            return (*pRealloc)(pContext, buffer, size);
++            return checkedAllocation((*pRealloc)(pContext, buffer, size));
+         } else {
+-            return uprv_default_realloc(buffer, size);
++            return checkedAllocation(uprv_default_realloc(buffer, size));
+         }
+     }
+ }
+@@ -104,6 +115,9 @@
+ U_CAPI void * U_EXPORT2
+ uprv_calloc(size_t num, size_t size) {
+     void *mem = nullptr;
++    if (num != 0 && size > SIZE_MAX / num) {
++        return checkedAllocation(nullptr);
++    }
+     size *= num;
+     mem = uprv_malloc(size);
+     if (mem) {

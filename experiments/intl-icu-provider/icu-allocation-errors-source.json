@@ -1,0 +1,71 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction, locales, number-ranges, icu-cleanup, date-ranges, collator, locale-errors patch stages",
+  "patchSha256": "31902f522312cf1bf142e01e1ec01058b2f989d04a0be6ce90639773baeb222e",
+  "files": [
+    {
+      "path": "external/icu-small/source/common/localebuilder.cpp",
+      "before": "c50dc402a41c23a94ba14f7c5716e94c95e39f8b2f5b29e33c68dbbf5063fb6c",
+      "after": "1e51aa2657ba398efd861c951c66bf6cc5e031fc311fa6f5db2e424a6c3f067d"
+    },
+    {
+      "path": "external/icu-small/source/common/ucurr.cpp",
+      "before": "430a36e6238e27fbbb94dcfd074c91f50baa1d7792956dae2c3a8036ae8bcadf",
+      "after": "67bd0d697373285489aa017e1f575d2fda2c1ac0985a1f6d41cd614789c3a9a9"
+    },
+    {
+      "path": "external/icu-small/source/i18n/datefmt.cpp",
+      "before": "943150b036be8f21b731bdf72be242c84825d2f6652af4909e49528ae48fbac6",
+      "after": "7b4127d001c5cfbd07891d8a40a2c61a13ace60dc3a0c79bbb9a464b1ede7f39"
+    },
+    {
+      "path": "external/icu-small/source/i18n/fphdlimp.cpp",
+      "before": "a5d1d76aca4b518a89ff372df4069bcfccef71e84a6044a182dd220038522566",
+      "after": "a6fa69c8e6ce5d462b959c183fe6cf07f0602adce81f2deae905fbc988bb2ee4"
+    },
+    {
+      "path": "external/icu-small/source/i18n/fphdlimp.h",
+      "before": "e570d8114199115d8205374b694a824623ad62c0c557afd4c571d3f6191661ed",
+      "after": "7d8aa6c902bc5d17ba678841c7f9f1c259468e7bfa20d587a2ac19b111df8dc3"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_affixutils.cpp",
+      "before": "e6d27f03e7ed77e7cdb1b1313c63b10b6b592afa615bfc7b7efceaff054ed42a",
+      "after": "71184980e933c07d4f7b9627d33d7d0bf8114ea4fcd47d6641b727c3410c8f4b"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_affixutils.h",
+      "before": "941f59afeb58038a44d9b4c5cb41541e97bc57e342d60bec4a5b8ebe19ab3797",
+      "after": "59e4e73e95c7ae693d10bd5012efb3f091a254d4bda83a999b8bcbf2594c555e"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_formatimpl.cpp",
+      "before": "0cf44fe1d5d5374861cd8c0087fea25714ce1a4b6b90bf17e87a0b36bf4c05f1",
+      "after": "72cd81e06af376605ae64defaee6574876f3541c4231d02d2b99e2ac78d7b48a"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_patternmodifier.cpp",
+      "before": "292e34ab20d2da6086098886e6a21f1bd35aa9ea6df5d0f858a926fcb05d1d51",
+      "after": "bae1566a20e095c0ff11bb4d6a650886b86cacea3a0ff57f5f5ab7a8b8c9edbc"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_patternmodifier.h",
+      "before": "a5ad953cee66c8f936e8ba8a3029a362dacad82fb1f9cf951673fb44182e8f06",
+      "after": "1a43c8e0cb29515d605964cc04869aad390b28ca80b84d0b533e899e4c5a25e5"
+    },
+    {
+      "path": "external/icu-small/source/i18n/number_skeletons.cpp",
+      "before": "7f400f5335dfb2efe184ba1d4e1e9de1a70c0760da453963de053bcb85d62773",
+      "after": "ee0b3b4cce7cd3d32ee83b986907e48c20e8c950f7d1f2d94c5a418bbd105711"
+    },
+    {
+      "path": "external/icu-small/source/i18n/smpdtfmt.cpp",
+      "before": "b03a000c6403a96560d79b358da2a5b60828ac0241d220407573bad1cb226dad",
+      "after": "501dcca0dcddb933611f8465da8420ad3ea770afd6e1113d5dfc0da4e4a8dcf6"
+    },
+    {
+      "path": "external/icu-small/source/i18n/udat.cpp",
+      "before": "4593ddabf8d9f68f905f906bc711e82ab4e1381951ed94d13afd2865e799c51f",
+      "after": "eb77df253b1cc9002f90a9d191e9d63b2aecdd639ca2a59d4a0cd5f56157db83"
+    }
+  ]
+}

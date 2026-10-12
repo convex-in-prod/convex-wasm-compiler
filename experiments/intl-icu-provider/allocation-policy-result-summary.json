@@ -1,0 +1,632 @@
+{
+  "kind": "native-icu-locale-errors-allocation-policy-result",
+  "patches": {
+    "formatters": {
+      "bytes": 94118,
+      "sha256": "81e44b1c5c61b7e8bd3f1835bbdfd2cf32839a1ef7d163377b572355fcf86667"
+    },
+    "bindings": {
+      "bytes": 52120,
+      "sha256": "4e9cf246614779e1a19ac6578066e8354e09fe2cac5670574985323b98d849fa"
+    },
+    "construction": {
+      "bytes": 10965,
+      "sha256": "b194d06fb000f700b3d488881d2a86e3c2f2c45645108d6d1e786721f7c694ca"
+    },
+    "locales": {
+      "bytes": 24315,
+      "sha256": "cbc75a85e8bae81e8acb4ac184bc2f51f671346330d3ca9ed9d331b0dc81c04d"
+    },
+    "number-ranges": {
+      "bytes": 24685,
+      "sha256": "b533bec5521f5205ec9de408e12a233721ce97013d28ae709406f2216f024cdc"
+    },
+    "icu-cleanup": {
+      "bytes": 1315,
+      "sha256": "08ca3e08d6f97e2d4f69bc466be63e0187a371dcb2127c88837fdedbd8a3fcba"
+    },
+    "date-ranges": {
+      "bytes": 21115,
+      "sha256": "bb7fad2da7e29b296143a20acea56c2b54d45c2d2a0a5c4b219a6527cb7b7d46"
+    },
+    "collator": {
+      "bytes": 30678,
+      "sha256": "3317714b4a78a0f77bf68726f18a58ad55729a8633df3dc9d0c79fcb657d0e26"
+    },
+    "locale-errors": {
+      "bytes": 17289,
+      "sha256": "69b53df8f40f45bceb66011cb4cf96a43d58af7e13da9bc7108a704cd38610c0"
+    },
+    "icu-allocation-policy": {
+      "bytes": 2235,
+      "sha256": "ab8bcc0a5e6085ca8ca344a1d29e7c465d1d3d29622f70c95f9c1c409f22b1be"
+    }
+  },
+  "sourceReconstruction": {
+    "stages": [
+      "formatters",
+      "bindings",
+      "construction",
+      "locales",
+      "number-ranges",
+      "icu-cleanup",
+      "date-ranges",
+      "collator",
+      "locale-errors",
+      "icu-allocation-policy"
+    ],
+    "sourceFiles": 16,
+    "excludedDiagnosticFiles": 13
+  },
+  "referenceVersions": {
+    "node": "24.15.0",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.8",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.3.1",
+    "merve": "1.2.2",
+    "modules": "137",
+    "napi": "10",
+    "nbytes": "0.1.3",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.68.0",
+    "openssl": "3.5.5",
+    "simdjson": "4.5.0",
+    "simdutf": "6.4.0",
+    "sqlite": "3.51.3",
+    "tz": "2026a",
+    "undici": "7.24.4",
+    "unicode": "17.0",
+    "uv": "1.51.0",
+    "uvwasi": "0.0.23",
+    "v8": "13.6.233.17-node.48",
+    "zlib": "1.3.1-e00f703",
+    "zstd": "1.5.7"
+  },
+  "corpora": {
+    "probe": {
+      "totals": {
+        "cases": 1263,
+        "format": 1263,
+        "parts": 1263,
+        "resolved": 1263,
+        "raw": 1263,
+        "errors": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 213511,
+          "sha256": "cbfd8743477db670b5ee92a06979261fb6bff11721192a52d2888f77d96490eb"
+        },
+        "wasm": {
+          "bytes": 38938915,
+          "sha256": "85f65ef7b33a81aee4b8b1952d4e76a4c2e86a68e353a88e45c68cdd4b575f4d"
+        }
+      },
+      "output": {
+        "bytes": 686553,
+        "sha256": "355f4513c27c47d26175b2a04fab521c3066b4c1b87825cd5162f5d2a86184e5"
+      },
+      "reference": {
+        "bytes": 686553,
+        "sha256": "355f4513c27c47d26175b2a04fab521c3066b4c1b87825cd5162f5d2a86184e5"
+      }
+    },
+    "contracts": {
+      "totals": {
+        "cases": 4964,
+        "format": 4950,
+        "parts": 4950,
+        "resolved": 4950,
+        "propertyOrder": 4950,
+        "expectedErrors": 14,
+        "matchingErrors": 14,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 665461,
+          "sha256": "8a948b05e1d18b4721006d00ff287f8b1ef51f0f145350463629a8676df2a076"
+        },
+        "wasm": {
+          "bytes": 39336001,
+          "sha256": "9d71ab85caab827304886b160d459c1aec490eaaeef14dae14676c4da08450b0"
+        }
+      },
+      "output": {
+        "bytes": 2499530,
+        "sha256": "d3aa27407f0dad3d65a316b8d12fea414720a221ddcaffc6799c3580a529ccff"
+      },
+      "reference": {
+        "bytes": 2499779,
+        "sha256": "a3e2e189136503380f08349c7c45041816c94548bf0936007dd689164ebe6a34"
+      }
+    },
+    "dates": {
+      "totals": {
+        "cases": 1281,
+        "format": 1276,
+        "parts": 1276,
+        "resolved": 1276,
+        "propertyOrder": 1276,
+        "expectedErrors": 5,
+        "matchingErrors": 5,
+        "unexpectedErrors": 0,
+        "partsRoundtripFailures": 0
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 175141,
+          "sha256": "4a9216e4d101df7f52c294ee3c88c1886cd5cf6b9e2841bf2e2f3cac9ffef79c"
+        },
+        "wasm": {
+          "bytes": 38921669,
+          "sha256": "b85c5c490d1efe6677a8e073f13267a2c3d8e9e0a642cc0ff9be57d070781dda"
+        }
+      },
+      "output": {
+        "bytes": 523498,
+        "sha256": "9a191960cd7af6b7c41e8b791750ac62fa1fef2987f5e486a0b744c21b251b18"
+      },
+      "reference": {
+        "bytes": 523536,
+        "sha256": "2b5f2ec3b4f49039cd0d3fbcbed96e6cfb6466b0485dc5f66680e9640d8f88e3"
+      }
+    },
+    "bindings": {
+      "totals": {
+        "cases": 514,
+        "matches": 514
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 10583,
+          "sha256": "e9ffd385cb9125a859dfa8d2cd5fa5e66c7198873017e172bb740d68518e85ed"
+        },
+        "wasm": {
+          "bytes": 39052360,
+          "sha256": "091b3351eeedbaa8d3a0375675859eff832021271227a383f7079f554302fa95"
+        }
+      },
+      "output": {
+        "bytes": 176101,
+        "sha256": "46ca317627b522281c4b2737ab93774de95bcd652924e8c3bf72c74123b039c1"
+      },
+      "reference": {
+        "bytes": 176101,
+        "sha256": "46ca317627b522281c4b2737ab93774de95bcd652924e8c3bf72c74123b039c1"
+      }
+    },
+    "construction": {
+      "totals": {
+        "cases": 149,
+        "matches": 149
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 8217,
+          "sha256": "4f0efa57647b73c3508a20980f84e436ce9f58881d639d1f9fa974d39c4f16da"
+        },
+        "wasm": {
+          "bytes": 38953339,
+          "sha256": "a35ac7e08c1d6365f24a9d03f5bea7872794425246275e6aa4bc9ea3f53b541f"
+        }
+      },
+      "output": {
+        "bytes": 19044,
+        "sha256": "aa0009508369d0e48ff343b8dc896746187055080d469f7c551e482fe93bb619"
+      },
+      "reference": {
+        "bytes": 19044,
+        "sha256": "aa0009508369d0e48ff343b8dc896746187055080d469f7c551e482fe93bb619"
+      }
+    },
+    "locales": {
+      "totals": {
+        "cases": 6886,
+        "matches": 6886
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 2780,
+          "sha256": "0e1f02416c965ff36925ac367228d077b1c303d6666492d3655dc16a88256e27"
+        },
+        "wasm": {
+          "bytes": 38842870,
+          "sha256": "a3235b79895adc9280da6cea58fec833673fdde30810d5d95af6e1e6bf3fa72b"
+        }
+      },
+      "output": {
+        "bytes": 470435,
+        "sha256": "7edc0e40e65168efce230cc975682a7e908af6357ffecfd7e08d266b8d7b1472"
+      },
+      "reference": {
+        "bytes": 470435,
+        "sha256": "7edc0e40e65168efce230cc975682a7e908af6357ffecfd7e08d266b8d7b1472"
+      }
+    },
+    "ranges": {
+      "totals": {
+        "cases": 3342,
+        "matches": 3342
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 5685,
+          "sha256": "e208b54fb9330198dda3c4b06a06aa98f5c30626c92c13aeb6ced3ff08ada13b"
+        },
+        "wasm": {
+          "bytes": 38900451,
+          "sha256": "f6f6599c181b73a78421bbc7a7ca030a6dee1ab18568cb6d8049630e815b0fa3"
+        }
+      },
+      "output": {
+        "bytes": 2980741,
+        "sha256": "1f137da5d6f9f4c327f9f8d729b9e01c1cdc5414d07012f0bc49d8b9a2d73c4d"
+      },
+      "reference": {
+        "bytes": 2980741,
+        "sha256": "1f137da5d6f9f4c327f9f8d729b9e01c1cdc5414d07012f0bc49d8b9a2d73c4d"
+      }
+    },
+    "date-ranges": {
+      "totals": {
+        "cases": 11422,
+        "matches": 11422
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 5989,
+          "sha256": "f45420eeeb52544aadbe83006f41660831b55eff41ca7fa69561976efc05c50a"
+        },
+        "wasm": {
+          "bytes": 38907397,
+          "sha256": "522e2a1799dcdf43873e2dd7df86f71abd33b609550863dd067e60cd71ca367b"
+        }
+      },
+      "output": {
+        "bytes": 15036188,
+        "sha256": "792c3434ac223a791b907e7f9c8e86f5ee5ce22dca42214fb32d1ef557067d7c"
+      },
+      "reference": {
+        "bytes": 15036188,
+        "sha256": "792c3434ac223a791b907e7f9c8e86f5ee5ce22dca42214fb32d1ef557067d7c"
+      }
+    },
+    "collator": {
+      "totals": {
+        "cases": 1224,
+        "matches": 1224
+      },
+      "artifacts": {
+        "js": {
+          "bytes": 6418,
+          "sha256": "6aacb5b7f69efe4f77c0d8b65bdd357baf130ca5ec307af16fbe6304051e253f"
+        },
+        "wasm": {
+          "bytes": 38904779,
+          "sha256": "af651393a0f016e62d309da64934cb7e9f159a48925788ea9d02953f95afb3b7"
+        }
+      },
+      "output": {
+        "bytes": 268109,
+        "sha256": "16843d12331b4716ed8920d577c82e4d7bf3fe1982c7035e38e46d4cf8f52464"
+      },
+      "reference": {
+        "bytes": 268109,
+        "sha256": "16843d12331b4716ed8920d577c82e4d7bf3fe1982c7035e38e46d4cf8f52464"
+      }
+    }
+  },
+  "cases": 31045,
+  "allocationTraps": {
+    "wasmSha256": "92b67e1fe2569053e3a6babb019538ebf099221d9b6d301a9453d01d8be796d7",
+    "cases": [
+      {
+        "id": "number",
+        "injections": 115
+      },
+      {
+        "id": "number-range",
+        "injections": 200
+      },
+      {
+        "id": "date",
+        "injections": 910
+      },
+      {
+        "id": "date-range",
+        "injections": 646
+      },
+      {
+        "id": "collator",
+        "injections": 104
+      },
+      {
+        "id": "canonical",
+        "injections": 251
+      }
+    ],
+    "injections": 2226,
+    "scope": "Warm ICU allocation failures in fresh Node-hosted Wasm instances; trapped instances are discarded.",
+    "wasm": {
+      "bytes": 38909933,
+      "sha256": "92b67e1fe2569053e3a6babb019538ebf099221d9b6d301a9453d01d8be796d7"
+    },
+    "reference": {
+      "bytes": 4444,
+      "sha256": "040d790049333e24858764a5d18f554b3b163e38494fc87077262ce747ea629a"
+    },
+    "evidence": {
+      "bytes": 473064,
+      "sha256": "eab5f2870a90c258e29e77716d7b11c9a29c60ea1c1ee2e0802e6234aebc5e70"
+    },
+    "host": "Node WASI",
+    "imports": [
+      {
+        "index": 0,
+        "module": "env",
+        "name": "emscripten_notify_memory_growth",
+        "type": {
+          "canonical": "func(i32)->()",
+          "kind": "func",
+          "sha256": "cadfaaccee5c15afe852a8fde38c86894916e432a010d033763be3ebd63be2f0"
+        }
+      },
+      {
+        "index": 1,
+        "module": "wasi_snapshot_preview1",
+        "name": "proc_exit",
+        "type": {
+          "canonical": "func(i32)->()",
+          "kind": "func",
+          "sha256": "cadfaaccee5c15afe852a8fde38c86894916e432a010d033763be3ebd63be2f0"
+        }
+      },
+      {
+        "index": 2,
+        "module": "wasi_snapshot_preview1",
+        "name": "environ_sizes_get",
+        "type": {
+          "canonical": "func(i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "ff8c741b94461018315448a0aa93348320e03160aec2efdac052e4c0a0284e6e"
+        }
+      },
+      {
+        "index": 3,
+        "module": "wasi_snapshot_preview1",
+        "name": "environ_get",
+        "type": {
+          "canonical": "func(i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "ff8c741b94461018315448a0aa93348320e03160aec2efdac052e4c0a0284e6e"
+        }
+      },
+      {
+        "index": 4,
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_close",
+        "type": {
+          "canonical": "func(i32)->(i32)",
+          "kind": "func",
+          "sha256": "9e598a15ab5b074d5ffec8bd6ce037cec41bfce5e4ba1645f7a6ba1e062a0fbd"
+        }
+      },
+      {
+        "index": 5,
+        "module": "wasi_snapshot_preview1",
+        "name": "clock_time_get",
+        "type": {
+          "canonical": "func(i32,i64,i32)->(i32)",
+          "kind": "func",
+          "sha256": "bd8ed065a0f0a88b21114a8edaf44fa273070995e59b808b826f2f93b098ea42"
+        }
+      },
+      {
+        "index": 6,
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_fdstat_get",
+        "type": {
+          "canonical": "func(i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "ff8c741b94461018315448a0aa93348320e03160aec2efdac052e4c0a0284e6e"
+        }
+      },
+      {
+        "index": 7,
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_seek",
+        "type": {
+          "canonical": "func(i32,i64,i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "68c27bd70f34f0cf39d0e29f8335a53f08100cb2994e674d908f10acc1d53a13"
+        }
+      },
+      {
+        "index": 8,
+        "module": "env",
+        "name": "__syscall_unlinkat",
+        "type": {
+          "canonical": "func(i32,i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "85be8ae4c9340f18a0e7ff9c3962177881ff6e8049c89b400026fa0004c40139"
+        }
+      },
+      {
+        "index": 9,
+        "module": "wasi_snapshot_preview1",
+        "name": "fd_write",
+        "type": {
+          "canonical": "func(i32,i32,i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "088631e449a99b8f117326e75ec8c545addd72f4acbda58f0498a83ed0bcf11c"
+        }
+      },
+      {
+        "index": 10,
+        "module": "wasi_snapshot_preview1",
+        "name": "random_get",
+        "type": {
+          "canonical": "func(i32,i32)->(i32)",
+          "kind": "func",
+          "sha256": "ff8c741b94461018315448a0aa93348320e03160aec2efdac052e4c0a0284e6e"
+        }
+      }
+    ],
+    "importAllowlistMatch": true,
+    "importAllowlistSource": {
+      "path": "scripts/lib/convex-wasm-artifact-pipeline.mjs",
+      "bytes": 1157446,
+      "sha256": "41a49aaad2430597ad6adc25ea68cdaa8c0572cb07f0f4e23945701ff3311344"
+    }
+  },
+  "allocationBoundaries": {
+    "cases": [
+      "zero-size-semantics",
+      "malloc-failure",
+      "realloc-failure",
+      "calloc-overflow"
+    ],
+    "wasmSha256": "99d995b337918ef643f94fc00cc96f8f77c5af80c2d4ff4c7c6c93ec5205dbd8",
+    "wasm": {
+      "bytes": 10488,
+      "sha256": "99d995b337918ef643f94fc00cc96f8f77c5af80c2d4ff4c7c6c93ec5205dbd8"
+    }
+  },
+  "lifecycle": {
+    "cycles": 16,
+    "casesPerCycle": 514,
+    "matchingExecutions": 8224,
+    "allocatedBytes": [
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824,
+      889824
+    ],
+    "allocatorPeriod": 1,
+    "icuRequestedBytes": [
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289,
+      696289
+    ],
+    "icuAllocationCount": [
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697,
+      6697
+    ],
+    "cleanup": {
+      "lifecycleCleanup": true,
+      "icuRequestedBytes": 0,
+      "icuAllocationCount": 0
+    },
+    "wasm": {
+      "bytes": 39054223,
+      "sha256": "b7e261300bd877a223ba8d738d1ee4f48d42efe0d88491814d0a34b752fed1d4"
+    },
+    "output": {
+      "bytes": 2817616,
+      "sha256": "d66379977271af6afa601425957d950d6d219b70af5687852b3a725820a38448"
+    },
+    "evidence": {
+      "bytes": 3533,
+      "sha256": "143a7b6cd0c5d68d673c787c23e6a05215621c070d0326a43861ca82f3a3ab6c"
+    },
+    "host": "Wasmtime",
+    "runner": {
+      "bytes": 19669984,
+      "sha256": "8ec673431a74602c52d54866f64cb2c3536d57313f37282bffbdd57f00050f5e"
+    }
+  },
+  "excludedRecoveryDiagnostic": {
+    "path": "allocation-recovery-diagnostic-summary.json",
+    "bytes": 3769,
+    "sha256": "cdf389fb13c182ced00287fcbeabaf5697ce2bc6a6a36ab5123f3cc47d1684af"
+  },
+  "harnessSources": {
+    "build.py": {
+      "bytes": 7138,
+      "sha256": "9ac6f887e69763ae8c542b6db22ae81ab555a5d4d7a60412da025a96a7fad5c9"
+    },
+    "main.cpp": {
+      "bytes": 11360,
+      "sha256": "3cafc3a743d582ecf16bf20cb0fb8eb9920e626bafbdaf0577a47ac8252f20d5"
+    },
+    "allocation-boundaries.cpp": {
+      "bytes": 1622,
+      "sha256": "8c28dcaecff40cdc0e994a068c62035a0a738bb9e9741d0b1afe09e20807cf4b"
+    },
+    "allocation-failure-contracts.mjs": {
+      "bytes": 5387,
+      "sha256": "293af6ee52afcc126feebe2b7aa09731aa0f548f3b00312aa2bdb5b75b24a86b"
+    },
+    "check-allocation-boundaries.mjs": {
+      "bytes": 1167,
+      "sha256": "9e857cebee82c601517d2951755165f81ddd2d0a6c9a4c99e003be73e1abb291"
+    },
+    "run-allocation-traps.mjs": {
+      "bytes": 4562,
+      "sha256": "0eb1949e524b6e70ab6404852b0c3b76274f23d5065fbe9546e9d5330a0a2a90"
+    },
+    "compare-allocation-failures.mjs": {
+      "bytes": 2525,
+      "sha256": "61d125934717da38656044cf6ccd08b3a1be4ff061ec21c50c1904551496df1d"
+    },
+    "compare-allocation-failures.test.mjs": {
+      "bytes": 3318,
+      "sha256": "9d23069744ba3a0886b9e1b16fde01a572e58119f7b450df107bcdb6f9a7a26f"
+    }
+  },
+  "limits": [
+    "Local experiment; no released runtime or production integration.",
+    "Allocation sweep warms ICU caches before injection; cold initialization remains open.",
+    "Every trapped instance is discarded; no claim of recovery inside a failed instance.",
+    "Production Wasmtime limits, cancellation/fuel, and discard behavior still need integration acceptance.",
+    "Non-ICU C++ allocation and complete native memory-budget accounting remain open.",
+    "Bounded differential coverage, not complete ECMA-402 conformance.",
+    "ICU 78.2 / CLDR 48 align with the local reference; guest tzdata 2025c differs from reference 2026a."
+  ]
+}

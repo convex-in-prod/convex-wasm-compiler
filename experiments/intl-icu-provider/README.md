@@ -91,6 +91,28 @@ mapping replaces the adapter's collation alias table. Failed initialization or
 attribute operations raise errors; they no longer silently select a root collator
 or fall back to binary string comparison.
 
+`locale-errors.patch` follows Collator. Locale conversions size their outputs,
+check complete input consumption, and propagate failures rather than returning
+the input or `und`. Calendar, numbering-system and collation validation distinguish
+unsupported values from failed ICU operations.
+
+`icu-allocation-policy.patch` follows the locale checks. A failed nonzero ICU
+allocation or reallocation traps immediately inside Wasm; overflowing `calloc`
+sizes do the same. Zero-size allocation semantics remain ICU's normal non-null
+sentinel contract. This also covers installed ICU allocation callbacks. The host
+must discard a trapped instance, without running guest cleanup or returning it
+to a reuse pool. This is a native exhaustion contract, not a catchable JavaScript
+exception or an attempt to recover partially initialized ICU objects. Production
+budget accounting and host discard acceptance remain integration work.
+
+The optional `icu-allocation-errors.patch` is **diagnostic only** and excluded
+from the selected patch sequence. An exploratory returning-null sweep exposed
+silent option/currency/calendar/default-pattern changes, a null-modifier trap,
+and leaked compact formatters. Its targeted fixes advanced the sweep but did
+not establish safe recovery; `allocation-recovery-diagnostic-summary.json`
+preserves the remaining failure and exact source identity. Continuing that
+approach would impose a broad ICU recovery audit that the sandbox does not need.
+
 Number strings and parts use the same modern ICU `unumf` formatter and formatted
 value APIs. The implementation handles units, currencies, accounting signs,
 scientific/engineering/compact notation, grouping, fraction/significant precision,
@@ -102,7 +124,8 @@ Date formatting resolves locale lists, calendar and numbering options through
 ICU. It handles all four hour cycles, style conversion, day periods, fractional
 seconds, fixed-offset zones and proleptic Gregorian dates. Parts include standalone
 months, related years, year names and the different timezone fields. Date/number
-formatting failures propagate as JavaScript errors; empty strings and fabricated
+formatting status failures propagate as JavaScript errors; native allocation
+exhaustion traps under the selected policy. Empty strings and fabricated
 literal parts are no longer used to hide those failures. Date parts use a sized
 buffer and validate field bounds and non-overlap.
 
@@ -151,6 +174,8 @@ python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage number-ranges
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage icu-cleanup
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage date-ranges
 python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage collator
+python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage locale-errors
+python3 apply-formatters.py "$INTL_EXPERIMENT_ROOT" --stage icu-allocation-policy
 python3 build.py runtime --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
 node make-corpus.mjs
 node number-contracts.mjs
@@ -211,6 +236,40 @@ over the final eight cycles, constant ICU requested bytes and allocation count,
 and zero ICU allocations after cleanup. The `intl_probe_run` export runs the
 corpus once. Run `node --test compare-lifecycle.test.mjs` for the comparator's
 retention-growth, cleanup and output-mismatch rejection checks.
+
+## Allocation exhaustion
+
+The failure corpus uses generic number/date/range/collation/canonicalization
+operations. The runner compiles the module once, creates an independent Wasm
+instance for each selected allocation failure, verifies an ordinary warm
+baseline against Node, and requires the injected failure to trap immediately at
+the ICU allocation boundary. It discards the instance after a trap. Successful
+baseline instances run full ICU cleanup and must retain zero tracked allocations.
+
+```sh
+node allocation-failure-contracts.mjs
+python3 build.py allocation-failures --standalone --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
+node --expose-gc run-allocation-traps.mjs
+python3 build.py allocation-boundaries --root "$INTL_EXPERIMENT_ROOT" --host-build "$INTL_HOST_BUILD" --emsdk "$EMSDK" --binaryen "$EM_BINARYEN_ROOT"
+node check-allocation-boundaries.mjs
+```
+
+`allocation-traps-evidence.jsonl` records every baseline and injection;
+`allocation-traps-comparison.json` contains totals and the Wasm digest. This
+runner uses Node's WASI hosting so diagnostic writes survive a guest trap.
+It does not establish production Wasmtime memory limits, cancellation, or runtime
+reuse behavior. The cases warm ICU service caches before injecting failures;
+cold initialization and non-ICU allocation remain separate acceptance work.
+
+For nullable-allocation research, use a separate checkout, apply the optional
+`icu-allocation-errors` stage instead of `icu-allocation-policy`, and build the
+runtime with `--return-null-allocations`. The unconfigured
+`intl_probe_allocation_failures_run` export attempts every fault within one
+instance, checking exact output or a JavaScript exception, subsequent recovery,
+and final cleanup. `compare-allocation-failures.mjs` rejects incomplete sweeps
+and leaks; its 11 rejection/acceptance tests run with `node --test
+compare-allocation-failures.test.mjs`. This diagnostic currently fails and is
+not an integration gate. Its failures motivated the selected exhaustion policy.
 
 ## Recorded results
 
@@ -343,6 +402,19 @@ bounded compatibility and retention, not failure safety or production readiness.
 artifact and host-import identities. Source-stage boundaries remain explicit in
 the historical result summaries.
 
+The checked-conversion and allocation-policy stage passes all **31,045** ordinary
+cases across all nine corpora. Its six warmed-operation sweeps inject **2,226**
+allocation failures; every failure traps at the allocator boundary, and each
+ordinary baseline matches the reference. Four direct allocator checks cover
+zero-size semantics, malloc failure, realloc failure, and calloc overflow.
+Wasmtime passes **8,224** binding executions across 16 runtimes, retaining exactly
+**696,289 ICU bytes / 6,697 allocations** and **889,824 aggregate allocated bytes**
+after each runtime. Final ICU cleanup reaches zero allocations. The standalone
+failure artifact's 11 import signatures match the unchanged compiler allowlist.
+`allocation-policy-result-summary.json` records these source/artifact boundaries.
+The selected ten-stage chain reconstructs 16 source files exactly; the exploratory
+13-file nullable-recovery patch is excluded.
+
 ## Limits and integration boundary
 
 Date/number options now use an ordered reader with the bounded coverage above.
@@ -350,8 +422,9 @@ Constructor/reflection and locale behavior have the directed coverage above;
 date and number ranges have the coverage above.
 Collator uses the ordered reader with the directed coverage above. These matrices
 do not establish full Test262 conformance or compatibility with V8's experimental
-best-fit matcher. Shared locale-conversion helpers still have fixed-capacity
-buffers and fallbacks that need replacement and allocation-failure coverage.
+best-fit matcher. Shared locale conversions now size and check their outputs.
+The allocation policy covers ICU malloc/realloc failures; cold initialization,
+non-ICU allocation, and production discard/accounting still need acceptance.
 
 The date-range-stage original-corpus Wasm is 38,938,617 bytes (about 37.13 MiB), including the full
 33,107,248-byte ICU dataset. Its data SHA-256 is
@@ -361,7 +434,8 @@ backend-cost claim follows from this correctness experiment.
 
 Production integration still requires authenticated compiler imports/builds and
 hardening, deterministic defaults, code/data packaging, native-memory and GC
-lifecycle accounting, allocation-failure checks, and cancellation/fuel behavior.
+lifecycle accounting, cold/native allocation-failure checks, trapped-instance
+discard, and cancellation/fuel behavior.
 Explicit final GC and the bounded repeated-runtime lifecycle check pass.
 Forced mid-initialization collection with deferred numeric values also passes.
 ICU/CLDR match the local reference but timezone datasets differ. Compare with the

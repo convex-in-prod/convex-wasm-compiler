@@ -1,0 +1,21 @@
+{
+  "base": "prepare.py, fix-adapter.py, then the formatters, bindings, construction, locales, number-ranges, icu-cleanup, date-ranges, collator patch stages",
+  "patchSha256": "69b53df8f40f45bceb66011cb4cf96a43d58af7e13da9bc7108a704cd38610c0",
+  "files": [
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp",
+      "before": "7ed7f1ac7b9e13e2ce69e54d794c9db876459cbd6492d9cf06d11884bbbcf464",
+      "after": "87b813faf76f3a288f8ae54f7244c81bbc896bdef3ab70b7cce5077bcd3bdbb3"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h",
+      "before": "4d878268418659490755c9fa356a2f06831fe6e44a04954fec9a16729f593805",
+      "after": "d34bb188d84ec7d2390e358b850586d59c12e28f2179d21b138cff948f7df0fe"
+    },
+    {
+      "path": "lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp",
+      "before": "e14b475d5733c4c7b3d61ab63afbbb07e0ab35674cbdc59d9c975e8a585500df",
+      "after": "c5f37138a095ce8bfc6c302c7b632c5207ce8a1f5c693803ebffb2e7096be09b"
+    }
+  ]
+}

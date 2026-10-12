@@ -1,0 +1,367 @@
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.cpp
+@@ -18,6 +18,7 @@
+ #include "llvh/Support/ConvertUTF.h"
+ 
+ #include <cmath>
++#include <limits>
+ #include <unordered_set>
+ 
+ using namespace ::hermes;
+@@ -337,39 +338,48 @@
+   return static_cast<int>(std::floor(value));
+ }
+ 
+-std::string convertBCP47toICULocale(
+-    const hermes_icu_vtable *icu,
++namespace {
++// ICU locale IDs and BCP47 tags can exceed ULOC_FULLNAME_CAPACITY. Preflight
++// their actual size, then reject an incomplete or failed conversion explicitly.
++template <typename Convert>
++vm::CallResult<std::string> readLocaleConversion(vm::Runtime &runtime, Convert convert) {
++  UErrorCode status = U_ZERO_ERROR;
++  const int32_t length = convert(nullptr, 0, &status);
++  if ((U_FAILURE(status) && status != U_BUFFER_OVERFLOW_ERROR) ||
++      length < 0 || length == std::numeric_limits<int32_t>::max())
++    return runtime.raiseError("ICU locale conversion sizing failed");
++  // An empty ICU ID represents the root locale, including BCP47 `und`.
++  std::string result(static_cast<size_t>(length) + 1, '\0');
++  status = U_ZERO_ERROR;
++  const int32_t written = convert(result.data(), length + 1, &status);
++  if (U_FAILURE(status) || written != length)
++    return runtime.raiseError("ICU locale conversion failed");
++  result.resize(length);
++  return result;
++}
++} // namespace
++
++vm::CallResult<std::string> convertBCP47toICULocale(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu,
+     const std::u16string &localeBCP47) {
+-  std::string locale8 = toUTF8ASCII(localeBCP47);
+-  char localeID[kULOC_FULLNAME_CAPACITY] = {0};
+-  UErrorCode err = U_ZERO_ERROR;
+-  int32_t resultLength = icu->uloc_forLanguageTag(
+-      locale8.c_str(),
+-      localeID,
+-      kULOC_FULLNAME_CAPACITY,
+-      nullptr,
+-      &err);
+-  if (U_FAILURE(err) || resultLength <= 0) {
+-    return locale8;
+-  }
+-  return std::string(localeID, resultLength);
+-}
+-
+-std::string convertICUtoBCP47Locale(
+-    const hermes_icu_vtable *icu,
+-    const char *localeICU) {
+-  char langTag[kULOC_FULLNAME_CAPACITY] = {0};
+-  UErrorCode err = U_ZERO_ERROR;
+-  int32_t resultLength = icu->uloc_toLanguageTag(
+-      localeICU,
+-      langTag,
+-      kULOC_FULLNAME_CAPACITY,
+-      /*strict=*/1,
+-      &err);
+-  if (U_FAILURE(err) || resultLength <= 0) {
+-    return "und";
+-  }
+-  return std::string(langTag, resultLength);
++  auto locale8 = UTF16toUTF8(runtime, localeBCP47);
++  if (locale8 == vm::ExecutionStatus::EXCEPTION) return locale8.getStatus();
++  int32_t parsedLength = 0;
++  auto result = readLocaleConversion(runtime, [&](char *buffer, int32_t capacity, UErrorCode *status) {
++    return icu->uloc_forLanguageTag(locale8->c_str(), buffer, capacity, &parsedLength, status);
++  });
++  if (result == vm::ExecutionStatus::EXCEPTION) return result.getStatus();
++  if (parsedLength < 0 || static_cast<size_t>(parsedLength) != locale8->size())
++    return runtime.raiseError("ICU locale conversion did not consume the complete tag");
++  return std::move(*result);
++}
++
++vm::CallResult<std::string> convertICUtoBCP47Locale(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu, const char *localeICU) {
++  if (!localeICU) return runtime.raiseError("ICU locale identifier is missing");
++  return readLocaleConversion(runtime, [&](char *buffer, int32_t capacity, UErrorCode *status) {
++    return icu->uloc_toLanguageTag(localeICU, buffer, capacity, true, status);
++  });
+ }
+ 
+ std::string toUTF8ASCII(const std::u16string &str) {
+--- a/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
++++ b/lib/Platform/Intl/impl_icu_provider/IcuProviderUtils.h
+@@ -176,12 +176,14 @@
+     std::optional<int> fallback);
+ 
+ /// Convert BCP47 language tag to ICU locale ID via vtable.
+-std::string convertBCP47toICULocale(
++vm::CallResult<std::string> convertBCP47toICULocale(
++    vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const std::u16string &localeBCP47);
+ 
+ /// Convert ICU locale ID to BCP47 language tag via vtable.
+-std::string convertICUtoBCP47Locale(
++vm::CallResult<std::string> convertICUtoBCP47Locale(
++    vm::Runtime &runtime,
+     const hermes_icu_vtable *icu,
+     const char *localeICU);
+ 
+--- a/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
++++ b/lib/Platform/Intl/impl_icu_provider/PlatformIntlIcuProvider.cpp
+@@ -131,7 +131,9 @@
+     return false;
+   }
+   auto parent = parsed->canonicalize();
+-  return hasLocaleResource(runtime, icu, convertBCP47toICULocale(icu, parent), parent, package, key);
++  auto parentICU = convertBCP47toICULocale(runtime, icu, parent);
++  if (parentICU == vm::ExecutionStatus::EXCEPTION) return parentICU.getStatus();
++  return hasLocaleResource(runtime, icu, *parentICU, parent, package, key);
+ }
+ 
+ // The dataset is immutable. Cache each service's validated locale set, and
+@@ -153,7 +155,9 @@
+   for (int32_t i = 0; i < count; ++i) {
+     const char *locale = package ? ucol_getAvailable(i) : icu->uloc_getAvailable(i);
+     if (!locale) return runtime.raiseError("ICU available locale entry is missing");
+-    auto bcp47 = convertICUtoBCP47Locale(icu, locale);
++    auto converted = convertICUtoBCP47Locale(runtime, icu, locale);
++    if (converted == vm::ExecutionStatus::EXCEPTION) return converted.getStatus();
++    const auto &bcp47 = *converted;
+     {
+       auto supported = hasLocaleResource(runtime, icu, locale, toUTF16ASCII(bcp47), package, key);
+       if (supported == vm::ExecutionStatus::EXCEPTION) return supported.getStatus();
+@@ -206,13 +210,13 @@
+ }
+ 
+ /// Get default locale as a ParsedLocaleIdentifier.
+-std::optional<ParsedLocaleIdentifier> getDefaultLocale(
+-    const hermes_icu_vtable *icu) {
+-  const char *defLoc = icu->uloc_getDefault();
+-  if (!defLoc)
+-    return std::nullopt;
+-  std::string bcp47 = convertICUtoBCP47Locale(icu, defLoc);
+-  return ParsedLocaleIdentifier::parse(toUTF16ASCII(bcp47));
++vm::CallResult<ParsedLocaleIdentifier> getDefaultLocale(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu) {
++  auto bcp47 = convertICUtoBCP47Locale(runtime, icu, icu->uloc_getDefault());
++  if (bcp47 == vm::ExecutionStatus::EXCEPTION) return bcp47.getStatus();
++  auto parsed = ParsedLocaleIdentifier::parse(toUTF16ASCII(*bcp47));
++  if (!parsed) return runtime.raiseError("ICU default locale is invalid");
++  return std::move(*parsed);
+ }
+ 
+ /// Get the locale string without Unicode extensions, with canonical BCP47
+@@ -294,8 +298,8 @@
+     auto matched = bestAvailableLocaleICU(**available, localeNoExt);
+     if (!matched.empty()) return ResolvedLocaleResult{toUTF16ASCII(matched), extMap, {}};
+   }
+-  auto defaultLocale = getDefaultLocale(icu);
+-  if (!defaultLocale) return runtime.raiseError("ICU default locale is invalid");
++  auto defaultLocale = getDefaultLocale(runtime, icu);
++  if (defaultLocale == vm::ExecutionStatus::EXCEPTION) return defaultLocale.getStatus();
+   return ResolvedLocaleResult{getLocaleNoExt(*defaultLocale), {}, {}};
+ }
+ 
+@@ -371,11 +375,11 @@
+ }
+ 
+ /// Collator extension type validation callback.
+-bool isCollatorExtensionTypeSupported(
+-    const hermes_icu_vtable *icu,
++vm::CallResult<bool> isCollatorExtensionTypeSupported(
++    vm::Runtime &runtime, const hermes_icu_vtable *icu,
+     std::u16string_view extensionKey,
+     std::u16string_view extensionType,
+-    const std::u16string &localeNoExt, UErrorCode &status) {
++    const std::u16string &localeNoExt) {
+   static constexpr std::u16string_view validCaseFirsts[] = {
+       u"upper", u"lower", u"false"};
+   static constexpr std::u16string_view validNumerics[] = {u"true", u"false"};
+@@ -400,14 +404,14 @@
+     const char *legacyType = icu->uloc_toLegacyType("collation", requestedType.c_str());
+     if (!legacyType) return false;
+ 
+-    std::string icuLocale = convertBCP47toICULocale(icu, localeNoExt);
++    auto icuLocale = convertBCP47toICULocale(runtime, icu, localeNoExt);
++    if (icuLocale == vm::ExecutionStatus::EXCEPTION) return icuLocale.getStatus();
+     UErrorCode err = U_ZERO_ERROR;
+     UEnumeration *supportedTypes = icu->ucol_getKeywordValuesForLocale(
+-        "collation", icuLocale.c_str(), 0, &err);
++        "collation", icuLocale->c_str(), 0, &err);
+     if (U_FAILURE(err) || !supportedTypes) {
+-      status = U_FAILURE(err) ? err : U_INTERNAL_PROGRAM_ERROR;
+       if (supportedTypes) icu->uenum_close(supportedTypes);
+-      return false;
++      return runtime.raiseError("ICU collation enumeration failed");
+     }
+ 
+     bool supported = false;
+@@ -425,13 +429,13 @@
+       typeStr = icu->uenum_next(supportedTypes, &length, &err);
+     }
+     icu->uenum_close(supportedTypes);
+-    if (U_FAILURE(err)) status = err;
++    if (U_FAILURE(err)) return runtime.raiseError("ICU collation enumeration failed");
+     return supported;
+   }
+   return false;
+ }
+ 
+-using ExtTypeValidator = std::function<bool(
++using ExtTypeValidator = std::function<vm::CallResult<bool>(
+     std::u16string_view, /* extension key */
+     std::u16string_view, /* extension type */
+     const std::u16string & /* localeNoExt */)>;
+@@ -457,9 +461,10 @@
+       extType = u"true";
+     if (std::find(relevantExtensionKeys.begin(),
+                   relevantExtensionKeys.end(),
+-                  key) != relevantExtensionKeys.end() &&
+-        isExtensionTypeSupported(key, extType, matched.localeNoExt)) {
+-      supportedExts.emplace(key, extType);
++                  key) != relevantExtensionKeys.end()) {
++      auto supported = isExtensionTypeSupported(key, extType, matched.localeNoExt);
++      if (supported == vm::ExecutionStatus::EXCEPTION) return supported.getStatus();
++      if (*supported) supportedExts.emplace(key, extType);
+     }
+   }
+ 
+@@ -479,7 +484,9 @@
+       } else {
+         optExtType = option.getString();
+       }
+-      if (isExtensionTypeSupported(ext, optExtType, matched.localeNoExt)) {
++      auto supported = isExtensionTypeSupported(ext, optExtType, matched.localeNoExt);
++      if (supported == vm::ExecutionStatus::EXCEPTION) return supported.getStatus();
++      if (*supported) {
+         resolvedOpts.insert_or_assign(ext, optIter->second);
+         if (extIter != supportedExts.end() &&
+             extIter->second != optExtType) {
+@@ -544,9 +551,8 @@
+     }
+     opt.emplace(std::u16string(key), Option(value));
+   }
+-  UErrorCode validationStatus = U_ZERO_ERROR;
+   auto supported = [&](std::u16string_view key, std::u16string_view type,
+-                       const std::u16string &locale) {
++                       const std::u16string &locale) -> vm::CallResult<bool> {
+     if (key == u"hc")
+       return type == u"h11" || type == u"h12" || type == u"h23" || type == u"h24";
+     if (key == u"nu") {
+@@ -556,16 +562,18 @@
+       const bool found = U_SUCCESS(status) && system &&
+           !icu->unumsys_isAlgorithmic(system) && icu->unumsys_getRadix(system) == 10;
+       if (system) icu->unumsys_close(system);
+-      if (U_FAILURE(status) && status != U_UNSUPPORTED_ERROR && status != U_MISSING_RESOURCE_ERROR)
+-        validationStatus = status;
++      if ((U_FAILURE(status) && status != U_UNSUPPORTED_ERROR && status != U_MISSING_RESOURCE_ERROR) ||
++          (U_SUCCESS(status) && !system))
++        return runtime.raiseError("ICU numbering system lookup failed");
+       return found;
+     }
+-    const auto localeICU = convertBCP47toICULocale(icu, locale);
++    auto localeICU = convertBCP47toICULocale(runtime, icu, locale);
++    if (localeICU == vm::ExecutionStatus::EXCEPTION) return localeICU.getStatus();
+     UErrorCode status = U_ZERO_ERROR;
+-    auto *values = icu->ucal_getKeywordValuesForLocale("calendar", localeICU.c_str(), false, &status);
++    auto *values = icu->ucal_getKeywordValuesForLocale("calendar", localeICU->c_str(), false, &status);
+     if (U_FAILURE(status) || !values) {
+-      validationStatus = U_FAILURE(status) ? status : U_INTERNAL_PROGRAM_ERROR;
+-      return false;
++      if (values) icu->uenum_close(values);
++      return runtime.raiseError("ICU calendar enumeration failed");
+     }
+     bool found = false;
+     int32_t length;
+@@ -574,15 +582,13 @@
+       if (canonical && toUTF16ASCII(canonical) == type) found = true;
+     }
+     icu->uenum_close(values);
+-    if (U_FAILURE(status)) validationStatus = status;
++    if (U_FAILURE(status)) return runtime.raiseError("ICU calendar enumeration failed");
+     return found;
+   };
+   auto resolved = resolveLocale(runtime, icu, *requested, opt, keys, supported,
+       std::find(keys.begin(), keys.end(), u"ca") != keys.end()
+           ? LocaleResource::Calendar : LocaleResource::NumberElements);
+   if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+-  if (U_FAILURE(validationStatus))
+-    return runtime.raiseError("ICU locale-option resolution failed");
+   if (options.count(u"hour12")) {
+     resolved->extensions.erase(u"hc");
+     resolved->resolvedOpts.erase(u"hc");
+@@ -735,9 +741,8 @@
+   auto numeric = getOptionBool(runtime, options, u"numeric", {});
+   auto caseFirst = getOptionString(runtime, reader, options, u"caseFirst", {u"upper", u"lower", u"false"}, {});
+   if (caseFirst == vm::ExecutionStatus::EXCEPTION) return caseFirst.getStatus();
+-  UErrorCode validation = U_ZERO_ERROR;
+   auto supported = [&](std::u16string_view key, std::u16string_view value, const std::u16string &locale) {
+-    return isCollatorExtensionTypeSupported(icu, key, value, locale, validation);
++    return isCollatorExtensionTypeSupported(runtime, icu, key, value, locale);
+   };
+   static constexpr std::u16string_view keys[] = {u"co", u"kn", u"kf"};
+   // The reference V8 resolves requested extensions first, then applies options
+@@ -745,7 +750,6 @@
+   // requested locale when ICU returns a different valid locale.
+   auto resolved = resolveLocale(runtime, icu, *requested, {}, keys, supported, LocaleResource::Collation);
+   if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+-  if (U_FAILURE(validation)) return runtime.raiseError("ICU collation enumeration failed");
+   UErrorCode status = U_ZERO_ERROR;
+   auto locale = icu::Locale::forLanguageTag(toUTF8ASCII(resolved->getCanonicalizedLocaleId()), status);
+   if (U_FAILURE(status) || locale.isBogus()) return runtime.raiseError("ICU collator locale conversion failed");
+@@ -754,9 +758,9 @@
+     locale.setUnicodeKeywordValue("co", nullptr, status);
+   if (*usage == u"search") locale.setUnicodeKeywordValue("co", "search", status);
+   else if (options.count(u"collation")) {
+-    if (supported(u"co", *collation, resolved->localeNoExt))
+-      locale.setUnicodeKeywordValue("co", toUTF8ASCII(*collation), status);
+-    if (U_FAILURE(validation)) return runtime.raiseError("ICU collation enumeration failed");
++    auto valid = supported(u"co", *collation, resolved->localeNoExt);
++    if (valid == vm::ExecutionStatus::EXCEPTION) return valid.getStatus();
++    if (*valid) locale.setUnicodeKeywordValue("co", toUTF8ASCII(*collation), status);
+   }
+   if (U_FAILURE(status)) return runtime.raiseError("ICU collator locale configuration failed");
+   coll_ = icu->ucol_open(locale.getName(), &status);
+@@ -1023,7 +1027,9 @@
+   auto resolved = resolveFormatterLocale(runtime, icu_, locales, options, reader, keys);
+   if (resolved == vm::ExecutionStatus::EXCEPTION) return resolved.getStatus();
+   locale_ = resolved->getCanonicalizedLocaleId();
+-  locale8_ = convertBCP47toICULocale(icu_, locale_);
++  auto localeConversion = convertBCP47toICULocale(runtime, icu_, locale_);
++  if (localeConversion == vm::ExecutionStatus::EXCEPTION) return localeConversion.getStatus();
++  locale8_ = std::move(*localeConversion);
+   for (const auto &entry : resolved->resolvedOpts) {
+     if (entry.first == u"ca") calendar_ = entry.second.getString();
+     else if (entry.first == u"nu") numberingSystem_ = entry.second.getString();
+@@ -1216,7 +1222,7 @@
+   // Apply resolved calendar and numberingSystem to the ICU locale string
+   // so they take effect when creating the formatter.
+   {
+-    std::string icuLocale = convertBCP47toICULocale(icu_, locale_);
++    std::string icuLocale = locale8_;
+     if (!calendar_.empty()) {
+       std::string calUtf8(calendar_.begin(), calendar_.end());
+       icuLocale +=
+@@ -1868,7 +1874,9 @@
+     return notationRes.getStatus();
+   notation_ = notationRes.getValue();
+ 
+-  std::string localeICU = convertBCP47toICULocale(icu_, locale_);
++  auto localeConversion = convertBCP47toICULocale(runtime, icu_, locale_);
++  if (localeConversion == vm::ExecutionStatus::EXCEPTION) return localeConversion.getStatus();
++  std::string localeICU = std::move(*localeConversion);
+   // Unsupported numbering systems fall back to the locale's default. An
+   // algorithmic numbering system is not an ECMA-402 decimal numbering system.
+   if (!numberingSystem_.empty()) {
+@@ -1879,6 +1887,9 @@
+         !icu_->unumsys_isAlgorithmic(system) && icu_->unumsys_getRadix(system) == 10;
+     if (system)
+       icu_->unumsys_close(system);
++    if ((U_FAILURE(status) && status != U_UNSUPPORTED_ERROR && status != U_MISSING_RESOURCE_ERROR) ||
++        (U_SUCCESS(status) && !system))
++      return runtime.raiseError("ICU numbering system lookup failed");
+     if (supported)
+       localeICU += (localeICU.find('@') == std::string::npos ? "@numbers=" : ";numbers=") + name;
+   }

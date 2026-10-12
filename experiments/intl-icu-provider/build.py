@@ -9,13 +9,16 @@ import subprocess
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges", "date-ranges", "collator"])
+parser.add_argument("phase", choices=["runtime", "smoke", "probe", "contracts", "dates", "bindings", "construction", "locales", "ranges", "date-ranges", "collator", "allocation-failures", "allocation-boundaries"])
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--host-build", required=True, type=Path)
 parser.add_argument("--emsdk", required=True, type=Path)
 parser.add_argument("--binaryen", required=True, type=Path)
 parser.add_argument("--standalone", action="store_true", help="Link a WASI reactor for the Wasmtime diagnostic runner")
+parser.add_argument("--return-null-allocations", action="store_true", help="Diagnostic only: allow ICU allocation callbacks to return null")
 args = parser.parse_args()
+if args.return_null_allocations and args.phase != "runtime":
+    parser.error("--return-null-allocations configures the runtime archive")
 if args.standalone and args.phase == "runtime":
     parser.error("--standalone applies to a probe, not the runtime archive")
 root = args.root.resolve()
@@ -64,6 +67,7 @@ if args.phase == "runtime":
         em / "emcmake", "cmake", "-S", source, "-B", build, "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", "-DHERMES_ENABLE_INTL=ON",
         "-DHERMES_USE_STATIC_INTL_PROVIDER=ON", "-DHERMES_ENABLE_NAPI=OFF",
+        "-DHERMES_ICU_FAIL_STOP_ALLOCATION=" + ("OFF" if args.return_null_allocations else "ON"),
         "-DHERMES_ENABLE_TOOLS=OFF", "-DHERMES_UNICODE_LITE=ON",
         "-DHERMES_ENABLE_TEST_SUITE=OFF",
         "-DCMAKE_C_FLAGS=-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0",
@@ -74,6 +78,15 @@ if args.phase == "runtime":
     run("compile", [
         "cmake", "--build", build, "--target", "hermesvm_a", "jsi",
         "hermesStaticIcu", "--parallel", "4",
+    ])
+elif args.phase == "allocation-boundaries":
+    run("allocation-boundaries-link", [
+        em / "em++", "-O2", "-DU_DISABLE_RENAMING=1", "-DU_STATIC_IMPLEMENTATION=1",
+        "-fwasm-exceptions", "-sWASM_LEGACY_EXCEPTIONS=0",
+        "-I" + str(source / "external/icu-small/source/common"),
+        scripts / "allocation-boundaries.cpp", build / "external/icu-small/libhermesStaticIcu.a",
+        "--no-entry", "-sSTANDALONE_WASM=1", "-sFILESYSTEM=0",
+        "-Wl,--export=intl_allocation_boundary_run", "-o", root / "allocation-boundaries.wasm",
     ])
 else:
     variant = args.phase
@@ -103,6 +116,7 @@ else:
     run("main-standalone-compile" if args.standalone else "main-compile", [
         em / "em++", *common, "-std=c++17", *includes,
         *(["-DINTL_PROBE_STANDALONE"] if args.standalone else []),
+        *(["-DINTL_PROBE_ALLOCATION_FAILURES"] if variant == "allocation-failures" and args.standalone else []),
         "-c", root / "main.cpp", "-o", main_object,
     ])
     # Keep data assembly explicit: the parent Hermes project does not enable ASM.
@@ -117,6 +131,7 @@ else:
         "--no-entry", "-sSTANDALONE_WASM=1", "-sFILESYSTEM=0",
         "-sSUPPORT_LONGJMP=wasm", "-Wl,--export=intl_probe_run",
         "-Wl,--export=intl_probe_lifecycle_run",
+        *(["-Wl,--export=intl_probe_allocation_failures_run", "-Wl,--export=intl_probe_allocation_failure_configure"] if variant == "allocation-failures" else []),
     ] if args.standalone else ["-sENVIRONMENT=node", "-sEXIT_RUNTIME=1"]
     run(artifact + "-link", [
         em / "em++", *common, main_object, root / (variant + ".o"),
@@ -124,6 +139,7 @@ else:
         build / "external/icu-small/libhermesStaticIcu.a",
         "-sALLOW_MEMORY_GROWTH=1", "-sSTACK_SIZE=8388608",
         "-sINITIAL_MEMORY=134217728", "-sMAXIMUM_MEMORY=536870912",
+        *(["--emit-symbol-map"] if variant == "allocation-failures" else []),
         *link_mode, "-o", root / (artifact + (".wasm" if args.standalone else ".mjs")),
     ])
     print("wasm bytes", (root / (artifact + ".wasm")).stat().st_size, flush=True)

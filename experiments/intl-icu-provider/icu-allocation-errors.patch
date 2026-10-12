@@ -1,0 +1,432 @@
+--- a/external/icu-small/source/common/localebuilder.cpp
++++ b/external/icu-small/source/common/localebuilder.cpp
+@@ -54,12 +54,16 @@
+ LocaleBuilder& LocaleBuilder::setLocale(const Locale& locale)
+ {
+     clear();
++    if (locale.isBogus()) {
++        status_ = U_ILLEGAL_ARGUMENT_ERROR;
++        return *this;
++    }
+     setLanguage(locale.getLanguage());
+     setScript(locale.getScript());
+     setRegion(locale.getCountry());
+     setVariant(locale.getVariant());
+     extensions_ = locale.clone();
+-    if (extensions_ == nullptr) {
++    if (extensions_ == nullptr || extensions_->isBogus()) {
+         status_ = U_MEMORY_ALLOCATION_ERROR;
+     }
+     return *this;
+@@ -464,6 +468,10 @@
+         return makeBogusLocale();
+     }
+     Locale product(locale_str.data());
++    if (product.isBogus()) {
++        errorCode = U_MEMORY_ALLOCATION_ERROR;
++        return product;
++    }
+     if (extensions_ != nullptr) {
+         _copyExtensions(*extensions_, nullptr, product, true, errorCode);
+     }
+--- a/external/icu-small/source/common/ucurr.cpp
++++ b/external/icu-small/source/common/ucurr.cpp
+@@ -674,8 +674,7 @@
+     // We want multi-level fallback for this resource, so we implement
+     // it manually.
+ 
+-    // Use a separate UErrorCode here that does not propagate out of
+-    // this function.
++    // Missing names may fall back; allocation and data failures must propagate.
+     UErrorCode ec2 = U_ZERO_ERROR;
+ 
+     if (locale == nullptr) {
+@@ -683,7 +682,7 @@
+     }
+     CharString loc = ulocimp_getName(locale, ec2);
+     if (U_FAILURE(ec2)) {
+-        *ec = U_ILLEGAL_ARGUMENT_ERROR;
++        *ec = ec2;
+         return nullptr;
+     }
+ 
+@@ -747,6 +746,10 @@
+         return s;
+     }
+ 
++    if (ec2 != U_MISSING_RESOURCE_ERROR) {
++        *ec = ec2;
++        return nullptr;
++    }
+     // If we fail to find a match, use the ISO 4217 code
+     *len = u_strlen(currency); // Should == ISO_CURRENCY_CODE_LENGTH, but maybe not...?
+     *ec = U_USING_DEFAULT_WARNING;
+@@ -775,8 +778,7 @@
+         return nullptr;
+     }
+ 
+-    // Use a separate UErrorCode here that does not propagate out of
+-    // this function.
++    // Missing names may fall back; allocation and data failures must propagate.
+     UErrorCode ec2 = U_ZERO_ERROR;
+ 
+     if (locale == nullptr) {
+@@ -784,7 +786,7 @@
+     }
+     CharString loc = ulocimp_getName(locale, ec2);
+     if (U_FAILURE(ec2)) {
+-        *ec = U_ILLEGAL_ARGUMENT_ERROR;
++        *ec = ec2;
+         return nullptr;
+     }
+ 
+@@ -793,19 +795,25 @@
+ 
+     const char16_t* s = nullptr;
+     ec2 = U_ZERO_ERROR;
+-    UResourceBundle* rb = ures_open(U_ICUDATA_CURR, loc.data(), &ec2);
+-
+-    rb = ures_getByKey(rb, CURRENCYPLURALS, rb, &ec2);
+-
+-    // Fetch resource with multi-level resource inheritance fallback
+-    LocalUResourceBundlePointer curr(ures_getByKeyWithFallback(rb, buf, rb, &ec2));
+-
+-    s = ures_getStringByKeyWithFallback(curr.getAlias(), pluralCount, len, &ec2);
++    LocalUResourceBundlePointer rb(ures_open(U_ICUDATA_CURR, loc.data(), &ec2));
++    ures_getByKey(rb.getAlias(), CURRENCYPLURALS, rb.getAlias(), &ec2);
++
++    // Keep ownership even when a resource lookup returns null on failure.
++    ures_getByKeyWithFallback(rb.getAlias(), buf, rb.getAlias(), &ec2);
++    s = ures_getStringByKeyWithFallback(rb.getAlias(), pluralCount, len, &ec2);
+     if (U_FAILURE(ec2)) {
++        if (ec2 != U_MISSING_RESOURCE_ERROR) {
++            *ec = ec2;
++            return nullptr;
++        }
+         //  fall back to "other"
+         ec2 = U_ZERO_ERROR;
+-        s = ures_getStringByKeyWithFallback(curr.getAlias(), "other", len, &ec2);     
++        s = ures_getStringByKeyWithFallback(rb.getAlias(), "other", len, &ec2);
+         if (U_FAILURE(ec2)) {
++            if (ec2 != U_MISSING_RESOURCE_ERROR) {
++                *ec = ec2;
++                return nullptr;
++            }
+             // fall back to long name in Currencies
+             return ucurr_getName(currency, locale, UCURR_LONG_NAME, 
+                                  isChoiceFormat, len, ec);
+@@ -823,6 +831,10 @@
+         return s;
+     }
+ 
++    if (ec2 != U_MISSING_RESOURCE_ERROR) {
++        *ec = ec2;
++        return nullptr;
++    }
+     // If we fail to find a match, use the ISO 4217 code
+     *len = u_strlen(currency); // Should == ISO_CURRENCY_CODE_LENGTH, but maybe not...?
+     *ec = U_USING_DEFAULT_WARNING;
+--- a/external/icu-small/source/i18n/datefmt.cpp
++++ b/external/icu-small/source/i18n/datefmt.cpp
+@@ -549,8 +549,9 @@
+     SimpleDateFormat *f = new SimpleDateFormat(timeStyle, dateStyle, locale, status);
+     if (U_SUCCESS(status)) return f;
+     delete f;
+-
+-    // If that fails, try to create a format using the default pattern and
++    if (status != U_MISSING_RESOURCE_ERROR) return nullptr;
++
++    // If resources are missing, try to create a format using the default pattern and
+     // the DateFormatSymbols for this locale.
+     status = U_ZERO_ERROR;
+     f = new SimpleDateFormat(locale, status);
+--- a/external/icu-small/source/i18n/fphdlimp.cpp
++++ b/external/icu-small/source/i18n/fphdlimp.cpp
+@@ -67,22 +67,24 @@
+ 
+ FieldPositionIteratorHandler::FieldPositionIteratorHandler(FieldPositionIterator* posIter,
+                                                            UErrorCode& _status)
+-    : iter(posIter), vec(nullptr), status(_status), fCategory(UFIELD_CATEGORY_UNDEFINED) {
++    : iter(posIter), vec(nullptr), status(_status), outputStatus(&_status), fCategory(UFIELD_CATEGORY_UNDEFINED) {
+   if (iter && U_SUCCESS(status)) {
+     vec = new UVector32(status);
++    if (vec == nullptr) status = U_MEMORY_ALLOCATION_ERROR;
+   }
+ }
+ 
+ FieldPositionIteratorHandler::FieldPositionIteratorHandler(
+     UVector32* vec,
+     UErrorCode& status)
+-    : iter(nullptr), vec(vec), status(status), fCategory(UFIELD_CATEGORY_UNDEFINED) {
++    : iter(nullptr), vec(vec), status(status), outputStatus(nullptr), fCategory(UFIELD_CATEGORY_UNDEFINED) {
+ }
+ 
+ FieldPositionIteratorHandler::~FieldPositionIteratorHandler() {
+   // setData adopts the vec regardless of status, so it's safe to null it
+   if (iter) {
+     iter->setData(vec, status);
++    getError(*outputStatus);
+   }
+   // if iter is null, we never allocated vec, so no need to free it
+   vec = nullptr;
+--- a/external/icu-small/source/i18n/fphdlimp.h
++++ b/external/icu-small/source/i18n/fphdlimp.h
+@@ -68,9 +68,10 @@
+   FieldPositionIterator* iter; // can be nullptr
+   UVector32* vec;
+   UErrorCode status;
++  UErrorCode* outputStatus;
+   UFieldCategory fCategory;
+ 
+-  // Note, we keep a reference to status, so if status is on the stack, we have
++  // The iterator constructor borrows its output status, so if it is on the stack, we have
+   // to be destroyed before status goes out of scope.  Easiest thing is to
+   // allocate us on the stack in the same (or narrower) scope as status has.
+   // This attempts to encourage that by blocking heap allocation.
+--- a/external/icu-small/source/i18n/number_affixutils.cpp
++++ b/external/icu-small/source/i18n/number_affixutils.cpp
+@@ -173,8 +173,13 @@
+                 {UFIELD_CATEGORY_NUMBER, UNUM_CURRENCY_FIELD},
+                 status);
+         } else if (tag.type < 0) {
+-            length += output.insert(
+-                    position + length, provider.getSymbol(tag.type), getFieldForType(tag.type), status);
++            auto symbol = provider.getSymbol(tag.type, status);
++            if (U_FAILURE(status)) { return length; }
++            if (symbol.isBogus()) {
++                status = U_MEMORY_ALLOCATION_ERROR;
++                return length;
++            }
++            length += output.insert(position + length, symbol, getFieldForType(tag.type), status);
+         } else {
+             length += output.insertCodePoint(position + length, tag.codePoint, field, status);
+         }
+@@ -192,7 +197,13 @@
+         if (tag.type == TYPE_CURRENCY_OVERFLOW) {
+             length += 1;
+         } else if (tag.type < 0) {
+-            length += provider.getSymbol(tag.type).length();
++            auto symbol = provider.getSymbol(tag.type, status);
++            if (U_FAILURE(status)) { return length; }
++            if (symbol.isBogus()) {
++                status = U_MEMORY_ALLOCATION_ERROR;
++                return length;
++            }
++            length += symbol.length();
+         } else {
+             length += U16_LENGTH(tag.codePoint);
+         }
+--- a/external/icu-small/source/i18n/number_affixutils.h
++++ b/external/icu-small/source/i18n/number_affixutils.h
+@@ -61,7 +61,7 @@
+     virtual ~SymbolProvider();
+ 
+     // TODO: Could this be more efficient if it returned by reference?
+-    virtual UnicodeString getSymbol(AffixPatternType type) const = 0;
++    virtual UnicodeString getSymbol(AffixPatternType type, UErrorCode& status) const = 0;
+ };
+ 
+ /**
+--- a/external/icu-small/source/i18n/number_formatimpl.cpp
++++ b/external/icu-small/source/i18n/number_formatimpl.cpp
+@@ -445,7 +445,7 @@
+     if (isCompactNotation) {
+         CompactType compactType = (isCurrency && unitWidth != UNUM_UNIT_WIDTH_FULL_NAME)
+                                   ? CompactType::TYPE_CURRENCY : CompactType::TYPE_DECIMAL;
+-        auto* newCompactHandler = new CompactHandler(
++        LocalPointer<CompactHandler> newCompactHandler(new CompactHandler(
+             macros.notation.fUnion.compactStyle,
+             macros.locale,
+             nsName,
+@@ -454,15 +454,11 @@
+             patternModifier,
+             safe,
+             chain,
+-            status);
++            status), status);
+         if (U_FAILURE(status)) {
+             return nullptr;
+         }
+-        if (newCompactHandler == nullptr) {
+-            status = U_MEMORY_ALLOCATION_ERROR;
+-            return nullptr;
+-        }
+-        fCompactHandler.adoptInstead(newCompactHandler);
++        fCompactHandler.adoptInstead(newCompactHandler.orphan());
+         chain = fCompactHandler.getAlias();
+     }
+     if (U_FAILURE(status)) {
+--- a/external/icu-small/source/i18n/number_patternmodifier.cpp
++++ b/external/icu-small/source/i18n/number_patternmodifier.cpp
+@@ -96,33 +96,39 @@
+         for (StandardPlural::Form plural : STANDARD_PLURAL_VALUES) {
+             pm->adoptSignumModifierStore(plural, createImmutableForPlural(plural, status));
+         }
+-        if (U_FAILURE(status)) {
+-            delete pm;
+-            return nullptr;
+-        }
+-        return new ImmutablePatternModifier(pm, fRules);  // adopts pm
+     } else {
+         // Faster path when plural keyword is not needed.
+         pm->adoptSignumModifierStoreNoPlural(createImmutableForPlural(StandardPlural::Form::COUNT, status));
+-        if (U_FAILURE(status)) {
+-            delete pm;
+-            return nullptr;
+-        }
+-        return new ImmutablePatternModifier(pm, nullptr);  // adopts pm
+-    }
++    }
++    if (U_FAILURE(status)) {
++        delete pm;
++        return nullptr;
++    }
++    auto* result = new ImmutablePatternModifier(pm, needsPlurals() ? fRules : nullptr);
++    if (result == nullptr) {
++        // Adoption occurs only when the owning modifier is constructed.
++        delete pm;
++        status = U_MEMORY_ALLOCATION_ERROR;
++    }
++    return result;
+ }
+ 
+ ConstantMultiFieldModifier* MutablePatternModifier::createConstantModifier(UErrorCode& status) {
++    if (U_FAILURE(status)) { return nullptr; }
+     FormattedStringBuilder a;
+     FormattedStringBuilder b;
+     insertPrefix(a, 0, status);
+     insertSuffix(b, 0, status);
++    if (U_FAILURE(status)) { return nullptr; }
++    ConstantMultiFieldModifier* result;
+     if (fPatternInfo->hasCurrencySign()) {
+-        return new CurrencySpacingEnabledModifier(
++        result = new CurrencySpacingEnabledModifier(
+                 a, b, !fPatternInfo->hasBody(), fStrong, *fSymbols, status);
+     } else {
+-        return new ConstantMultiFieldModifier(a, b, !fPatternInfo->hasBody(), fStrong);
+-    }
++        result = new ConstantMultiFieldModifier(a, b, !fPatternInfo->hasBody(), fStrong);
++    }
++    if (result == nullptr) { status = U_MEMORY_ALLOCATION_ERROR; }
++    return result;
+ }
+ 
+ ImmutablePatternModifier::ImmutablePatternModifier(AdoptingModifierStore* pm, const PluralRules* rules)
+@@ -289,8 +295,7 @@
+             currentAffix);
+ }
+ 
+-UnicodeString MutablePatternModifier::getSymbol(AffixPatternType type) const {
+-    UErrorCode localStatus = U_ZERO_ERROR;
++UnicodeString MutablePatternModifier::getSymbol(AffixPatternType type, UErrorCode& status) const {
+     switch (type) {
+         case AffixPatternType::TYPE_MINUS_SIGN:
+             return fSymbols->getSymbol(DecimalFormatSymbols::ENumberFormatSymbol::kMinusSignSymbol);
+@@ -303,15 +308,15 @@
+         case AffixPatternType::TYPE_PERMILLE:
+             return fSymbols->getSymbol(DecimalFormatSymbols::ENumberFormatSymbol::kPerMillSymbol);
+         case AffixPatternType::TYPE_CURRENCY_SINGLE:
+-            return getCurrencySymbolForUnitWidth(localStatus);
++            return getCurrencySymbolForUnitWidth(status);
+         case AffixPatternType::TYPE_CURRENCY_DOUBLE:
+-            return fCurrencySymbols.getIntlCurrencySymbol(localStatus);
++            return fCurrencySymbols.getIntlCurrencySymbol(status);
+         case AffixPatternType::TYPE_CURRENCY_TRIPLE:
+             // NOTE: This is the code path only for patterns containing "¤¤¤".
+             // Plural currencies set via the API are formatted in LongNameHandler.
+             // This code path is used by DecimalFormat via CurrencyPluralInfo.
+             U_ASSERT(fPlural != StandardPlural::Form::COUNT);
+-            return fCurrencySymbols.getPluralName(fPlural, localStatus);
++            return fCurrencySymbols.getPluralName(fPlural, status);
+         case AffixPatternType::TYPE_CURRENCY_QUAD:
+             return UnicodeString(u"\uFFFD");
+         case AffixPatternType::TYPE_CURRENCY_QUINT:
+--- a/external/icu-small/source/i18n/number_patternmodifier.h
++++ b/external/icu-small/source/i18n/number_patternmodifier.h
+@@ -184,7 +184,7 @@
+     /**
+      * Returns the string that substitutes a given symbol type in a pattern.
+      */
+-    UnicodeString getSymbol(AffixPatternType type) const override;
++    UnicodeString getSymbol(AffixPatternType type, UErrorCode& status) const override;
+ 
+     /**
+      * Returns the currency symbol for the unit width specified in setSymbols()
+--- a/external/icu-small/source/i18n/number_skeletons.cpp
++++ b/external/icu-small/source/i18n/number_skeletons.cpp
+@@ -502,11 +502,18 @@
+     U_ASSERT(kSerializedStemTrie != nullptr);
+ 
+     // Add a trailing whitespace to the end of the skeleton string to make code cleaner.
++    MacroProps macros;
+     UnicodeString tempSkeletonString(skeletonString);
+     tempSkeletonString.append(u' ');
++    // A failed string allocation must not turn the requested skeleton into
++    // an empty/default formatter with a successful status.
++    if (tempSkeletonString.isBogus()) {
++        status = U_MEMORY_ALLOCATION_ERROR;
++        errOffset = 0;
++        return macros;
++    }
+ 
+     SeenMacroProps seen;
+-    MacroProps macros;
+     StringSegment segment(tempSkeletonString, false);
+     UCharsTrie stemTrie(kSerializedStemTrie);
+     ParseState stem = STATE_NULL;
+--- a/external/icu-small/source/i18n/smpdtfmt.cpp
++++ b/external/icu-small/source/i18n/smpdtfmt.cpp
+@@ -930,6 +930,13 @@
+ Calendar*
+ SimpleDateFormat::initializeCalendar(TimeZone* adoptZone, const Locale& locale, UErrorCode& status)
+ {
++    if (U_SUCCESS(status) && locale.isBogus()) {
++        status = U_MEMORY_ALLOCATION_ERROR;
++    }
++    if (U_FAILURE(status)) {
++        delete adoptZone;
++        return nullptr;
++    }
+     if(!U_FAILURE(status)) {
+         fCalendar = Calendar::createInstance(
+             adoptZone ? adoptZone : TimeZone::forLocaleOrDefault(locale), locale, status);
+--- a/external/icu-small/source/i18n/udat.cpp
++++ b/external/icu-small/source/i18n/udat.cpp
+@@ -150,26 +150,23 @@
+         return (UDateFormat*)fmt;
+       } // else fall through.
+     }
++    Locale requestedLocale = locale == nullptr ? Locale::getDefault() : Locale(locale);
++    if (requestedLocale.isBogus()) {
++        *status = U_MEMORY_ALLOCATION_ERROR;
++        return nullptr;
++    }
+     if(timeStyle != UDAT_PATTERN) {
+-        if (locale == nullptr) {
+-            fmt = DateFormat::createDateTimeInstance((DateFormat::EStyle)dateStyle,
+-                (DateFormat::EStyle)timeStyle);
+-        }
+-        else {
+-            fmt = DateFormat::createDateTimeInstance((DateFormat::EStyle)dateStyle,
+-                (DateFormat::EStyle)timeStyle,
+-                Locale(locale));
+-        }
++        fmt = DateFormat::createDateTimeInstance((DateFormat::EStyle)dateStyle,
++            (DateFormat::EStyle)timeStyle, requestedLocale);
+     }
+     else {
+         UnicodeString pat(patternLength == -1, pattern, patternLength);
+ 
+-        if (locale == nullptr) {
+-            fmt = new SimpleDateFormat(pat, *status);
++        if (pat.isBogus()) {
++            *status = U_MEMORY_ALLOCATION_ERROR;
++            return nullptr;
+         }
+-        else {
+-            fmt = new SimpleDateFormat(pat, Locale(locale), *status);
+-        }
++        fmt = new SimpleDateFormat(pat, requestedLocale, *status);
+     }
+ 
+     if(fmt == nullptr) {

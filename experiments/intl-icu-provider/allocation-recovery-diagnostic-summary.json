@@ -1,0 +1,174 @@
+{
+  "scope": "Exploratory nullable ICU allocation recovery; incomplete and excluded from the selected fail-stop implementation.",
+  "sourceStage": "icu-allocation-errors",
+  "patchSha256": "31902f522312cf1bf142e01e1ec01058b2f989d04a0be6ce90639773baeb222e",
+  "lastAttemptedAllocationByCase": {
+    "number": 115,
+    "number-range": 200,
+    "date": 364
+  },
+  "lastFailure": {
+    "id": "date",
+    "allocation": 364,
+    "expected": {
+      "resolved": {
+        "locale": "ja-JP-u-ca-japanese",
+        "calendar": "japanese",
+        "numberingSystem": "latn",
+        "timeZone": "UTC",
+        "hourCycle": "h23",
+        "hour12": false,
+        "dateStyle": "full",
+        "timeStyle": "long"
+      },
+      "text": "令和2年1月1日水曜日 0:00:00 UTC",
+      "parts": [
+        {
+          "type": "era",
+          "value": "令和"
+        },
+        {
+          "type": "year",
+          "value": "2"
+        },
+        {
+          "type": "literal",
+          "value": "年"
+        },
+        {
+          "type": "month",
+          "value": "1"
+        },
+        {
+          "type": "literal",
+          "value": "月"
+        },
+        {
+          "type": "day",
+          "value": "1"
+        },
+        {
+          "type": "literal",
+          "value": "日"
+        },
+        {
+          "type": "weekday",
+          "value": "水曜日"
+        },
+        {
+          "type": "literal",
+          "value": " "
+        },
+        {
+          "type": "hour",
+          "value": "0"
+        },
+        {
+          "type": "literal",
+          "value": ":"
+        },
+        {
+          "type": "minute",
+          "value": "00"
+        },
+        {
+          "type": "literal",
+          "value": ":"
+        },
+        {
+          "type": "second",
+          "value": "00"
+        },
+        {
+          "type": "literal",
+          "value": " "
+        },
+        {
+          "type": "timeZoneName",
+          "value": "UTC"
+        }
+      ]
+    },
+    "actual": {
+      "resolved": {
+        "locale": "ja-JP-u-ca-japanese",
+        "calendar": "gregory",
+        "numberingSystem": "latn",
+        "timeZone": "UTC",
+        "hourCycle": "h23",
+        "hour12": false,
+        "dateStyle": "full",
+        "timeStyle": "long"
+      },
+      "text": "2020年1月1日水曜日 0:00:00 UTC",
+      "parts": [
+        {
+          "type": "year",
+          "value": "2020"
+        },
+        {
+          "type": "literal",
+          "value": "年"
+        },
+        {
+          "type": "month",
+          "value": "1"
+        },
+        {
+          "type": "literal",
+          "value": "月"
+        },
+        {
+          "type": "day",
+          "value": "1"
+        },
+        {
+          "type": "literal",
+          "value": "日"
+        },
+        {
+          "type": "weekday",
+          "value": "水曜日"
+        },
+        {
+          "type": "literal",
+          "value": " "
+        },
+        {
+          "type": "hour",
+          "value": "0"
+        },
+        {
+          "type": "literal",
+          "value": ":"
+        },
+        {
+          "type": "minute",
+          "value": "00"
+        },
+        {
+          "type": "literal",
+          "value": ":"
+        },
+        {
+          "type": "second",
+          "value": "00"
+        },
+        {
+          "type": "literal",
+          "value": " "
+        },
+        {
+          "type": "timeZoneName",
+          "value": "UTC"
+        }
+      ]
+    }
+  },
+  "cleanupAtLastFailure": {
+    "lifecycleCleanup": true,
+    "icuRequestedBytes": 0,
+    "icuAllocationCount": 0
+  },
+  "decision": "Retain this diagnostic patch for investigation. Use icu-allocation-policy instead for the sandbox: native allocation exhaustion traps and the host discards the instance."
+}
