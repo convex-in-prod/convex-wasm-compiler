@@ -1,0 +1,79 @@
+{
+  "kind": "native-icu-resource-acceptance-v1",
+  "hermesRevision": "a4c09b049285e82819a46051eb0a2f93cc8ef79f",
+  "identity": {
+    "moduleSha256": "6f881e3310b435c76f7962fabb9fc524e3774206c3cd98ccc1bbb6b22523cfb3",
+    "hermesArchiveSha256": "ef3be66b58e4aba24abec68f30071204ecde6fe15758e6e4df3e9e29c3143e1d",
+    "jsiArchiveSha256": "5db0ad61a43d90718e232fcfc08ab52fd2fa9e33bf349f34755ae5b788ffb456",
+    "icuArchiveSha256": "47750aeca21fdfcea5203c3a5f1a750365ed4373a63daa2541c8219098b9266b",
+    "fixtureSha256": "52462f19a368b7bf432b667010c4a066d650b0ef4d8cc19d6c1d20410b5ae3a3"
+  },
+  "moduleMaximumMemoryBytes": 134217728,
+  "results": {
+    "control": {
+      "phase": "execution",
+      "limits": {
+        "fuel": 10000000000,
+        "memoryBytes": 67108864
+      },
+      "memoryBytes": 50397184,
+      "outcome": {
+        "kind": "returned",
+        "status": 0
+      },
+      "stdout": "NATIVE_INTL_READY\nNATIVE_ALLOCATIONS_COMPLETE\n",
+      "stderr": ""
+    },
+    "malloc": {
+      "phase": "execution",
+      "limits": {
+        "fuel": 10000000000,
+        "memoryBytes": 67108864
+      },
+      "memoryBytes": 66125824,
+      "outcome": {
+        "error": "error while executing at wasm backtrace:\n    0: 0x573dd8 - <unknown>!<wasm function 8124>\n    1: 0x571da7 - <unknown>!<wasm function 8118>\n    2:   0xf79c - <unknown>!<wasm function 25>\n    3:   0xfadb - <unknown>!<wasm function 29>: forcing trap when growing memory to 67174400 bytes",
+        "kind": "failed"
+      },
+      "stdout": "NATIVE_INTL_READY\n",
+      "stderr": ""
+    },
+    "realloc": {
+      "phase": "execution",
+      "limits": {
+        "fuel": 10000000000,
+        "memoryBytes": 67108864
+      },
+      "memoryBytes": 66125824,
+      "outcome": {
+        "error": "error while executing at wasm backtrace:\n    0: 0x573dd8 - <unknown>!<wasm function 8124>\n    1: 0x571da7 - <unknown>!<wasm function 8118>\n    2: 0x5735df - <unknown>!<wasm function 8121>\n    3:   0xf7b4 - <unknown>!<wasm function 25>\n    4:   0xfae7 - <unknown>!<wasm function 30>: forcing trap when growing memory to 82903040 bytes",
+        "kind": "failed"
+      },
+      "stdout": "NATIVE_INTL_READY\n",
+      "stderr": ""
+    },
+    "cpp": {
+      "phase": "execution",
+      "limits": {
+        "fuel": 10000000000,
+        "memoryBytes": 67108864
+      },
+      "memoryBytes": 66125824,
+      "outcome": {
+        "error": "error while executing at wasm backtrace:\n    0: 0x573dd8 - <unknown>!<wasm function 8124>\n    1: 0x571da7 - <unknown>!<wasm function 8118>\n    2: 0x58b996 - <unknown>!<wasm function 8511>\n    3:   0xf560 - <unknown>!<wasm function 25>\n    4:   0xfaf3 - <unknown>!<wasm function 31>: forcing trap when growing memory to 67174400 bytes",
+        "kind": "failed"
+      },
+      "stdout": "NATIVE_INTL_READY\n",
+      "stderr": ""
+    }
+  },
+  "sourceSha256": {
+    "scripts/convex-wasm-precompiler/src/bin/convex-wasm-wasmtime-runner.rs": "35d99d7f1938848e4867f9198a09937d08b079f8ab3388d43f5dcac881d0ff26",
+    "scripts/test-fixtures/native-values/resource-probe.cpp": "52462f19a368b7bf432b667010c4a066d650b0ef4d8cc19d6c1d20410b5ae3a3"
+  },
+  "limitations": [
+    "Three allocation growth paths after native Intl initialization, not exhaustive allocation fault injection.",
+    "Diagnostic Wasmtime limits and Store disposal do not establish an adopting backend integration.",
+    "No performance result or Apple host runtime execution is claimed."
+  ]
+}

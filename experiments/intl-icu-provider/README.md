@@ -478,8 +478,9 @@ Collator uses the ordered reader with the directed coverage above. These matrice
 do not establish full Test262 conformance or compatibility with V8's experimental
 best-fit matcher. Shared locale conversions now size and check their outputs.
 The allocation policy covers ICU malloc/realloc failures, including the cold
-sample above. Non-ICU allocation and production discard/accounting still need
-acceptance.
+sample above. A later compiler resource probe also covers ordinary libc and C++
+growth outside ICU; see the resource acceptance below. Adopting-host disposal
+and accounting require their own integration evidence.
 
 The date-range-stage original-corpus Wasm is 38,938,617 bytes (about 37.13 MiB), including the full
 33,107,248-byte ICU dataset. Its data SHA-256 is
@@ -506,9 +507,14 @@ request-envelope report and evidence authority now authenticate it explicitly;
 omission or replacement is rejected. See
 [artifact integration evidence](artifact-integration-result-summary.json).
 
-Remaining integration acceptance covers the complete compiler/host artifact
-path, non-ICU/native-memory accounting, actual host
-memory limits, trapped-instance discard, and cancellation/fuel behavior.
+The native resource probe initializes the actual runtime and verifies all three
+Intl constructor families before libc malloc/realloc or C++ container growth.
+With a 64 MiB host limit and 128 MiB module maximum, each stress case traps on
+host-denied growth. The small-allocation control returns successfully, including
+runtime destruction. The runner consumes the failed Store without guest reentry.
+[Resource results](native-resource-result-summary.json) preserve artifact hashes
+and bounded outcomes. This does not establish exhaustive allocation failure
+coverage or replace actual backend admission, disposal and cancellation tests.
 Explicit final GC and the bounded repeated-runtime lifecycle check pass.
 Forced mid-initialization collection with deferred numeric values also passes.
 ICU/CLDR match the local reference but timezone datasets differ. Compare with the

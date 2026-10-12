@@ -84,12 +84,12 @@ The repository currently provides:
   with operational files reported separately from artifact semantics; and
 - compiler regression and invariant-validation corpora.
 
-The guest runtime is not a byte-for-byte V8 replacement. In particular, its
-handwritten `Intl` subset rejects many standard calls and differs on some accepted
-inputs. See [runtime compatibility](docs/runtime-compatibility.md) for the exact
+The guest runtime is not a byte-for-byte V8 replacement. Its native ICU provider
+supports DateTimeFormat, NumberFormat and Collator, with pinned locale data and
+documented differences. See [runtime compatibility](docs/runtime-compatibility.md) for the exact
 implemented options, missing APIs, demonstrated differences, and verification
 limits. Successful compilation does not establish runtime equivalence.
-A separate [native ICU experiment](experiments/intl-icu-provider/README.md)
+A separate [native ICU experiment](https://github.com/convex-in-prod/convex-wasm-compiler/tree/main/experiments/intl-icu-provider)
 contains the port, differential corpora and recorded results; it is not shipped
 in the compiler package.
 

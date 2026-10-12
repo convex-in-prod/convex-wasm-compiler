@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.30",
+  "version": "0.2.31",
   "private": true,
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
     "convex-wasm-transfer-registry": "scripts/transfer-registry.sh"
   },
   "files": [
+    "docs/runtime-compatibility.md",
     "examples/items/**",
     "scripts/*.mjs",
     "scripts/*.sh",
@@ -27,7 +28,9 @@
     "scripts/vendor/**",
     "scripts/test-fixtures/convex-wasm-runtime-surface/static-hermes-global-probe.js",
     "scripts/test-fixtures/convex-wasm-request-envelope/canonical-vectors.json",
+    "scripts/test-fixtures/convex-wasm-request-envelope/report-fixture.mjs",
     "scripts/test-fixtures/native-values/runtime-probe.cpp",
+    "scripts/test-fixtures/native-values/resource-probe.cpp",
     "!scripts/**/*.test.mjs",
     "!scripts/smoke-*.mjs",
     "!scripts/check-javascript.mjs",

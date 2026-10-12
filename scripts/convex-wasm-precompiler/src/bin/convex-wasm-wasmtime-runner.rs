@@ -1,13 +1,90 @@
 use std::error::Error as StdError;
 use std::io::{BufRead, Write};
 
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 #[path = "../wasmtime_wasi.rs"]
 mod wasmtime_wasi;
-use wasmtime_wasi::{WasiState, add_wasi_imports};
+use wasmtime_wasi::{WasiAccess, WasiState, add_wasi_imports};
 
 type RunnerResult<T> = Result<T, Box<dyn StdError>>;
+
+struct ResourceState {
+    wasi: WasiState,
+    limits: StoreLimits,
+}
+
+impl WasiAccess for ResourceState {
+    fn wasi(&self) -> &WasiState {
+        &self.wasi
+    }
+    fn wasi_mut(&mut self) -> &mut WasiState {
+        &mut self.wasi
+    }
+}
+
+fn probe_resources(
+    engine: &Engine,
+    module: &Module,
+    runner_export: &str,
+    memory_limit: usize,
+    fuel_limit: u64,
+) -> RunnerResult<serde_json::Value> {
+    if memory_limit == 0 || fuel_limit == 0 {
+        return Err("resource probe limits must be positive".into());
+    }
+    let mut linker = Linker::new(engine);
+    add_wasi_imports(&mut linker)?;
+    let mut store = Store::new(
+        engine,
+        ResourceState {
+            wasi: WasiState {
+                args: vec![b"convex-wasm-resource-probe".to_vec()],
+                stderr: Vec::new(),
+                stdout: Vec::new(),
+            },
+            limits: StoreLimitsBuilder::new()
+                .memory_size(memory_limit)
+                .memories(1)
+                .instances(1)
+                .trap_on_grow_failure(true)
+                .build(),
+        },
+    );
+    store.limiter(|state| &mut state.limits);
+    store.set_fuel(fuel_limit)?;
+    let mut phase = "instantiation";
+    let mut memory = None;
+    let result = (|| -> wasmtime::Result<i32> {
+        let instance = linker.instantiate(&mut store, module)?;
+        memory = instance.get_memory(&mut store, "memory");
+        phase = "initialization";
+        instance
+            .get_typed_func::<(), ()>(&mut store, "_initialize")?
+            .call(&mut store, ())?;
+        phase = "execution";
+        instance
+            .get_typed_func::<(), i32>(&mut store, runner_export)?
+            .call(&mut store, ())
+    })();
+    let memory_bytes = memory.map(|memory| memory.data_size(&store));
+    // Read only host-owned evidence after failure. Consuming the Store releases
+    // the entire instance; a trapped guest must never receive a cleanup call.
+    let state = store.into_data();
+    let outcome = match result {
+        Ok(status) => serde_json::json!({"kind": "returned", "status": status}),
+        Err(error) => serde_json::json!({"kind": "failed", "error": format!("{error:#}")}),
+    };
+    Ok(serde_json::json!({
+        "kind": "convex-wasm-resource-probe-v1",
+        "limits": {"memoryBytes": memory_limit, "fuel": fuel_limit},
+        "phase": phase,
+        "outcome": outcome,
+        "memoryBytes": memory_bytes,
+        "stdout": state.wasi.stdout,
+        "stderr": state.wasi.stderr,
+    }))
+}
 
 fn execute(
     engine: &Engine,
@@ -38,7 +115,37 @@ fn main() -> RunnerResult<()> {
     let first = arguments.next().ok_or("missing Wasm module path")?;
     let mut config = Config::new();
     config.wasm_exceptions(true);
+    config.consume_fuel(first == "--resource-probe");
     let engine = Engine::new(&config)?;
+    if first == "--resource-probe" {
+        let path = arguments.next().ok_or("missing resource probe module")?;
+        let runner_export = arguments
+            .next()
+            .ok_or("missing resource probe export")?
+            .into_string()
+            .map_err(|_| "resource probe export must be valid UTF-8")?;
+        let memory_limit: usize = arguments
+            .next()
+            .ok_or("missing resource probe memory limit")?
+            .into_string()
+            .map_err(|_| "resource probe memory limit must be valid UTF-8")?
+            .parse()?;
+        let fuel_limit: u64 = arguments
+            .next()
+            .ok_or("missing resource probe fuel limit")?
+            .into_string()
+            .map_err(|_| "resource probe fuel limit must be valid UTF-8")?
+            .parse()?;
+        if arguments.next().is_some() {
+            return Err("resource probe expects module, export, memory bytes and fuel".into());
+        }
+        let module = Module::from_file(&engine, path)?;
+        println!(
+            "{}",
+            probe_resources(&engine, &module, &runner_export, memory_limit, fuel_limit)?
+        );
+        return Ok(());
+    }
     let mut linker = Linker::new(&engine);
     add_wasi_imports(&mut linker)?;
 
@@ -196,5 +303,40 @@ mod tests {
             assert_eq!(state.stdout, [b'A' + index as u8, 0, 255]);
             assert!(state.stderr.is_empty());
         }
+    }
+
+    #[test]
+    fn resource_probe_preserves_limits_and_failure_evidence() {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config).unwrap();
+        let module = output_module(&engine, b'A');
+        let returned = probe_resources(&engine, &module, "probe", 65536, 1000).unwrap();
+        assert_eq!(
+            returned["outcome"],
+            serde_json::json!({"kind": "returned", "status": 0})
+        );
+        assert_eq!(returned["stdout"], serde_json::json!([b'A', 0, 255]));
+        assert_eq!(returned["memoryBytes"], 65536);
+
+        let memory_denied = probe_resources(&engine, &module, "probe", 1, 1000).unwrap();
+        assert_eq!(memory_denied["phase"], "instantiation");
+        assert_eq!(memory_denied["outcome"]["kind"], "failed");
+        assert!(
+            memory_denied["outcome"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("memory")
+        );
+
+        let fuel_denied = probe_resources(&engine, &module, "probe", 65536, 1).unwrap();
+        assert_eq!(fuel_denied["outcome"]["kind"], "failed");
+        assert!(
+            fuel_denied["outcome"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("fuel")
+        );
+        assert!(probe_resources(&engine, &module, "probe", 0, 1).is_err());
     }
 }

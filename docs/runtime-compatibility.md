@@ -12,8 +12,8 @@ releases through v0.2.30 used a smaller handwritten JavaScript adapter.
 The target builds Hermes's static ICU provider and links its code and complete
 locale dataset as one reusable archive. Intl is an engine global. The shared
 JavaScript support bundle supplies DOMException and URL APIs and does not
-replace Intl. The host compiler does not need Intl enabled to compile guest
-JavaScript.
+replace Intl. Setup requires the same static provider in the host Hermes build
+because native codec and request validation execute it there as well.
 
 The provider exposes:
 
@@ -58,7 +58,7 @@ its fractional-time behavior; and range-part source labels follow its ownership
 rules. These decisions are covered by generic differential corpora, not a promise
 about future V8 versions.
 
-The retained [port and conformance evidence](../experiments/intl-icu-provider/README.md)
+The retained [port and conformance evidence](https://github.com/convex-in-prod/convex-wasm-compiler/tree/main/experiments/intl-icu-provider)
 identifies the exact source stages, references, artifact hashes and limitations.
 Full native-memory accounting, host fuel/cancellation behavior, trapped-instance
 discard and adopting-host comparisons are separate integration acceptance checks.
@@ -82,6 +82,18 @@ stack, and a 2 MiB initial heap. It rejects capability and randomness requests.
 This diagnostic uses the actual runtime initializer and descriptor validator;
 it does not execute a backend capability package or establish host admission,
 fuel accounting, cancellation or instance-discard behavior.
+
+The same module exports `runNativeResourceProbe`. It initializes native Intl,
+then exercises libc malloc/realloc and C++ container growth outside the ICU and
+Hermes GC counters. With a 64 MiB host limit below the module's 128 MiB maximum,
+all three stress cases trap on denied memory growth; a small-allocation control
+returns and destroys its runtime normally. The diagnostic runner reads only
+host-owned evidence after a trap and destroys the Store without guest reentry.
+This establishes bounded allocation/admission behavior, not exhaustive allocator
+failure injection or an adopting backend's disposal policy. The
+[resource results](https://github.com/convex-in-prod/convex-wasm-compiler/blob/main/experiments/intl-icu-provider/native-resource-result-summary.json)
+identify the exact module and archives. Adapter and ICU licenses ship in
+`scripts/vendor/convex-wasm-native-intl/`.
 
 ## Application responsibilities
 
