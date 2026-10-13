@@ -6,3 +6,7 @@ pub mod capability_replay_codec;
 pub mod capability_replay_host;
 #[cfg(feature = "capability-replay")]
 pub mod wasmtime_wasi;
+
+#[cfg(test)]
+#[path = "vendor/wasmtime-cranelift/metering_tests.rs"]
+mod metering_tests;

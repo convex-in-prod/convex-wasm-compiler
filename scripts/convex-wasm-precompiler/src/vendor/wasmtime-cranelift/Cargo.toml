@@ -1,0 +1,39 @@
+[package]
+name = "wasmtime-internal-cranelift"
+version = "50.0.0-dev"
+authors = ["The Wasmtime Project Developers"]
+description = "INTERNAL: Integration between Cranelift and Wasmtime"
+license = "Apache-2.0 WITH LLVM-exception"
+repository = "https://github.com/bytecodealliance/wasmtime"
+documentation = "https://docs.rs/wasmtime-cranelift/"
+categories = ["wasm"]
+keywords = ["webassembly", "wasm"]
+edition = "2024"
+rust-version = "1.96.0"
+publish = false
+
+[dependencies]
+log = { version = "0.4.28", default-features = false }
+cranelift-codegen = { default-features = false, features = ["unwind", "host-arch", "timing", "incremental-cache"], git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+cranelift-entity = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+cranelift-control = { default-features = false, git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+wasmparser = { version = "0.259.0", default-features = false, features = ["simd"] }
+target-lexicon = { version = "0.13.5" }
+gimli = { version = "0.33.0", default-features = false, features = ["read", "std"] }
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "write", "std"] }
+smallvec = { version = "1.15.1", features = ["union"] }
+thiserror = { version = "2.0.17" }
+wasmtime-versioned-export-macros = { package = "wasmtime-internal-versioned-export-macros", git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+itertools = { version = "0.14.0" }
+pulley-interpreter = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81", optional = true }
+wasmtime-core = { package = "wasmtime-internal-core", git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81" }
+wasmtime-unwinder = { package = "wasmtime-internal-unwinder", git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81", features = ["cranelift"] }
+wasmtime-environ = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81", features = ["compile", "component-model", "gc-drc", "gc-null", "gc-copying", "stack-switching", "threads"] }
+
+[features]
+all-arch = ["cranelift-codegen/all-arch"]
+host-arch = ["cranelift-codegen/host-arch"]
+pulley = ["cranelift-codegen/pulley", "dep:pulley-interpreter"]
+trace-log = ["cranelift-codegen/trace-log"]

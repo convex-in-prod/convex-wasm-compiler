@@ -1348,7 +1348,6 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "50.0.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=7ad2e732ab9ca8665d3cdd91f9c395315eeafc81#7ad2e732ab9ca8665d3cdd91f9c395315eeafc81"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",

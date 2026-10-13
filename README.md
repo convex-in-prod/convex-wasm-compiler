@@ -178,6 +178,11 @@ optimizer separately from the SDK. Generated configurations select and authentic
 that toolchain through `EM_BINARYEN_ROOT` and explicit material inputs.
 The runner's Cargo dependency and the verified precompiler package both pin
 the same Wasmtime revision; setup does not need a second Wasmtime source checkout.
+The precompiler's authenticated source includes a
+[Cranelift integration patch](scripts/convex-wasm-precompiler/src/vendor/wasmtime-cranelift/UPSTREAM.md)
+that preserves registers in fuel and epoch handlers. Compiler package identities
+separate AOT cache entries when generated-code policy changes; runtime ABI
+compatibility stays separate. Fuel charges and cancellation remain enabled.
 It requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
 Rust toolchain named by the packaged runner source. It targets the supported
 Linux and macOS hosts; the first run builds substantial native code. A later
@@ -831,13 +836,31 @@ SDK's absent-variable response. The guest must export `_initialize`,
 alternate retained instances in the same process. This optional diagnostic
 binary is built from source and is not included in portable release archives.
 
+Two optional modes compare engine settings on exactly one Core Wasm module:
+
+```sh
+convex-wasm-capability-replay --metering-matrix trace.json baseline.wasm
+convex-wasm-capability-replay --inlining-comparison trace.json baseline.wasm
+```
+
+The metering matrix runs fuel plus epochs, fuel only, epochs only, and neither.
+These disabled-check variants are local diagnostic controls; the driver must
+enforce its external timeout. The inlining comparison keeps both checks enabled
+and compares Wasmtime's ordinary compilation with its existing Cranelift inliner.
+Each variant has its own retained instance and the invocation order reverses on
+alternate iterations. `engineVariant` identifies the settings in each result;
+`fuelConsumed` is null when fuel is disabled. Outputs and trace consumption remain
+checked for every variant. These modes change no precompiler, artifact policy or
+backend setting, and an unmetered contrast is not an achievable speedup estimate.
+
 The runner uses CVA1 requests/results and packed FlexBuffers documents and
 collections. It converts a captured stream into a bulk result only when the
 capture includes an explicit end-of-query result. Partial streams remain streams.
 All expected reads, writes, outputs and entropy must be consumed, and writes
 cannot pass pending read completions. Unsupported capabilities, pending commit
-timestamps and pagination fail explicitly. The engine enables fuel accounting
-and epoch interruption; an invocation has a bounded epoch deadline.
+timestamps and pagination fail explicitly. The ordinary runner and inlining
+comparison enable fuel accounting and epoch interruption; an invocation has a
+bounded epoch deadline. Only the explicit metering matrix disables these checks.
 Async-operation and stream handles restart after invocation cleanup, matching
 the backend's retained-instance lifecycle. Opaque value handles retain their
 separate numbering. Reusing an instance must not make the guest allocate or scan

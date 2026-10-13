@@ -125,7 +125,7 @@ function validateToolchain(toolchain, sourceMaterials) {
   }
 }
 
-function validateWasmtimeIdentity(wasmtime) {
+function validateWasmtimeIdentity(wasmtime, sourceMaterials) {
   assertExactKeys(wasmtime, ["features", "git", "lockedPackages", "revision"], "Wasmtime identity");
   if (
     wasmtime.git !== "https://github.com/bytecodealliance/wasmtime" ||
@@ -163,7 +163,25 @@ function validateWasmtimeIdentity(wasmtime) {
       packageIdentity.version,
       `Wasmtime locked package ${index} version`
     );
-    if (!name.startsWith("wasmtime") || !source.endsWith(`#${wasmtime.revision}`)) {
+    const vendored = source.match(
+      /^path\+(scripts\/convex-wasm-precompiler\/src\/vendor\/wasmtime-cranelift)#([0-9a-f]{64})$/u
+    );
+    if (vendored !== null) {
+      const [, directory, treeSha256] = vendored;
+      const materials = sourceMaterials.filter(({ path }) => path.startsWith(`${directory}/`));
+      if (
+        name !== "wasmtime-internal-cranelift" ||
+        !["Cargo.toml", "src/lib.rs", "src/func_environ.rs"].every((required) =>
+          materials.some(({ path }) => path === `${directory}/${required}`)
+        ) ||
+        sha256Bytes(canonicalCompilerPackageJson(materials)) !== treeSha256
+      ) {
+        fail(`Wasmtime locked package ${index} does not match its authenticated source tree`);
+      }
+    } else if (
+      !name.startsWith("wasmtime") ||
+      source !== `git+${wasmtime.git}?rev=${wasmtime.revision}#${wasmtime.revision}`
+    ) {
       fail(`Wasmtime locked package ${index} does not match the pinned revision`);
     }
     const key = `${name}\0${version}\0${source}`;
@@ -321,7 +339,7 @@ function validatePayload(payload) {
   ) {
     fail("Rust release does not match the pinned toolchain");
   }
-  validateWasmtimeIdentity(payload.identities.wasmtime);
+  validateWasmtimeIdentity(payload.identities.wasmtime, payload.identities.source.materials);
 }
 
 export function createPrecompilerPackageManifest(payload) {

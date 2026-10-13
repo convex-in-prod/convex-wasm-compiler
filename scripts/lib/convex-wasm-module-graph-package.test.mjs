@@ -145,7 +145,7 @@ test("authenticates a complete synthetic module-graph package from an isolated c
   );
 });
 
-test("module-graph artifacts reuse material across distinct leaf control identities", async (context) => {
+test("module-graph artifacts reuse material while separating compiler packages", async (context) => {
   const { cacheLayout, cacheRoot, graph, packagePath } = await materializeFixture(context);
   const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
     cacheLayout,
@@ -202,6 +202,21 @@ test("module-graph artifacts reuse material across distinct leaf control identit
   assert.notEqual(first.aot.report.cacheKey, second.aot.report.cacheKey);
   assert.equal(first.coreWasm.entry.artifactSha256, second.coreWasm.entry.artifactSha256);
   assert.equal(first.aot.entry.artifactSha256, second.aot.entry.artifactSha256);
+
+  // A source-only compiler change may preserve both the Wasm bytes and runtime
+  // ABI. Its package identity must still invalidate the AOT material cache.
+  const changedProducer = {
+    ...options,
+    engine: { ...manifest.engine, package: { fixture: "changed-code-generation-source" } },
+  };
+  const changed = await buildConvexWasmModuleGraphModuleArtifacts(changedProducer);
+  assert.equal(coreBuilds, 1);
+  assert.equal(aotBuilds, 2);
+  assert.notEqual(changed.aot.report.cacheKey, first.aot.report.cacheKey);
+  await buildConvexWasmModuleGraphModuleArtifacts(changedProducer);
+  await buildConvexWasmModuleGraphModuleArtifacts(options);
+  assert.equal(coreBuilds, 1);
+  assert.equal(aotBuilds, 2);
 });
 
 test("constructs and authenticates a module-graph package from generic build callbacks", async (context) => {

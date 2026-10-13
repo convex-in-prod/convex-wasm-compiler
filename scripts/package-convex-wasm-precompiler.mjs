@@ -89,7 +89,9 @@ function compareStrings(left, right) {
 }
 
 export function wasmtimeIdentityFromLockedPackages(lockedPackages) {
-  const wasmtimeSources = new Set(lockedPackages.map(({ source }) => source));
+  const wasmtimeSources = new Set(
+    lockedPackages.filter(({ source }) => !source.startsWith("path+")).map(({ source }) => source)
+  );
   if (wasmtimeSources.size !== 1) {
     throw new Error("Cargo.lock must resolve every Wasmtime package from one exact revision");
   }
@@ -126,7 +128,7 @@ function quotedTomlValue(text, key) {
   return matches[0][1];
 }
 
-async function sourceMetadata(source) {
+export async function sourceMetadata(source) {
   const cargoLockPath = join(crateDirectory, "Cargo.lock");
   const toolchainPath = join(crateDirectory, "rust-toolchain.toml");
   const [cargoLockText, toolchainText] = await Promise.all([
@@ -157,8 +159,20 @@ async function sourceMetadata(source) {
     if (name === undefined || !name.startsWith("wasmtime")) {
       continue;
     }
-    const sourceValue = value("source");
+    let sourceValue = value("source");
     const version = value("version");
+    if (sourceValue === undefined && name === "wasmtime-internal-cranelift") {
+      // Cargo records a path override without a source URL. Bind this package
+      // to its complete authenticated source subtree instead of inventing a Git identity.
+      const directory = "scripts/convex-wasm-precompiler/src/vendor/wasmtime-cranelift";
+      const materials = source.materials.filter(({ path }) => path.startsWith(`${directory}/`));
+      for (const required of ["Cargo.toml", "src/lib.rs", "src/func_environ.rs"]) {
+        if (!materials.some(({ path }) => path === `${directory}/${required}`)) {
+          throw new Error(`vendored Wasmtime source is missing authenticated ${required}`);
+        }
+      }
+      sourceValue = `path+${directory}#${sha256Bytes(canonicalCompilerPackageJson(materials))}`;
+    }
     if (sourceValue === undefined || version === undefined) {
       throw new Error(`Cargo.lock has an incomplete identity for ${name}`);
     }

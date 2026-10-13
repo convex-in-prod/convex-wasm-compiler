@@ -14,7 +14,55 @@ use convex_wasm_precompiler::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use wasmtime::{Config, Engine, Error, Instance, Linker, Module, ProfilingStrategy, Store};
+use wasmtime::{
+    Config, Engine, Error, Inlining, Instance, Linker, Module, ProfilingStrategy, Store,
+};
+
+#[derive(Clone, Copy)]
+enum EngineVariant {
+    Metered,
+    FuelOnly,
+    EpochOnly,
+    Unmetered,
+    Inlined,
+}
+
+impl EngineVariant {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Metered => "fuel-and-epochs",
+            Self::FuelOnly => "fuel-only",
+            Self::EpochOnly => "epochs-only",
+            Self::Unmetered => "unmetered",
+            Self::Inlined => "fuel-and-epochs-inlined",
+        }
+    }
+
+    fn fuel(self) -> bool {
+        matches!(self, Self::Metered | Self::FuelOnly | Self::Inlined)
+    }
+
+    fn epochs(self) -> bool {
+        matches!(self, Self::Metered | Self::EpochOnly | Self::Inlined)
+    }
+
+    fn engine(self, perf_map: bool) -> Result<Engine, Error> {
+        let mut config = Config::new();
+        config
+            .consume_fuel(self.fuel())
+            .epoch_interruption(self.epochs())
+            .compiler_inlining(if matches!(self, Self::Inlined) {
+                Inlining::Yes
+            } else {
+                Inlining::No
+            })
+            .wasm_exceptions(true);
+        if perf_map {
+            config.profiler(ProfilingStrategy::PerfMap);
+        }
+        Engine::new(&config)
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +82,19 @@ struct Input {
 struct Guest {
     store: Store<State>,
     instance: Instance,
+    variant: EngineVariant,
+}
+
+impl Guest {
+    fn reset_limits(&mut self, fuel: u64) -> Result<(), Error> {
+        if self.variant.fuel() {
+            self.store.set_fuel(fuel)?;
+        }
+        if self.variant.epochs() {
+            self.store.set_epoch_deadline(6000);
+        }
+        Ok(())
+    }
 }
 
 fn status(value: i32, phase: &str) -> Result<(), Error> {
@@ -46,10 +107,31 @@ fn status(value: i32, phase: &str) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let variants = match arguments.first().and_then(|arg| arg.to_str()) {
+        Some("--metering-matrix") => {
+            arguments.remove(0);
+            vec![
+                EngineVariant::Metered,
+                EngineVariant::FuelOnly,
+                EngineVariant::EpochOnly,
+                EngineVariant::Unmetered,
+            ]
+        }
+        Some("--inlining-comparison") => {
+            arguments.remove(0);
+            vec![EngineVariant::Metered, EngineVariant::Inlined]
+        }
+        _ => vec![EngineVariant::Metered],
+    };
     if !(2..=3).contains(&arguments.len()) {
         return Err(Error::msg(
-            "usage: convex-wasm-capability-replay TRACE.json BASELINE.wasm [CANDIDATE.wasm]",
+            "usage: convex-wasm-capability-replay [--metering-matrix | --inlining-comparison] TRACE.json BASELINE.wasm [CANDIDATE.wasm]",
+        ));
+    }
+    if variants.len() > 1 && arguments.len() != 2 {
+        return Err(Error::msg(
+            "Engine comparisons require exactly one Core Wasm module",
         ));
     }
     let input: Input = serde_json::from_slice(&std::fs::read(&arguments[0])?)
@@ -61,27 +143,24 @@ fn main() -> Result<(), Error> {
     {
         return Err(Error::msg("Invalid capability replay limits"));
     }
-    let mut config = Config::new();
-    config
-        .consume_fuel(true)
-        .epoch_interruption(true)
-        .wasm_exceptions(true);
-    if input.perf_map {
-        config.profiler(ProfilingStrategy::PerfMap);
-    }
-    let engine = Engine::new(&config)?;
+    let engines: Vec<_> = variants
+        .iter()
+        .map(|variant| variant.engine(input.perf_map))
+        .collect::<Result<_, _>>()?;
     let running = Arc::new(AtomicBool::new(true));
     let ticker = {
         let running = running.clone();
-        let engine = engine.clone();
+        let engines = engines.clone();
         std::thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(10));
-                engine.increment_epoch();
+                for engine in &engines {
+                    engine.increment_epoch();
+                }
             }
         })
     };
-    let result = run(&engine, &arguments[1..], &input);
+    let result = run(&engines, &variants, &arguments[1..], &input);
     running.store(false, Ordering::Relaxed);
     ticker
         .join()
@@ -89,32 +168,52 @@ fn main() -> Result<(), Error> {
     result
 }
 
-fn run(engine: &Engine, paths: &[std::ffi::OsString], input: &Input) -> Result<(), Error> {
+fn run(
+    engines: &[Engine],
+    variants: &[EngineVariant],
+    paths: &[std::ffi::OsString],
+    input: &Input,
+) -> Result<(), Error> {
     let mut guests = Vec::new();
-    for path in paths {
+    for index in 0..paths.len().max(variants.len()) {
+        let engine_index = if variants.len() == 1 { 0 } else { index };
+        let engine = &engines[engine_index];
+        let variant = variants[engine_index];
+        let path = &paths[if paths.len() == 1 { 0 } else { index }];
         let module = Module::from_file(engine, path)?;
         let mut linker = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         add_imports(&mut linker, &module)?;
         linker.define_unknown_imports_as_traps(&module)?;
         let mut store = Store::new(engine, State::new(input.environment.clone()));
-        store.set_fuel(input.fuel)?;
-        store.set_epoch_deadline(6000);
+        if variant.fuel() {
+            store.set_fuel(input.fuel)?;
+        }
+        if variant.epochs() {
+            store.set_epoch_deadline(6000);
+        }
         let instance = linker.instantiate(&mut store, &module)?;
         instance
             .get_typed_func::<(), ()>(&mut store, "_initialize")?
             .call(&mut store, ())?;
+        let mut guest = Guest {
+            store,
+            instance,
+            variant,
+        };
         for case in &input.cases {
-            store.set_fuel(input.fuel)?;
-            store.set_epoch_deadline(6000);
+            guest.reset_limits(input.fuel)?;
+            let Guest {
+                store, instance, ..
+            } = &mut guest;
             let select =
-                instance.get_typed_func::<i64, i32>(&mut store, "convex_wasm_select_entry")?;
-            status(select.call(&mut store, case.selector as i64)?, "selection")?;
+                instance.get_typed_func::<i64, i32>(&mut *store, "convex_wasm_select_entry")?;
+            status(select.call(&mut *store, case.selector as i64)?, "selection")?;
             let prepare = instance
-                .get_typed_func::<(), i32>(&mut store, "convex_wasm_udf_prepare_selected_entry")?;
-            status(prepare.call(&mut store, ())?, "preparation")?;
+                .get_typed_func::<(), i32>(&mut *store, "convex_wasm_udf_prepare_selected_entry")?;
+            status(prepare.call(&mut *store, ())?, "preparation")?;
         }
-        guests.push(Guest { store, instance });
+        guests.push(guest);
     }
     // Pin only execution: module compilation can use the host's available CPUs.
     if let Some(cpu) = input.cpu {
@@ -163,22 +262,38 @@ fn run(engine: &Engine, paths: &[std::ffi::OsString], input: &Input) -> Result<(
                         return Err(Error::msg("Invalid paced replay command"));
                     }
                 }
-                let Guest { store, instance } = &mut guests[variant];
+                // AOT and preparation of another variant can outlast this deadline.
+                guests[variant].reset_limits(input.fuel)?;
+                let Guest {
+                    store,
+                    instance,
+                    variant: engine_variant,
+                } = &mut guests[variant];
                 let select =
                     instance.get_typed_func::<i64, i32>(&mut *store, "convex_wasm_select_entry")?;
                 let invoke =
                     instance.get_typed_func::<(), i32>(&mut *store, "convex_wasm_udf_run")?;
-                // Preparing another module may outlast this store's old deadline.
-                store.set_fuel(input.fuel)?;
-                store.set_epoch_deadline(6000);
                 status(select.call(&mut *store, case.selector as i64)?, "selection")?;
                 store.data_mut().begin(case)?;
-                store.set_fuel(input.fuel)?;
-                store.set_epoch_deadline(6000);
+                if engine_variant.fuel() {
+                    store.set_fuel(input.fuel)?;
+                }
+                if engine_variant.epochs() {
+                    store.set_epoch_deadline(6000);
+                }
                 let started = Instant::now();
                 status(invoke.call(&mut *store, ())?, "handler")?;
                 let elapsed = started.elapsed();
-                let fuel = input.fuel - store.get_fuel()?;
+                let fuel = if engine_variant.fuel() {
+                    Some(
+                        input
+                            .fuel
+                            .checked_sub(store.get_fuel()?)
+                            .ok_or_else(|| Error::msg("Replay fuel accounting is inconsistent"))?,
+                    )
+                } else {
+                    None
+                };
                 let captured_calls = store.data_mut().finish(case)?;
                 let state = store.data();
                 let guest_and_wasi = elapsed
@@ -186,7 +301,7 @@ fn run(engine: &Engine, paths: &[std::ffi::OsString], input: &Input) -> Result<(
                     .ok_or_else(|| Error::msg("Replay timing interval is inconsistent"))?;
                 println!(
                     "{}",
-                    json!({"variant": variant, "case": case_index,
+                    json!({"variant": variant, "engineVariant": engine_variant.name(), "case": case_index,
                     "iteration": repetition, "warmup": repetition < input.warmup,
                     "elapsedMs": elapsed.as_secs_f64() * 1000.0,
                     "convexHostMs": state.host_time.as_secs_f64() * 1000.0,
@@ -203,4 +318,111 @@ fn run(engine: &Engine, paths: &[std::ffi::OsString], input: &Input) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
+        Module as EncodedModule, TypeSection, ValType,
+    };
+
+    fn call_module() -> Vec<u8> {
+        let mut module = EncodedModule::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I32]);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0).function(0);
+        module.section(&functions);
+        let mut exports = ExportSection::new();
+        exports.export("sum", ExportKind::Func, 1);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut leaf = Function::new([]);
+        leaf.instruction(&Instruction::I32Const(21))
+            .instruction(&Instruction::End);
+        code.function(&leaf);
+        let mut caller = Function::new([]);
+        caller
+            .instruction(&Instruction::Call(0))
+            .instruction(&Instruction::Call(0))
+            .instruction(&Instruction::I32Add)
+            .instruction(&Instruction::End);
+        code.function(&caller);
+        module.section(&code);
+        module.finish()
+    }
+
+    #[test]
+    fn engine_controls_preserve_results_and_fuel_charges() -> Result<(), Error> {
+        let wasm = call_module();
+        let mut metered_cost = None;
+        for variant in [
+            EngineVariant::Metered,
+            EngineVariant::FuelOnly,
+            EngineVariant::EpochOnly,
+            EngineVariant::Unmetered,
+            EngineVariant::Inlined,
+        ] {
+            let engine = variant.engine(false)?;
+            let module = Module::new(&engine, &wasm)?;
+            let mut store = Store::new(&engine, ());
+            if variant.fuel() {
+                store.set_fuel(100)?;
+            }
+            if variant.epochs() {
+                store.set_epoch_deadline(1);
+            }
+            let instance = Instance::new(&mut store, &module, &[])?;
+            let sum = instance.get_typed_func::<(), i32>(&mut store, "sum")?;
+            assert_eq!(sum.call(&mut store, ())?, 42, "{}", variant.name());
+            if variant.fuel() {
+                let consumed = 100 - store.get_fuel()?;
+                assert!(consumed > 0);
+                if let Some(expected) = metered_cost {
+                    assert_eq!(consumed, expected);
+                } else {
+                    metered_cost = Some(consumed);
+                }
+                store.set_fuel(0)?;
+                let error = sum.call(&mut store, ()).unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<wasmtime::Trap>(),
+                    Some(&wasmtime::Trap::OutOfFuel)
+                );
+            } else {
+                assert!(store.get_fuel().is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn epoch_controls_retain_cancellation() -> Result<(), Error> {
+        let wasm = call_module();
+        for variant in [
+            EngineVariant::Metered,
+            EngineVariant::EpochOnly,
+            EngineVariant::Inlined,
+        ] {
+            let engine = variant.engine(false)?;
+            let module = Module::new(&engine, &wasm)?;
+            let mut store = Store::new(&engine, ());
+            if variant.fuel() {
+                store.set_fuel(100)?;
+            }
+            store.set_epoch_deadline(1);
+            let instance = Instance::new(&mut store, &module, &[])?;
+            let sum = instance.get_typed_func::<(), i32>(&mut store, "sum")?;
+            engine.increment_epoch();
+            let error = sum.call(&mut store, ()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::Interrupt)
+            );
+        }
+        Ok(())
+    }
 }

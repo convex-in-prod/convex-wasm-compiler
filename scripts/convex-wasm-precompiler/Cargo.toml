@@ -5,12 +5,13 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["src/vendor/cranelift-frontend"]
-default-members = [".", "src/vendor/cranelift-frontend"]
+members = ["src/vendor/cranelift-frontend", "src/vendor/wasmtime-cranelift"]
+default-members = [".", "src/vendor/cranelift-frontend", "src/vendor/wasmtime-cranelift"]
 resolver = "3"
 
 [patch."https://github.com/bytecodealliance/wasmtime"]
 cranelift-frontend = { path = "src/vendor/cranelift-frontend" }
+wasmtime-internal-cranelift = { path = "src/vendor/wasmtime-cranelift" }
 
 [features]
 capability-replay = ["dep:base64", "dep:flexbuffers"]
