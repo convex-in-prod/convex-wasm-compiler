@@ -8194,14 +8194,18 @@ export const selected = query({
             runtime_support_globals,
             BTreeSet::from([
                 "DOMException".to_string(),
-                "Intl".to_string(),
                 "URL".to_string(),
                 "URLSearchParams".to_string(),
             ])
         );
+        assert_eq!(
+            inventory["semantics"]["Intl"]["provider"],
+            "engine-runtime-untyped+typed-bridge"
+        );
+        assert!(compile_admitted_static_hermes_globals().contains("Intl"));
         assert!(
             runtime_support_globals.is_subset(compile_admitted_static_hermes_globals()),
-            "runtime-support globals must remain admitted after the formatter installs them"
+            "runtime-support globals must remain admitted after installation"
         );
 
         let output = compile(
