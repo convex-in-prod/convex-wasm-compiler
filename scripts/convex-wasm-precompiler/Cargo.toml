@@ -14,7 +14,8 @@ cranelift-frontend = { path = "src/vendor/cranelift-frontend" }
 wasmtime-internal-cranelift = { path = "src/vendor/wasmtime-cranelift" }
 
 [features]
-capability-replay = ["dep:base64", "dep:flexbuffers"]
+# Captures must retain the producer's f64 values before binary encoding or comparison.
+capability-replay = ["dep:base64", "dep:flexbuffers", "serde_json/float_roundtrip"]
 
 [[bin]]
 name = "convex-wasm-capability-replay"

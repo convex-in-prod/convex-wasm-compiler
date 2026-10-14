@@ -499,6 +499,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn captured_json_numbers_preserve_f64_bits() {
+        for decimal in [
+            "100.10010010010011",
+            "0.84551240822557006",
+            "-0.0",
+            "1e-320",
+            "9007199254740991",
+        ] {
+            let expected = decimal.parse::<f64>().unwrap();
+            let captured: Value = serde_json::from_str(decimal).unwrap();
+            assert_eq!(captured.as_f64().unwrap().to_bits(), expected.to_bits());
+            let frame = encode_value(&captured, false).unwrap();
+            // The transport stores Number as its exact little-endian f64.
+            assert_eq!(&frame[5..13], &expected.to_le_bytes());
+        }
+    }
+
+    #[test]
     fn values_preserve_convex_types_and_patch_deletions() {
         let value = json!({"a": [null, true, false, 1, 1.25, "text"],
             "bytes": {"$bytes": "AAEC"}, "integer": {"$integer": "//////////8="},

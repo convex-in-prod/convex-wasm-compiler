@@ -25,6 +25,7 @@ enum EngineVariant {
     EpochOnly,
     Unmetered,
     Inlined,
+    EagerTables,
 }
 
 impl EngineVariant {
@@ -35,15 +36,22 @@ impl EngineVariant {
             Self::EpochOnly => "epochs-only",
             Self::Unmetered => "unmetered",
             Self::Inlined => "fuel-and-epochs-inlined",
+            Self::EagerTables => "fuel-and-epochs-eager-tables",
         }
     }
 
     fn fuel(self) -> bool {
-        matches!(self, Self::Metered | Self::FuelOnly | Self::Inlined)
+        matches!(
+            self,
+            Self::Metered | Self::FuelOnly | Self::Inlined | Self::EagerTables
+        )
     }
 
     fn epochs(self) -> bool {
-        matches!(self, Self::Metered | Self::EpochOnly | Self::Inlined)
+        matches!(
+            self,
+            Self::Metered | Self::EpochOnly | Self::Inlined | Self::EagerTables
+        )
     }
 
     fn engine(self, perf_map: bool) -> Result<Engine, Error> {
@@ -51,6 +59,7 @@ impl EngineVariant {
         config
             .consume_fuel(self.fuel())
             .epoch_interruption(self.epochs())
+            .table_lazy_init(!matches!(self, Self::EagerTables))
             .compiler_inlining(if matches!(self, Self::Inlined) {
                 Inlining::Yes
             } else {
@@ -122,11 +131,15 @@ fn main() -> Result<(), Error> {
             arguments.remove(0);
             vec![EngineVariant::Metered, EngineVariant::Inlined]
         }
+        Some("--table-init-comparison") => {
+            arguments.remove(0);
+            vec![EngineVariant::Metered, EngineVariant::EagerTables]
+        }
         _ => vec![EngineVariant::Metered],
     };
     if !(2..=3).contains(&arguments.len()) {
         return Err(Error::msg(
-            "usage: convex-wasm-capability-replay [--metering-matrix | --inlining-comparison] TRACE.json BASELINE.wasm [CANDIDATE.wasm]",
+            "usage: convex-wasm-capability-replay [--metering-matrix | --inlining-comparison | --table-init-comparison] TRACE.json BASELINE.wasm [CANDIDATE.wasm]",
         ));
     }
     if variants.len() > 1 && arguments.len() != 2 {
@@ -323,9 +336,11 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
     use wasm_encoder::{
-        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-        Module as EncodedModule, TypeSection, ValType,
+        CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
+        FunctionSection, ImportSection, Instruction, Module as EncodedModule, RefType, TableType,
+        TypeSection, ValType,
     };
 
     fn call_module() -> Vec<u8> {
@@ -355,6 +370,95 @@ mod tests {
         module.finish()
     }
 
+    fn shared_table_module(value: i32) -> Vec<u8> {
+        let mut module = EncodedModule::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I32]);
+        types.ty().function([ValType::I32], [ValType::I32]);
+        module.section(&types);
+        let mut imports = ImportSection::new();
+        imports.import(
+            "env",
+            "table",
+            TableType {
+                element_type: RefType::FUNCREF,
+                minimum: 2,
+                maximum: Some(2),
+                table64: false,
+                shared: false,
+            },
+        );
+        module.section(&imports);
+        let mut functions = FunctionSection::new();
+        functions.function(0).function(1);
+        module.section(&functions);
+        let mut exports = ExportSection::new();
+        exports.export("call", ExportKind::Func, 1);
+        module.section(&exports);
+        let mut elements = ElementSection::new();
+        elements.active(
+            None,
+            &ConstExpr::i32_const(0),
+            Elements::Functions(Cow::Borrowed(&[0])),
+        );
+        module.section(&elements);
+        let mut code = CodeSection::new();
+        let mut leaf = Function::new([]);
+        leaf.instruction(&Instruction::I32Const(value))
+            .instruction(&Instruction::End);
+        code.function(&leaf);
+        let mut caller = Function::new([]);
+        caller
+            .instruction(&Instruction::LocalGet(0))
+            .instruction(&Instruction::CallIndirect {
+                type_index: 0,
+                table_index: 0,
+            })
+            .instruction(&Instruction::End);
+        code.function(&caller);
+        module.section(&code);
+        module.finish()
+    }
+
+    #[test]
+    fn table_initialization_preserves_shared_entries_and_traps() -> Result<(), Error> {
+        for variant in [EngineVariant::Metered, EngineVariant::EagerTables] {
+            let engine = variant.engine(false)?;
+            let mut store = Store::new(&engine, ());
+            store.set_fuel(1000)?;
+            store.set_epoch_deadline(1);
+            let table = wasmtime::Table::new(
+                &mut store,
+                wasmtime::TableType::new(wasmtime::RefType::FUNCREF, 2, Some(2)),
+                wasmtime::Ref::Func(None),
+            )?;
+            let first_module = Module::new(&engine, shared_table_module(21))?;
+            let first = Instance::new(&mut store, &first_module, &[table.into()])?;
+            let call = first.get_typed_func::<i32, i32>(&mut store, "call")?;
+            assert_eq!(call.call(&mut store, 0)?, 21);
+            for (index, trap) in [
+                (1, wasmtime::Trap::IndirectCallToNull),
+                (2, wasmtime::Trap::TableOutOfBounds),
+            ] {
+                let error = call.call(&mut store, index).unwrap_err();
+                assert_eq!(error.downcast_ref::<wasmtime::Trap>(), Some(&trap));
+            }
+            // A later module initializes the imported table and changes the
+            // earlier instance's dispatch target, including its callee context.
+            let second_module = Module::new(&engine, shared_table_module(42))?;
+            let _second = Instance::new(&mut store, &second_module, &[table.into()])?;
+            assert_eq!(call.call(&mut store, 0)?, 42);
+            let wrong_signature = wasmtime::Func::wrap(&mut store, |value: i32| value);
+            table.set(&mut store, 0, wasmtime::Ref::Func(Some(wrong_signature)))?;
+            let error = call.call(&mut store, 0).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::BadSignature)
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn engine_controls_preserve_results_and_fuel_charges() -> Result<(), Error> {
         let wasm = call_module();
@@ -365,6 +469,7 @@ mod tests {
             EngineVariant::EpochOnly,
             EngineVariant::Unmetered,
             EngineVariant::Inlined,
+            EngineVariant::EagerTables,
         ] {
             let engine = variant.engine(false)?;
             let module = Module::new(&engine, &wasm)?;
@@ -406,6 +511,7 @@ mod tests {
             EngineVariant::Metered,
             EngineVariant::EpochOnly,
             EngineVariant::Inlined,
+            EngineVariant::EagerTables,
         ] {
             let engine = variant.engine(false)?;
             let module = Module::new(&engine, &wasm)?;

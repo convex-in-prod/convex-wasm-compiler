@@ -836,17 +836,24 @@ SDK's absent-variable response. The guest must export `_initialize`,
 alternate retained instances in the same process. This optional diagnostic
 binary is built from source and is not included in portable release archives.
 
-Two optional modes compare engine settings on exactly one Core Wasm module:
+Optional modes compare engine settings on exactly one Core Wasm module:
 
 ```sh
 convex-wasm-capability-replay --metering-matrix trace.json baseline.wasm
 convex-wasm-capability-replay --inlining-comparison trace.json baseline.wasm
+convex-wasm-capability-replay --table-init-comparison trace.json baseline.wasm
 ```
 
 The metering matrix runs fuel plus epochs, fuel only, epochs only, and neither.
 These disabled-check variants are local diagnostic controls; the driver must
 enforce its external timeout. The inlining comparison keeps both checks enabled
 and compares Wasmtime's ordinary compilation with its existing Cranelift inliner.
+The table comparison keeps both checks enabled and inlining disabled, comparing
+the default lazy function-table initialization with eager initialization. It
+retains bounds, null and signature checks. Eager initialization moves work to
+instantiation, so warm handler timings alone cannot establish its net benefit.
+Shipping that setting also requires matching backend engine configuration:
+Wasmtime checks `table_lazy_init` when deserializing native AOT artifacts.
 Each variant has its own retained instance and the invocation order reverses on
 alternate iterations. `engineVariant` identifies the settings in each result;
 `fuelConsumed` is null when fuel is disabled. Outputs and trace consumption remain
@@ -858,8 +865,8 @@ collections. It converts a captured stream into a bulk result only when the
 capture includes an explicit end-of-query result. Partial streams remain streams.
 All expected reads, writes, outputs and entropy must be consumed, and writes
 cannot pass pending read completions. Unsupported capabilities, pending commit
-timestamps and pagination fail explicitly. The ordinary runner and inlining
-comparison enable fuel accounting and epoch interruption; an invocation has a
+timestamps and pagination fail explicitly. The ordinary runner, inlining and
+table comparisons enable fuel accounting and epoch interruption; an invocation has a
 bounded epoch deadline. Only the explicit metering matrix disables these checks.
 Async-operation and stream handles restart after invocation cleanup, matching
 the backend's retained-instance lifecycle. Opaque value handles retain their
