@@ -6,7 +6,7 @@ import { createReadStream, promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { emscriptenVersion, gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
+import { emscriptenVersion, gateRevisions, wasmtimeRepository } from "./lib/convex-wasm-gate-pins.mjs";
 import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
 import binaryenSource from "./vendor/binaryen/source.json" with { type: "json" };
 
@@ -201,17 +201,8 @@ async function fileIdentity(path) {
 
 export async function runnerInputSha256(crateDirectory = runnerCrate) {
   const hash = createHash("sha256");
-  // The runner shares WASI code and uses a local Cranelift dependency. Cargo.lock
-  // does not hash path dependencies, so their source must also invalidate the gate.
-  const vendorRoot = join(crateDirectory, "src", "vendor");
-  const vendorSources = [];
-  for (const entry of await fs.readdir(vendorRoot, { recursive: true, withFileTypes: true })) {
-    if (entry.isDirectory()) continue;
-    if (!entry.isFile()) throw new Error("Wasmtime runner vendor source must be a regular file");
-    const path = join(entry.parentPath, entry.name);
-    vendorSources.push(path.slice(vendorRoot.length + 1));
-  }
-  vendorSources.sort();
+  // Shared WASI source and the exact shared Wasmtime revision both invalidate
+  // the runner. Wasmtime and Cranelift no longer have local source overrides.
   for (const [name, path] of [
     ["Cargo.lock", join(crateDirectory, "Cargo.lock")],
     ["Cargo.toml", join(crateDirectory, "Cargo.toml")],
@@ -219,19 +210,19 @@ export async function runnerInputSha256(crateDirectory = runnerCrate) {
     ["runner.rs", join(crateDirectory, "src", "bin", `${runnerName}.rs`)],
     ["lib.rs", join(crateDirectory, "src", "lib.rs")],
     ["wasmtime_wasi.rs", join(crateDirectory, "src", "wasmtime_wasi.rs")],
-    ...vendorSources.map((name) => [`vendor/${name}`, join(vendorRoot, name)]),
   ]) {
     const bytes = await fs.readFile(path);
     if (name === "Cargo.lock") {
-      const expected = `git+https://github.com/bytecodealliance/wasmtime?rev=${gateRevisions.wasmtime}#${gateRevisions.wasmtime}`;
+      const expected = `git+${wasmtimeRepository}?rev=${gateRevisions.wasmtime}#${gateRevisions.wasmtime}`;
       const lock = bytes.toString("utf8");
-      const wasmtimePackages = lock.split("[[package]]").filter((section) =>
+      const sections = lock.split("[[package]]");
+      const wasmtimePackages = sections.filter((section) =>
         /^name = "wasmtime"$/mu.test(section)
       );
       const packageSource = wasmtimePackages[0]?.match(/^source = "([^"]+)"$/mu)?.[1];
-      const sources = [...lock.matchAll(
-        /^source = "(git\+https:\/\/github\.com\/bytecodealliance\/wasmtime\?rev=[^"]+)"$/gmu
-      )].map((match) => match[1]);
+      const sources = sections.filter((section) =>
+        /^name = "(?:wasmtime|cranelift|pulley)[^"]*"$/mu.test(section)
+      ).map((section) => section.match(/^source = "([^"]+)"$/mu)?.[1]);
       // Cargo --locked binds the manifest to this lockfile; every Wasmtime package must use the gate pin.
       if (
         wasmtimePackages.length !== 1 ||

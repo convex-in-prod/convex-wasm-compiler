@@ -1,3 +1,5 @@
+import { buildConvexWasmModuleGraphCoreArtifact } from "./convex-wasm-module-graph-build.mjs";
+import { normalizeEngineConfig, validatePrecompilerEngineRequest } from "./convex-wasm-engine-config.mjs";
 import {
   readStaticHermesPrecompileResponse,
 } from "./convex-wasm-static-hermes-precompile-protocol.mjs";
@@ -174,7 +176,6 @@ import {
   MODULE_GRAPH_SOURCE_PROVENANCE_KIND,
   moduleGraphRoleClass,
   moduleGraphRoles,
-  normalizeModuleGraphContract,
   normalizeModuleGraphCoreWasmInputs,
   normalizeModuleGraphHostAbi,
   normalizeModuleGraphModule,
@@ -217,7 +218,6 @@ import {
   moduleGraphAotMaterialStage,
   moduleGraphAotSchedulingStage,
   moduleGraphAotStage,
-  moduleGraphCoreMaterialStage,
   moduleGraphCoreStage,
   moduleGraphTopologyFromBuildInputs,
   normalizeModuleGraphBuildResult,
@@ -2205,28 +2205,6 @@ function normalizeCapabilitySharedCompilerIdentity(compiler) {
   return normalizeCompilerIdentityFields(compiler, false);
 }
 
-function normalizeEngineConfig(engineConfig, description) {
-  assertPlainObject(engineConfig, description);
-  assertExactKeys(
-    engineConfig,
-    new Set(["consumeFuel", "epochInterruption", "profilingStrategy", "wasmExceptions"]),
-    description
-  );
-  return {
-    consumeFuel: requireBoolean(engineConfig.consumeFuel, `${description}.consumeFuel`),
-    epochInterruption: requireBoolean(
-      engineConfig.epochInterruption,
-      `${description}.epochInterruption`
-    ),
-    profilingStrategy: requireEnum(
-      engineConfig.profilingStrategy,
-      new Set(["perf-map"]),
-      `${description}.profilingStrategy`
-    ),
-    wasmExceptions: requireBoolean(engineConfig.wasmExceptions, `${description}.wasmExceptions`),
-  };
-}
-
 async function loadAndBindPackagedPrecompiler(
   rawOptions,
   environment,
@@ -2344,16 +2322,9 @@ async function loadAndBindPackagedPrecompiler(
     const manifest = precompilerPackage.manifest;
     // Package admission verifies the executable's host. The requested target describes
     // its output and may differ; backend readiness verifies that output can be loaded.
-    const expectedEngineContract = {
-      ...engineConfig,
-      engineIdentityKind: ENGINE_IDENTITY_KIND,
-      targetCpu: target.cpu,
-    };
-    if (
-      manifest.identities.wasmtime.revision !== revision ||
-      canonicalJson(manifest.engineContract) !== canonicalJson(expectedEngineContract)
-    ) {
-      fail("precompiler package does not match the configured engine or Wasmtime revision");
+    validatePrecompilerEngineRequest(engineConfig, manifest.engineContract, target.cpu);
+    if (manifest.identities.wasmtime.revision !== revision) {
+      fail("precompiler package does not match the configured Wasmtime revision");
     }
     const packageIdentity = precompilerPackageMaterialIdentity(manifest);
     return {
@@ -9839,7 +9810,7 @@ function wasmContractReadDylink(bytes, sectionFirst) {
   };
 }
 
-function parseConvexWasmModuleGraphCoreWasm(bytes, role, engineCompatibilitySha256) {
+function parseConvexWasmModuleGraphCoreWasm(bytes, role) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 8) fail(`${role} Core Wasm is truncated`);
   if (!bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) {
     fail(`${role} Core Wasm has an invalid header`);
@@ -9935,14 +9906,13 @@ function parseConvexWasmModuleGraphCoreWasm(bytes, role, engineCompatibilitySha2
   });
   const contractPayload = {
     authority: {
-      engineCompatibilitySha256,
       inspectionSha256: fingerprintJson({
         coreWasmSha256: hashBytes(bytes),
         dylink: { first: dylink.first, sha256: dylink.sha256, weakImports: dylink.weakImports },
         exports,
         imports,
       }),
-      kind: "convex-wasm-wasmtime-module-contract-v1",
+      kind: "convex-wasm-core-module-contract-v1",
     },
     dylink: { first: true, sha256: dylink.sha256, weakImports: dylink.weakImports },
     exports,
@@ -9970,11 +9940,7 @@ function parseConvexWasmModuleGraphCoreWasm(bytes, role, engineCompatibilitySha2
   };
 }
 
-export async function inspectConvexWasmModuleGraphCoreWasm({
-  engineCompatibilitySha256,
-  path,
-  role,
-}) {
+export async function inspectConvexWasmModuleGraphCoreWasm({ path, role }) {
   const normalizedRole = requireString(role, "Core Wasm role");
   moduleGraphRoleClass(normalizedRole);
   const bytes = await readPrivateRegularFile(
@@ -9982,28 +9948,19 @@ export async function inspectConvexWasmModuleGraphCoreWasm({
     MAX_CORE_WASM_BYTES,
     `${normalizedRole} Core Wasm`
   );
-  return parseConvexWasmModuleGraphCoreWasm(
-    bytes,
-    normalizedRole,
-    requireSha256(engineCompatibilitySha256, "Core Wasm engine compatibility SHA-256")
-  );
+  return parseConvexWasmModuleGraphCoreWasm(bytes, normalizedRole);
 }
 
-async function inspectModuleGraphPrelink({ engineCompatibilitySha256, prelink, role }) {
+async function inspectModuleGraphPrelink({ prelink, role }) {
   const normalizedRole = requireString(role, "Core Wasm role");
   moduleGraphRoleClass(normalizedRole);
-  const normalizedEngineCompatibilitySha256 = requireSha256(
-    engineCompatibilitySha256,
-    "Core Wasm engine compatibility SHA-256"
-  );
   if (prelink.report.cache === "hit") {
     return parseConvexWasmModuleGraphCoreWasm(
       consumeAuthenticatedCacheArtifactBytes(
         prelink.entry,
         `${normalizedRole} module graph prelink`
       ),
-      normalizedRole,
-      normalizedEngineCompatibilitySha256
+      normalizedRole
     );
   }
   if (prelink.report.cache !== "miss") {
@@ -10031,11 +9988,7 @@ async function inspectModuleGraphPrelink({ engineCompatibilitySha256, prelink, r
   if (bytes.length !== expectedArtifactSize || hashBytes(bytes) !== expectedArtifactSha256) {
     fail(`${normalizedRole} module graph prelink changed after publication`);
   }
-  return parseConvexWasmModuleGraphCoreWasm(
-    bytes,
-    normalizedRole,
-    normalizedEngineCompatibilitySha256
-  );
+  return parseConvexWasmModuleGraphCoreWasm(bytes, normalizedRole);
 }
 
 // Both logical units have passed the fixed-shape descriptor validator above. Compare their
@@ -10247,110 +10200,21 @@ async function buildConvexWasmModuleGraphModuleArtifacts({
   routing,
   toolchain,
 }) {
-  const coreIdentity = nativeStageIdentity({
-    contract: module.contract,
-    kind: "convex-wasm-module-graph-core-wasm-identity-v1",
-    layout: module.layout,
-    link: module.link,
-    objectCompilation: module.objectCompilation,
-    ownership: module.ownership,
-    pipelineKind: PIPELINE_KIND,
-    providers: module.providers,
-    role: module.role,
-    ...(module.sharedShardSha256 === undefined
-      ? {}
-      : { sharedShardSha256: module.sharedShardSha256 }),
-    ...(module.role === MODULE_GRAPH_LEAF_ROLE
-      ? { leafInvalidation, leafInvalidationSha256, routing }
-      : {}),
-    sourceProvenance: module.sourceProvenance,
-    toolchain: {
-      core: toolchain.core,
-      staticHermesCBundleMemberCompilation: toolchain.staticHermesCBundleMemberCompilation,
-    },
-  });
-  const coreMaterialIdentity =
-    coreWasmInput === undefined
-      ? undefined
-      : nativeStageIdentity({
-          contract: module.contract,
-          coreWasmInput,
-          kind: "convex-wasm-module-graph-core-wasm-material-identity-v1",
-          link: module.link,
-          objectCompilation: module.objectCompilation,
-          ownership: module.ownership,
-          pipelineKind: PIPELINE_KIND,
-          providers: module.providers,
-          ...(module.sharedShardSha256 === undefined
-            ? {}
-            : { sharedShardSha256: module.sharedShardSha256 }),
-          toolchain: {
-            core: toolchain.core,
-            staticHermesCBundleMemberCompilation: toolchain.staticHermesCBundleMemberCompilation,
-          },
-        });
-  const buildCoreWasmArtifact = async (workPath, identity, controlIdentity) => {
-    const built = normalizeModuleGraphBuildResult(
-      await buildCoreWasm({
-        ...(controlIdentity === undefined ? {} : { controlIdentity }),
-        identity,
-        module,
-        workPath,
-      }),
-      module.role,
-      "Core Wasm",
-      workPath
-    );
-    const authenticatedContract = normalizeModuleGraphContract(
-      built.contract,
-      module.role,
-      engine.compatibilitySha256
-    );
-    if (authenticatedContract.contractSha256 !== module.contract.contractSha256) {
-      fail(`${module.role} module Core Wasm changed its authenticated Wasmtime contract`);
-    }
-    return {
-      metadata: { contract: authenticatedContract },
-      outputPath: built.outputPath,
-      timing: built.timing,
-    };
-  };
-  const coreWasm =
-    coreWasmInput === undefined
-      ? await ensureArtifactStage({
-          build: async (workPath) => await buildCoreWasmArtifact(workPath, coreIdentity),
-          cacheLayout,
-          cacheRoot,
-          extension: "wasm",
-          identity: coreIdentity,
-          immutableCacheValidationMemo,
-          maxArtifactBytes: limits.wasmBytes,
-          previousIdentity: undefined,
-          stage: moduleGraphCoreStage(module.role),
-        })
-      : await ensureArtifactControlStageFromMaterial({
-          build: async (workPath) =>
-            await buildCoreWasmArtifact(workPath, coreMaterialIdentity, coreIdentity),
-          cacheLayout,
-          cacheRoot,
-          extension: "wasm",
-          identity: coreIdentity,
-          immutableCacheValidationMemo,
-          materialIdentity: coreMaterialIdentity,
-          materialStage: moduleGraphCoreMaterialStage(),
-          maxArtifactBytes: limits.wasmBytes,
-          moduleGraphPackagePayloadValidationScope,
-          previousIdentity: undefined,
-          stage: moduleGraphCoreStage(module.role),
-        });
-  requireExactPlainObject(
-    coreWasm.entry.metadata,
-    ["contract"],
-    `${module.role} cached Core Wasm metadata`
-  );
-  if (coreWasm.entry.metadata.contract.contractSha256 !== module.contract.contractSha256) {
-    fail(`${module.role} cached Core Wasm contract does not match its graph identity`);
-  }
+  const { coreIdentity, coreWasm } = await buildConvexWasmModuleGraphCoreArtifact({
+    buildCoreWasm,
+    cacheLayout,
+    cacheRoot,
+    coreWasmInput,
+    immutableCacheValidationMemo,
+    leafInvalidation,
+    leafInvalidationSha256,
+    legacyEngineCompatibilitySha256: engine.compatibilitySha256,
+    limits,
+    module,
+    moduleGraphPackagePayloadValidationScope,
+    routing,
+    toolchain,
+  }, { ensureArtifactStage, ensureArtifactControlStageFromMaterial });
   const aotIdentity = nativeStageIdentity({
     coreWasm: {
       cacheKey: coreWasm.report.cacheKey,
@@ -19989,7 +19853,6 @@ async function buildModuleGraphBaseArtifacts({
   cacheLayout,
   cacheRoot,
   compilerOutput,
-  engineCompatibilitySha256,
   ensureRetainedPrecompilerPath,
   formatterEntry,
   materialVerificationFlights,
@@ -20084,7 +19947,6 @@ async function buildModuleGraphBaseArtifacts({
     materialVerificationFlights,
   });
   const baseInspection = await inspectModuleGraphPrelink({
-    engineCompatibilitySha256,
     prelink: basePrelink,
     role: MODULE_GRAPH_BASE_ROLE,
   });
@@ -20225,7 +20087,6 @@ function startModuleGraphBaseArtifactsPreactivation({
         cacheLayout,
         cacheRoot,
         compilerOutput,
-        engineCompatibilitySha256: compilerOutput.engine.compatibilitySha256,
         // Session finalization drains this preactivation before removing its retained binary.
         ensureRetainedPrecompilerPath: async (output) =>
           currentModuleGraphCompilerOutputRetainedPrecompilerMaterial(output)?.path,
@@ -20373,6 +20234,9 @@ function moduleGraphPrecompileCommand(options) {
       options.toolchain.wasmtime.target.triple,
       "--target-cpu",
       options.toolchain.wasmtime.target.cpu,
+      ...(options.toolchain.wasmtime.engineConfig.fuelEpochPollInterval === undefined
+        ? []
+        : ["--fuel-epoch-poll-interval", String(options.toolchain.wasmtime.engineConfig.fuelEpochPollInterval)]),
     ],
   };
 }
@@ -20947,7 +20811,6 @@ async function buildModuleGraphSharedShardArtifacts({
         role: sharedShard.role,
       });
       const inspection = await inspectModuleGraphPrelink({
-        engineCompatibilitySha256: engine.compatibilitySha256,
         prelink,
         role: sharedShard.role,
       });
@@ -23037,7 +22900,6 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
         role: "leaf",
       });
       const leafInspection = await inspectModuleGraphPrelink({
-        engineCompatibilitySha256: engine.compatibilitySha256,
         prelink: leafPrelink,
         role: "leaf",
       });
@@ -23212,7 +23074,6 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
         cacheLayout,
         cacheRoot,
         compilerOutput,
-        engineCompatibilitySha256: engine.compatibilitySha256,
         ensureRetainedPrecompilerPath,
         formatterEntry,
         materialVerificationFlights,

@@ -5,8 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
+import { buildConvexWasmModuleGraphPackage as buildPipelineModuleGraphPackage } from "./convex-wasm-artifact-pipeline.mjs";
 import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import {
+  buildConvexWasmModuleGraphCoreArtifact,
   buildConvexWasmModuleGraphModuleArtifacts,
   buildConvexWasmModuleGraphPackage,
 } from "./convex-wasm-module-graph-build.mjs";
@@ -154,18 +156,22 @@ test("module-graph artifacts reuse material while separating compiler packages",
     packagePath,
   });
   const manifest = verified.graphManifest;
-  const module = manifest.modules.at(-1);
+  const module = structuredClone(manifest.modules.at(-1));
+  delete module.contract.authority.engineCompatibilitySha256;
+  module.contract.authority.kind = "convex-wasm-core-module-contract-v1";
+  delete module.contract.contractSha256;
+  module.contract.contractSha256 = fingerprintJson(module.contract);
   let coreBuilds = 0;
   let aotBuilds = 0;
   const options = {
-    async buildAot({ coreWasm, workPath }) {
+    async buildAot({ coreWasm, identity, workPath }) {
       aotBuilds += 1;
       const outputPath = join(workPath, "leaf.cwasm");
       await fs.writeFile(outputPath, `aot:${await fs.readFile(coreWasm.path, "utf8")}`);
       return {
         engineIdentity: {
-          engineCompatibilitySha256: manifest.engine.compatibilitySha256,
-          engineConfig: manifest.engine.config,
+          engineCompatibilitySha256: identity.engine.compatibilitySha256,
+          engineConfig: identity.engine.config,
           kind: "convex-wasm-wasmtime-engine-identity",
           target: manifest.engine.target,
         },
@@ -190,7 +196,19 @@ test("module-graph artifacts reuse material while separating compiler packages",
     routing: manifest.routing,
     toolchain: manifest.toolchain,
   };
+  const { buildAot, engine, ...coreOptions } = options;
+  const coreOnly = await buildConvexWasmModuleGraphCoreArtifact({
+    ...coreOptions,
+    limits: { wasmBytes: 1024 },
+    toolchain: {
+      core: manifest.toolchain.core,
+      staticHermesCBundleMemberCompilation: manifest.toolchain.staticHermesCBundleMemberCompilation,
+    },
+  });
+  assert.equal(coreBuilds, 1);
+  assert.equal(aotBuilds, 0);
   const first = await buildConvexWasmModuleGraphModuleArtifacts(options);
+  assert.equal(first.coreWasm.report.cacheKey, coreOnly.coreWasm.report.cacheKey);
   const second = await buildConvexWasmModuleGraphModuleArtifacts({
     ...options,
     leafInvalidation: { changed: true },
@@ -217,77 +235,131 @@ test("module-graph artifacts reuse material while separating compiler packages",
   await buildConvexWasmModuleGraphModuleArtifacts(options);
   assert.equal(coreBuilds, 1);
   assert.equal(aotBuilds, 2);
+
+  const config = { ...manifest.engine.config, fuelEpochPollInterval: 100_000 };
+  const nativeMode = {
+    ...options,
+    engine: {
+      ...manifest.engine,
+      config,
+      configurationSha256: fingerprintJson(config),
+      compatibilitySha256: "b".repeat(64),
+    },
+  };
+  const polling = await buildConvexWasmModuleGraphModuleArtifacts(nativeMode);
+  assert.equal(coreBuilds, 1);
+  assert.equal(aotBuilds, 3);
+  assert.equal(polling.coreWasm.report.cacheKey, first.coreWasm.report.cacheKey);
+  assert.notEqual(polling.aot.report.cacheKey, first.aot.report.cacheKey);
+  await buildConvexWasmModuleGraphModuleArtifacts(nativeMode);
+  await buildConvexWasmModuleGraphModuleArtifacts(options);
+  assert.equal(coreBuilds, 1);
+  assert.equal(aotBuilds, 3);
 });
 
-test("constructs and authenticates a module-graph package from generic build callbacks", async (context) => {
-  const { cacheLayout, cacheRoot, graph, packagePath } = await materializeFixture(context);
-  const input = await loadAndVerifyConvexWasmModuleGraphPackage({
-    cacheLayout,
-    cacheRoot,
-    graphManifestSha256: graph.graphManifestSha256,
-    packagePath,
-  });
-  const manifest = input.graphManifest;
-  const buildCacheRoot = join(cacheRoot, "build-cache");
-  const buildCacheLayout = deriveConvexWasmCacheLayout({
-    buildId: "package-build",
-    cacheRoot: buildCacheRoot,
-    repositoryRoot: cacheRoot,
-    scope: "isolated-test",
-  });
-  let coreBuilds = 0;
-  let aotBuilds = 0;
-  const options = {
-    artifactLimits: { aotBytes: 1024, wasmBytes: 1024 },
-    async buildAot({ coreWasm, module, workPath }) {
-      aotBuilds += 1;
-      const outputPath = join(workPath, `${module.role}.cwasm`);
-      await fs.writeFile(outputPath, `aot:${module.role}:${await fs.readFile(coreWasm.path, "utf8")}`);
-      return {
-        engineIdentity: {
-          engineCompatibilitySha256: manifest.engine.compatibilitySha256,
-          engineConfig: manifest.engine.config,
-          kind: "convex-wasm-wasmtime-engine-identity",
-          target: manifest.engine.target,
+for (const [builder, buildPackage] of [["generic", buildConvexWasmModuleGraphPackage], ["pipeline", buildPipelineModuleGraphPackage]]) {
+  for (const portable of [false, true]) {
+    test(`${builder} constructs and authenticates a module-graph package with ${portable ? "portable" : "legacy"} Core contracts`, async (context) => {
+      const { cacheLayout, cacheRoot, graph, packagePath } = await materializeFixture(context);
+      const input = await loadAndVerifyConvexWasmModuleGraphPackage({
+        cacheLayout,
+        cacheRoot,
+        graphManifestSha256: graph.graphManifestSha256,
+        packagePath,
+      });
+      const manifest = input.graphManifest;
+      const modules = manifest.modules.map((module) => structuredClone(module));
+      if (portable) {
+        for (const module of modules) {
+          delete module.contract.authority.engineCompatibilitySha256;
+          module.contract.authority.kind = "convex-wasm-core-module-contract-v1";
+          delete module.contract.contractSha256;
+          module.contract.contractSha256 = fingerprintJson(module.contract);
+        }
+      }
+      const buildCacheRoot = join(cacheRoot, "build-cache");
+      const buildCacheLayout = deriveConvexWasmCacheLayout({
+        buildId: "package-build",
+        cacheRoot: buildCacheRoot,
+        repositoryRoot: cacheRoot,
+        scope: "isolated-test",
+      });
+      let coreBuilds = 0;
+      let aotBuilds = 0;
+      const options = {
+        artifactLimits: { aotBytes: 1024, wasmBytes: 1024 },
+        async buildAot({ coreWasm, identity, module, workPath }) {
+          aotBuilds += 1;
+          const outputPath = join(workPath, `${module.role}.cwasm`);
+          await fs.writeFile(outputPath, `aot:${module.role}:${await fs.readFile(coreWasm.path, "utf8")}`);
+          return {
+            engineIdentity: {
+              engineCompatibilitySha256: identity.engine.compatibilitySha256,
+              engineConfig: identity.engine.config,
+              kind: "convex-wasm-wasmtime-engine-identity",
+              target: manifest.engine.target,
+            },
+            outputPath,
+            timing: null,
+          };
         },
-        outputPath,
-        timing: null,
+        async buildCoreWasm({ module, workPath }) {
+          coreBuilds += 1;
+          const outputPath = join(workPath, `${module.role}.wasm`);
+          await fs.writeFile(outputPath, `wasm:${module.role}`);
+          return { contract: module.contract, outputPath, timing: null };
+        },
+        cacheLayout: buildCacheLayout,
+        cacheRoot: buildCacheRoot,
+        concurrency: 2,
+        launchPolicy: { aggregateMemoryMaxBytes: 1024 * 1024, aotWorkers: 1, jobs: 2 },
+        contextReuseAnalysisIdentity: manifest.contextReuseAnalysis,
+        engine: manifest.engine,
+        hostAbi: manifest.hostAbi,
+        initialization: (({ finalMemoryCursor: _memory, finalTableCursor: _table, ...input }) => input)(
+          manifest.initialization
+        ),
+        modules: modules.map(({ artifacts: _artifacts, ...module }) => module),
+        producerIdentity: input.provenance.producerIdentity,
+        routing: manifest.routing,
+        toolchain: manifest.toolchain,
       };
-    },
-    async buildCoreWasm({ module, workPath }) {
-      coreBuilds += 1;
-      const outputPath = join(workPath, `${module.role}.wasm`);
-      await fs.writeFile(outputPath, `wasm:${module.role}`);
-      return { contract: module.contract, outputPath, timing: null };
-    },
-    cacheLayout: buildCacheLayout,
-    cacheRoot: buildCacheRoot,
-    concurrency: 2,
-    contextReuseAnalysisIdentity: manifest.contextReuseAnalysis,
-    engine: manifest.engine,
-    hostAbi: manifest.hostAbi,
-    initialization: (({ finalMemoryCursor: _memory, finalTableCursor: _table, ...input }) => input)(
-      manifest.initialization
-    ),
-    modules: manifest.modules.map(({ artifacts: _artifacts, ...module }) => module),
-    producerIdentity: input.provenance.producerIdentity,
-    routing: manifest.routing,
-    toolchain: manifest.toolchain,
-  };
-  const first = await buildConvexWasmModuleGraphPackage(options);
-  assert.equal(coreBuilds, manifest.modules.length);
-  assert.equal(aotBuilds, manifest.modules.length);
-  assert.equal(first.buildReport.package.cache, "miss");
-  const independentlyVerified = await loadAndVerifyConvexWasmModuleGraphPackage({
-    cacheLayout: buildCacheLayout,
-    cacheRoot: buildCacheRoot,
-    graphManifestSha256: first.graphManifest.graphManifestSha256,
-    packagePath: first.package.path,
-  });
-  assert.equal(independentlyVerified.graphManifest.graphManifestSha256, first.graphManifest.graphManifestSha256);
-  await first.verifyMaterials(createConvexWasmModuleGraphPackageValidationScope());
-  const second = await buildConvexWasmModuleGraphPackage(options);
-  assert.equal(second.buildReport.package.cache, "hit");
-  assert.equal(coreBuilds, manifest.modules.length);
-  assert.equal(aotBuilds, manifest.modules.length);
-});
+      const first = await buildPackage(options);
+      assert.equal(coreBuilds, manifest.modules.length);
+      assert.equal(aotBuilds, manifest.modules.length);
+      assert.equal(first.buildReport.package.cache, "miss");
+      const independentlyVerified = await loadAndVerifyConvexWasmModuleGraphPackage({
+        cacheLayout: buildCacheLayout,
+        cacheRoot: buildCacheRoot,
+        graphManifestSha256: first.graphManifest.graphManifestSha256,
+        packagePath: first.package.path,
+      });
+      assert.equal(independentlyVerified.graphManifest.graphManifestSha256, first.graphManifest.graphManifestSha256);
+      await first.verifyMaterials(createConvexWasmModuleGraphPackageValidationScope());
+      const second = await buildPackage(options);
+      assert.equal(second.buildReport.package.cache, "hit");
+      assert.equal(coreBuilds, manifest.modules.length);
+      assert.equal(aotBuilds, manifest.modules.length);
+      if (portable) {
+        const config = { ...manifest.engine.config, fuelEpochPollInterval: 100_000 };
+        const polling = await buildPackage({
+          ...options,
+          engine: {
+            ...manifest.engine,
+            config,
+            configurationSha256: fingerprintJson(config),
+            compatibilitySha256: "b".repeat(64),
+          },
+        });
+        assert.equal(coreBuilds, manifest.modules.length);
+        assert.equal(aotBuilds, 2 * manifest.modules.length);
+        assert.notEqual(polling.graphManifest.graphManifestSha256, first.graphManifest.graphManifestSha256);
+        for (let index = 0; index < manifest.modules.length; index += 1) {
+          assert.deepEqual(polling.graphManifest.modules[index].artifacts.coreWasm, first.graphManifest.modules[index].artifacts.coreWasm);
+          assert.notEqual(polling.graphManifest.modules[index].artifacts.aot.cacheKey, first.graphManifest.modules[index].artifacts.aot.cacheKey);
+        }
+        await polling.verifyMaterials(createConvexWasmModuleGraphPackageValidationScope());
+      }
+    });
+  }
+}

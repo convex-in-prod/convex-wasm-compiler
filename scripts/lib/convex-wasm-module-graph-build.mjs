@@ -101,21 +101,22 @@ async function buildConvexWasmModuleGraphAotMaterial({
   };
 }
 
-export async function buildConvexWasmModuleGraphModuleArtifacts({
-  buildAot,
+export async function buildConvexWasmModuleGraphCoreArtifact({
   buildCoreWasm,
   cacheLayout,
   cacheRoot,
   coreWasmInput,
-  engine,
+  legacyEngineCompatibilitySha256,
   immutableCacheValidationMemo,
   leafInvalidation,
   leafInvalidationSha256,
   limits,
   module,
+  moduleGraphPackagePayloadValidationScope,
   routing,
   toolchain,
-}) {
+}, artifactStages = { ensureArtifactStage, ensureArtifactControlStageFromMaterial }) {
+  normalizeModuleGraphContract(module.contract, module.role, legacyEngineCompatibilitySha256);
   const coreIdentity = nativeStageIdentity({
     contract: module.contract,
     kind: "convex-wasm-module-graph-core-wasm-identity-v1",
@@ -173,10 +174,10 @@ export async function buildConvexWasmModuleGraphModuleArtifacts({
     const authenticatedContract = normalizeModuleGraphContract(
       built.contract,
       module.role,
-      engine.compatibilitySha256
+      legacyEngineCompatibilitySha256
     );
     if (authenticatedContract.contractSha256 !== module.contract.contractSha256) {
-      fail(`${module.role} module Core Wasm changed its authenticated Wasmtime contract`);
+      fail(`${module.role} module Core Wasm changed its authenticated Core Wasm contract`);
     }
     return {
       metadata: { contract: authenticatedContract },
@@ -186,7 +187,7 @@ export async function buildConvexWasmModuleGraphModuleArtifacts({
   };
   const coreWasm =
     coreWasmInput === undefined
-      ? await ensureArtifactStage({
+      ? await artifactStages.ensureArtifactStage({
           build: async (workPath) => await buildCoreWasmArtifact(workPath, coreIdentity),
           cacheLayout,
           cacheRoot,
@@ -197,7 +198,7 @@ export async function buildConvexWasmModuleGraphModuleArtifacts({
           previousIdentity: undefined,
           stage: moduleGraphCoreStage(module.role),
         })
-      : await ensureArtifactControlStageFromMaterial({
+      : await artifactStages.ensureArtifactControlStageFromMaterial({
           build: async (workPath) =>
             await buildCoreWasmArtifact(workPath, coreMaterialIdentity, coreIdentity),
           cacheLayout,
@@ -208,6 +209,7 @@ export async function buildConvexWasmModuleGraphModuleArtifacts({
           materialIdentity: coreMaterialIdentity,
           materialStage: moduleGraphCoreMaterialStage(),
           maxArtifactBytes: limits.wasmBytes,
+          moduleGraphPackagePayloadValidationScope,
           previousIdentity: undefined,
           stage: moduleGraphCoreStage(module.role),
         });
@@ -219,6 +221,38 @@ export async function buildConvexWasmModuleGraphModuleArtifacts({
   if (coreWasm.entry.metadata.contract.contractSha256 !== module.contract.contractSha256) {
     fail(`${module.role} cached Core Wasm contract does not match its graph identity`);
   }
+  return { coreIdentity, coreWasm, ...module };
+}
+
+export async function buildConvexWasmModuleGraphModuleArtifacts({
+  buildAot,
+  buildCoreWasm,
+  cacheLayout,
+  cacheRoot,
+  coreWasmInput,
+  engine,
+  immutableCacheValidationMemo,
+  leafInvalidation,
+  leafInvalidationSha256,
+  limits,
+  module,
+  routing,
+  toolchain,
+}) {
+  const { coreIdentity, coreWasm } = await buildConvexWasmModuleGraphCoreArtifact({
+    buildCoreWasm,
+    cacheLayout,
+    cacheRoot,
+    coreWasmInput,
+    immutableCacheValidationMemo,
+    leafInvalidation,
+    leafInvalidationSha256,
+    legacyEngineCompatibilitySha256: engine.compatibilitySha256,
+    limits,
+    module,
+    routing,
+    toolchain,
+  });
   const aotIdentity = nativeStageIdentity({
     coreWasm: {
       cacheKey: coreWasm.report.cacheKey,

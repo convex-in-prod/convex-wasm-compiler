@@ -139,6 +139,7 @@
     "scripts/lib/convex-wasm-dependency-adapters.mjs",
     "scripts/lib/convex-wasm-deployment-artifact-semantics.mjs",
     "scripts/lib/convex-wasm-deployment-graph.mjs",
+    "scripts/lib/convex-wasm-engine-config.mjs",
     "scripts/lib/convex-wasm-frozen-graph-authority.mjs",
     "scripts/lib/convex-wasm-function-specialization.mjs",
     "scripts/lib/convex-wasm-gate-pins.mjs",

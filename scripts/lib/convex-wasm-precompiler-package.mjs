@@ -14,6 +14,11 @@ export const precompilerPackageBinaryRelativePath = "bin/convex-wasm-precompiler
 export const precompilerPackageKind = "convex-wasm-precompiler-package";
 export const precompilerPackageManifestName = "manifest.json";
 export const precompilerPackageSchemaVersion = 1;
+// Existing verified packages retain their upstream source identity.
+export const precompilerWasmtimeRepositories = Object.freeze([
+  "https://github.com/bytecodealliance/wasmtime",
+  "https://github.com/convex-in-prod/wasmtime",
+]);
 
 const MAX_BINARY_BYTES = 512 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -128,7 +133,7 @@ function validateToolchain(toolchain, sourceMaterials) {
 function validateWasmtimeIdentity(wasmtime, sourceMaterials) {
   assertExactKeys(wasmtime, ["features", "git", "lockedPackages", "revision"], "Wasmtime identity");
   if (
-    wasmtime.git !== "https://github.com/bytecodealliance/wasmtime" ||
+    !precompilerWasmtimeRepositories.includes(wasmtime.git) ||
     !GIT_REVISION_PATTERN.test(wasmtime.revision)
   ) {
     fail("Wasmtime repository or revision does not match the package contract");
@@ -235,6 +240,7 @@ function validatePayload(payload) {
       "consumeFuel",
       "engineIdentityKind",
       "epochInterruption",
+      ...(Object.hasOwn(payload.engineContract, "fuelEpochPolling") ? ["fuelEpochPolling"] : []),
       "profilingStrategy",
       "targetCpu",
       "wasmExceptions",
@@ -242,6 +248,7 @@ function validatePayload(payload) {
     "engine contract"
   );
   if (
+    (Object.hasOwn(payload.engineContract, "fuelEpochPolling") && payload.engineContract.fuelEpochPolling !== true) ||
     payload.engineContract.consumeFuel !== true ||
     payload.engineContract.engineIdentityKind !== "convex-wasm-wasmtime-engine-identity" ||
     payload.engineContract.epochInterruption !== true ||

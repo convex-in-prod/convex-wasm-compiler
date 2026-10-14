@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
+import { gateRevisions, wasmtimeRepository } from "./lib/convex-wasm-gate-pins.mjs";
 import {
   binaryenHelperNames, binaryenInputSha256, binaryenStatus,
   runnerInputSha256, verifyBinaryenSource, verifyStaticHermesHostCompilerImport,
@@ -37,18 +37,16 @@ test("imported host compilers accept aliases of the same file but reject other b
   await assert.rejects(verifyStaticHermesHostCompilerImport(wasm, host), /without imported host compilers/u);
 });
 
-test("runner freshness covers shared WASI and vendored compiler sources", async (t) => {
+test("runner freshness covers shared WASI and the shared Wasmtime revision", async (t) => {
   const crate = await fs.mkdtemp(join(tmpdir(), "wasm-runner-inputs-"));
   t.after(() => fs.rm(crate, { recursive: true, force: true }));
   const files = {
-    "Cargo.lock": `[[package]]\nname = "wasmtime"\nsource = "git+https://github.com/bytecodealliance/wasmtime?rev=${gateRevisions.wasmtime}#${gateRevisions.wasmtime}"\n`,
+    "Cargo.lock": `[[package]]\nname = "wasmtime"\nsource = "git+${wasmtimeRepository}?rev=${gateRevisions.wasmtime}#${gateRevisions.wasmtime}"\n`,
     "Cargo.toml": "[package]\nname = 'runner'\n",
     "rust-toolchain.toml": "[toolchain]\nchannel = 'nightly'\n",
     "src/bin/convex-wasm-wasmtime-runner.rs": "fn main() {}\n",
     "src/lib.rs": "pub fn shared() {}\n",
     "src/wasmtime_wasi.rs": "pub fn imports() {}\n",
-    "src/vendor/frontend/Cargo.toml": "[package]\nname = 'frontend'\n",
-    "src/vendor/frontend/src/lib.rs": "pub fn compile() {}\n",
   };
   for (const [path, source] of Object.entries(files)) {
     const file = join(crate, path);
@@ -59,23 +57,23 @@ test("runner freshness covers shared WASI and vendored compiler sources", async 
   for (const path of [
     "src/lib.rs",
     "src/wasmtime_wasi.rs",
-    "src/vendor/frontend/Cargo.toml",
-    "src/vendor/frontend/src/lib.rs",
   ]) {
     await fs.appendFile(join(crate, path), "// changed\n");
     assert.notEqual(await runnerInputSha256(crate), baseline, path);
     await fs.writeFile(join(crate, path), files[path]);
     assert.equal(await runnerInputSha256(crate), baseline);
   }
-  const added = join(crate, "src/vendor/frontend/src/added.rs");
-  await fs.writeFile(added, "pub fn added() {}\n");
-  assert.notEqual(await runnerInputSha256(crate), baseline);
-  await fs.unlink(added);
   await fs.mkdir(join(crate, "target"));
   await fs.writeFile(join(crate, "target/intermediate"), "unrelated build output");
   assert.equal(await runnerInputSha256(crate), baseline);
-  await fs.symlink(join(crate, "src/wasmtime_wasi.rs"), added);
-  await assert.rejects(runnerInputSha256(crate), /vendor source must be a regular file/u);
+  for (const replacement of [
+    `[[package]]\nname = "wasmtime-internal-cranelift"\nsource = "git+${wasmtimeRepository}?rev=${"0".repeat(40)}#${"0".repeat(40)}"\n`,
+    '[[package]]\nname = "cranelift-frontend"\nversion = "0.137.0-dev"\n',
+    '[[package]]\nname = "wasmtime-environ"\nsource = "git+https://github.com/example/wasmtime?rev=other#other"\n',
+  ]) {
+    await fs.writeFile(join(crate, "Cargo.lock"), files["Cargo.lock"] + replacement);
+    await assert.rejects(runnerInputSha256(crate), /differs from the pinned gate revision/u);
+  }
 });
 
 test("Binaryen recipe authenticates patches and invalidates changed build inputs", async (t) => {

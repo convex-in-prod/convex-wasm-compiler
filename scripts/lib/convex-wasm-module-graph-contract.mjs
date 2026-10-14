@@ -128,7 +128,7 @@ function normalizeModuleGraphExternal(value, imported, index, description) {
     description
   );
   if (value.index !== index) {
-    fail(`${description}.index must preserve the exact Wasmtime contract order`);
+    fail(`${description}.index must preserve the exact Core Wasm contract order`);
   }
   return {
     index,
@@ -153,27 +153,31 @@ export function normalizeModuleGraphContract(value, role, engineCompatibilitySha
     ["authority", "contractSha256", "dylink", "exports", "imports"],
     description
   );
-  requireExactPlainObject(
-    value.authority,
-    ["engineCompatibilitySha256", "inspectionSha256", "kind"],
-    `${description}.authority`
-  );
-  if (value.authority.kind !== "convex-wasm-wasmtime-module-contract-v1") {
+  assertPlainObject(value.authority, `${description}.authority`);
+  const legacy = value.authority.kind === "convex-wasm-wasmtime-module-contract-v1";
+  if (!legacy && value.authority.kind !== "convex-wasm-core-module-contract-v1") {
     fail(`${description}.authority.kind is unsupported`);
   }
+  requireExactPlainObject(
+    value.authority,
+    [...(legacy ? ["engineCompatibilitySha256"] : []), "inspectionSha256", "kind"],
+    `${description}.authority`
+  );
   const authority = {
-    engineCompatibilitySha256: requireSha256(
-      value.authority.engineCompatibilitySha256,
-      `${description}.authority.engineCompatibilitySha256`
-    ),
+    ...(legacy ? {
+      engineCompatibilitySha256: requireSha256(
+        value.authority.engineCompatibilitySha256,
+        `${description}.authority.engineCompatibilitySha256`
+      ),
+    } : {}),
     inspectionSha256: requireSha256(
       value.authority.inspectionSha256,
       `${description}.authority.inspectionSha256`
     ),
     kind: value.authority.kind,
   };
-  if (authority.engineCompatibilitySha256 !== engineCompatibilitySha256) {
-    fail(`${description} was inspected under a different Wasmtime engine compatibility identity`);
+  if (legacy && authority.engineCompatibilitySha256 !== engineCompatibilitySha256) {
+    fail(`${description} legacy contract names a different native engine compatibility identity`);
   }
   requireExactPlainObject(
     value.dylink,

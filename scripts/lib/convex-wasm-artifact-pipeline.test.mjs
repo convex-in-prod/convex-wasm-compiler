@@ -26,6 +26,7 @@ import {
   finalizeConvexWasmArtifactMaterialSession,
   buildConvexWasmOfficialOutputModuleGraphArtifacts,
   loadAndVerifyConvexWasmModuleGraphPackage,
+  inspectConvexWasmModuleGraphCoreWasm,
   convexWasmCapabilityLegacyInvocationAbi,
   convexWasmCapabilityOfficialWrapperInvocationAbi,
   convexWasmCapabilitySourcePipelineSha256,
@@ -54,6 +55,30 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".
 const require = createRequire(import.meta.url);
 const producerIdentityPromise = buildConvexWasmProducerIdentity(repositoryRoot);
 const FIRST_GRAPH_FINGERPRINT = "1".repeat(64);
+
+test("Core inspection requires no native engine and authenticates the Wasm bytes", async (context) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "core-inspection-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const path = join(root, "module.wasm");
+  const wasm = Buffer.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    0, 15, 8, ...Buffer.from("dylink.0"), 1, 4, 0, 0, 0, 0,
+  ]);
+  await fs.writeFile(path, wasm, { mode: 0o600 });
+  const first = await inspectConvexWasmModuleGraphCoreWasm({ path, role: "base" });
+  assert.equal(first.contract.authority.kind, "convex-wasm-core-module-contract-v1");
+  assert.equal(Object.hasOwn(first.contract.authority, "engineCompatibilitySha256"), false);
+  // Legacy callers may still supply this property; it cannot alter the Core contract.
+  const second = await inspectConvexWasmModuleGraphCoreWasm({
+    path, role: "base", engineCompatibilitySha256: "1".repeat(64),
+  });
+  assert.deepEqual(second, first);
+  wasm[wasm.length - 2] = 1;
+  await fs.writeFile(path, wasm, { mode: 0o600 });
+  const changed = await inspectConvexWasmModuleGraphCoreWasm({ path, role: "base" });
+  assert.notEqual(changed.contract.authority.inspectionSha256, first.contract.authority.inspectionSha256);
+  assert.notEqual(changed.contract.contractSha256, first.contract.contractSha256);
+});
 
 test("unselected computed imports retain later dependency slot numbers", () => {
   const source = 'import(Buffer.from("cGF0aA==", "base64").toString()); import("./next.js");';

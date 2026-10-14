@@ -4,6 +4,29 @@ This repository contains native tooling for compiling selected Convex query and
 mutation modules for Static Hermes execution in a Wasmtime-backed self-hosted
 Convex runtime.
 
+The source compiler and Core Wasm guest must not require a specific Wasmtime
+revision. The maintained Wasmtime precompiler is a separate native target: its
+source pin makes builds reproducible, and its serialized AOT artifacts require
+a compatible receiving engine. Runtime-specific optimizations are optional
+capabilities of that target. A runtime outside the operator's control must be
+able to compile portable Core Wasm with its own engine, subject to supported
+Wasm features and the host ABI.
+
+Core module inspection and artifact construction are independent of the native
+engine. New `convex-wasm-core-module-contract-v1` contracts authenticate Core
+bytes, imports, exports and linking metadata without a Wasmtime identity.
+Legacy contracts retain their engine binding. Native AOT compilation and
+artifact authentication remain separate and engine-specific.
+Consumers must understand the new Core contract kind before loading new graph
+packages, even when the native engine configuration is unchanged.
+
+The deployment package workflow still requires a Wasmtime precompiler, including
+its engine-independent Core linkage normalizer, and native AOT artifacts. A
+complete Core-only CLI/package workflow remains to be implemented. Convex Cloud
+compatibility is a project objective, not a supported or verified deployment
+mode today; its host ABI, supported Wasm features and delivery format still
+need to be established.
+
 The repository currently provides:
 
 - a source-graph compiler that validates the supported JavaScript and
@@ -176,11 +199,13 @@ memory and correct cumulative inlining limits. Setup authenticates their source
 tree and tool identities, retains the native build for reuse, and installs the
 optimizer separately from the SDK. Generated configurations select and authenticate
 that toolchain through `EM_BINARYEN_ROOT` and explicit material inputs.
-The runner's Cargo dependency and the verified precompiler package both pin
-the same Wasmtime revision; setup does not need a second Wasmtime source checkout.
-The precompiler's authenticated source includes a
-[Cranelift integration patch](scripts/convex-wasm-precompiler/src/vendor/wasmtime-cranelift/UPSTREAM.md)
-that preserves registers in fuel and epoch handlers. Compiler package identities
+The development runner pins a reproducible Wasmtime revision. Artifact builds
+use the revision authenticated by the caller-selected precompiler package;
+it need not match the development runner. Setup does not need a second Wasmtime
+source checkout.
+The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/2539448f49dec017d502164f46736b64c561e070/DOWNSTREAM.md)
+owns compiler and runtime metering changes, including register preservation in
+fuel and epoch handlers and exception fuel accounting. Compiler package identities
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
 It requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
@@ -673,14 +698,29 @@ The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 1 GiB, matching the self-hosted runtime artifact contract.
 Its AOT and engine-identity output paths must not already exist.
 
-The precompiler retains a pinned Cranelift frontend source patch within its
-authenticated Rust source tree. Safepoint liveness collects only relevant
+The shared Wasmtime revision also owns the Cranelift frontend changes.
+Safepoint liveness collects only relevant
 reference events once per function and reuses those summaries across block
 visits. When no reference survives a safepoint, it skips the empty rewrite pass.
 GC rules and native-code optimization settings remain intact. The retained
-upstream provenance and license are in
-`scripts/convex-wasm-precompiler/src/vendor/cranelift-frontend/`; native packaging
-runs its library tests on each supported host architecture.
+upstream provenance, license and regression tests live with that shared source.
+The native AOT producer and its consumer must use compatible engines; local
+vendor copies are not used. This restriction applies to serialized AOT, not the
+source language or standard Core Wasm instructions.
+
+Fuel-scheduled epoch polling is an optional native target capability. Gate
+configuration accepts `--fuel-epoch-poll-interval 100000` only with a precompiler
+package advertising `engineContract.fuelEpochPolling`. The requested interval is
+authenticated as `toolchain.wasmtime.engineConfig.fuelEpochPollInterval` and is
+included in native artifact/cache compatibility. Omit it for ordinary epoch
+checks, including with legacy precompiler packages. The same Core Wasm can be
+compiled in either mode; polling introduces no guest instruction or host import.
+It preserves fuel accounting and deadline callbacks, but its interval is an
+instruction-budget bound, not a wall-time guarantee.
+The project build configuration also accepts `fuelEpochPollInterval: 100000`;
+the selected precompiler must advertise the capability before the build proceeds.
+Native release smoke checks compile the same Core fixture in both modes when
+polling is advertised, retaining separate engine and AOT identities as evidence.
 
 Module-graph builds normalize linked Core Wasm before publication and AOT. The
 precompiler's `--normalize-core INPUT.wasm OUTPUT.wasm` mode orders function

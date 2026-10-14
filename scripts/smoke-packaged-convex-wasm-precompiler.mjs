@@ -82,8 +82,6 @@ export async function smokePackagedPrecompiler(
   try {
     const inputPath = join(root, "representative.wasm");
     const normalizedPath = join(root, "representative.normalized.wasm");
-    const outputPath = join(root, "representative.cwasm");
-    const identityPath = join(root, "engine-identity.json");
     await fs.writeFile(
       inputPath,
       Buffer.from([
@@ -107,58 +105,77 @@ export async function smokePackagedPrecompiler(
     if (instance.exports.answer() !== 42) {
       throw new Error("packaged precompiler normalization changed the representative result");
     }
-    await runBounded(process.execPath, [
-      join(scriptDirectory, "run-packaged-convex-wasm-precompiler.mjs"),
-      "--package",
-      packageDirectory,
-      "--",
-      normalizedPath,
-      outputPath,
-      "--engine-identity",
-      identityPath,
-      "--consume-fuel",
-      "true",
-      "--epoch-interruption",
-      "true",
-      "--wasm-exceptions",
-      "true",
-      "--profiling-strategy",
-      "perf-map",
-      "--target-triple",
-      BACKEND_TARGET_TRIPLE,
-      "--target-cpu",
-      "baseline",
-      "--parallel-compilation-workers",
-      String(jobs),
-    ]);
-    const [outputEntry, identityText] = await Promise.all([
-      fs.stat(outputPath),
-      fs.readFile(identityPath, "utf8"),
-    ]);
-    if (outputEntry.size === 0 || outputEntry.size > MAX_OUTPUT_BYTES) {
-      throw new Error(`smoke AOT output must be between 1 and ${MAX_OUTPUT_BYTES} bytes`);
+    const modes = [undefined];
+    if (manifest.engineContract.fuelEpochPolling === true) modes.push(100_000);
+    const evidence = [];
+    for (const interval of modes) {
+      const outputPath = join(root, `representative-${interval ?? 0}.cwasm`);
+      const identityPath = join(root, `engine-identity-${interval ?? 0}.json`);
+      await runBounded(process.execPath, [
+        join(scriptDirectory, "run-packaged-convex-wasm-precompiler.mjs"),
+        "--package",
+        packageDirectory,
+        "--",
+        normalizedPath,
+        outputPath,
+        "--engine-identity",
+        identityPath,
+        "--consume-fuel",
+        "true",
+        "--epoch-interruption",
+        "true",
+        "--wasm-exceptions",
+        "true",
+        "--profiling-strategy",
+        "perf-map",
+        "--target-triple",
+        BACKEND_TARGET_TRIPLE,
+        "--target-cpu",
+        "baseline",
+        "--parallel-compilation-workers",
+        String(jobs),
+        ...(interval === undefined ? [] : ["--fuel-epoch-poll-interval", String(interval)]),
+      ]);
+      const [outputEntry, identityText] = await Promise.all([
+        fs.stat(outputPath),
+        fs.readFile(identityPath, "utf8"),
+      ]);
+      if (outputEntry.size === 0 || outputEntry.size > MAX_OUTPUT_BYTES) {
+        throw new Error(`smoke AOT output must be between 1 and ${MAX_OUTPUT_BYTES} bytes`);
+      }
+      const identity = JSON.parse(identityText);
+      if (
+        identityText !== `${JSON.stringify(identity)}\n` ||
+        identity.kind !== manifest.engineContract.engineIdentityKind ||
+        identity.target?.triple !== BACKEND_TARGET_TRIPLE ||
+        identity.target?.cpu !== manifest.engineContract.targetCpu ||
+        identity.engineConfig?.consumeFuel !== manifest.engineContract.consumeFuel ||
+        identity.engineConfig?.epochInterruption !== manifest.engineContract.epochInterruption ||
+        (interval === undefined
+          ? Object.hasOwn(identity.engineConfig, "fuelEpochPollInterval")
+          : identity.engineConfig.fuelEpochPollInterval !== interval) ||
+        identity.engineConfig?.profilingStrategy !== manifest.engineContract.profilingStrategy ||
+        identity.engineConfig?.wasmExceptions !== manifest.engineContract.wasmExceptions ||
+        !/^[0-9a-f]{64}$/u.test(identity.engineCompatibilitySha256)
+      ) {
+        throw new Error("packaged precompiler returned an unexpected engine identity");
+      }
+      evidence.push({
+        aotBytes: outputEntry.size,
+        aotSha256: createHash("sha256")
+          .update(await fs.readFile(outputPath))
+          .digest("hex"),
+        engineIdentity: identity,
+      });
     }
-    const identity = JSON.parse(identityText);
-    if (
-      identityText !== `${JSON.stringify(identity)}\n` ||
-      identity.kind !== manifest.engineContract.engineIdentityKind ||
-      identity.target?.triple !== BACKEND_TARGET_TRIPLE ||
-      identity.target?.cpu !== manifest.engineContract.targetCpu ||
-      identity.engineConfig?.consumeFuel !== manifest.engineContract.consumeFuel ||
-      identity.engineConfig?.epochInterruption !== manifest.engineContract.epochInterruption ||
-      identity.engineConfig?.profilingStrategy !== manifest.engineContract.profilingStrategy ||
-      identity.engineConfig?.wasmExceptions !== manifest.engineContract.wasmExceptions ||
-      !/^[0-9a-f]{64}$/u.test(identity.engineCompatibilitySha256)
-    ) {
-      throw new Error("packaged precompiler returned an unexpected engine identity");
+    const [ordinary, polling] = evidence;
+    if (polling !== undefined && (
+      polling.engineIdentity.engineCompatibilitySha256 === ordinary.engineIdentity.engineCompatibilitySha256 ||
+      polling.aotSha256 === ordinary.aotSha256
+    )) {
+      throw new Error("packaged precompiler did not separate ordinary and polling native artifacts");
     }
-    return {
-      aotBytes: outputEntry.size,
-      aotSha256: createHash("sha256")
-        .update(await fs.readFile(outputPath))
-        .digest("hex"),
-      engineIdentity: identity,
-    };
+    return { ...ordinary, ...(polling === undefined ? {} : { fuelEpochPolling: polling }) };
   } finally {
     await fs.rm(root, { force: true, recursive: true });
   }

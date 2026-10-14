@@ -5,13 +5,7 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["src/vendor/cranelift-frontend", "src/vendor/wasmtime-cranelift"]
-default-members = [".", "src/vendor/cranelift-frontend", "src/vendor/wasmtime-cranelift"]
 resolver = "3"
-
-[patch."https://github.com/bytecodealliance/wasmtime"]
-cranelift-frontend = { path = "src/vendor/cranelift-frontend" }
-wasmtime-internal-cranelift = { path = "src/vendor/wasmtime-cranelift" }
 
 [features]
 # Captures must retain the producer's f64 values before binary encoding or comparison.
@@ -33,7 +27,7 @@ libc = "=0.2.189"
 rayon = "=1.10.0"
 wasm-encoder = { version = "=0.259.0", features = ["wasmparser"] }
 wasmparser = { version = "=0.259.0", default-features = false, features = ["features", "simd", "std", "validate"] }
-wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "7ad2e732ab9ca8665d3cdd91f9c395315eeafc81", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-null"] }
+wasmtime = { git = "https://github.com/convex-in-prod/wasmtime", rev = "2539448f49dec017d502164f46736b64c561e070", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-null"] }
 
 [profile.release]
 lto = "thin"

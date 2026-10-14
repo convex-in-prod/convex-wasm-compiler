@@ -201,6 +201,9 @@ export function buildArtifactCommands(config) {
         config.toolchain.wasmtime.target.triple,
         "--target-cpu",
         config.toolchain.wasmtime.target.cpu,
+        ...(config.toolchain.wasmtime.engineConfig.fuelEpochPollInterval === undefined
+          ? []
+          : ["--fuel-epoch-poll-interval", String(config.toolchain.wasmtime.engineConfig.fuelEpochPollInterval)]),
       ],
     },
   };

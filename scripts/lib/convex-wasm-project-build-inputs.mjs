@@ -84,6 +84,7 @@ export function parseProjectConfig(value, configPath) {
       "nativePackageCacheRoot",
       "compilerPackage",
       "precompilerPackage",
+      "fuelEpochPollInterval",
       "selectedExports",
       "sourceRoots",
       "sourcePathspecs",
@@ -246,6 +247,9 @@ export function parseProjectConfig(value, configPath) {
       config.precompilerPackage === undefined
         ? undefined
         : path(config.precompilerPackage, "precompilerPackage"),
+    ...(Object.hasOwn(config, "fuelEpochPollInterval")
+      ? { fuelEpochPollInterval: requirePositiveInteger(config.fuelEpochPollInterval, "fuelEpochPollInterval") }
+      : {}),
     selectedExports,
     sourceRoots: config.sourceRoots ?? [],
     sourcePathspecs: config.sourcePathspecs,
@@ -364,6 +368,7 @@ export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {
   const [gateConfig, contextReuseAnalysis, producerIdentity] = await Promise.all([
     createStaticHermesGateConfigArtifacts({
       artifactConfigOutputPath: artifactConfigPath,
+      fuelEpochPollInterval: config.fuelEpochPollInterval,
       gateRoot: config.gateRoot,
       platformLimitsOutputPath: platformLimitsPath,
       policy: gatePolicy,

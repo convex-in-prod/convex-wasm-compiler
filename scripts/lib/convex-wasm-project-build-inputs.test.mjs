@@ -93,6 +93,21 @@ test("released project build uses its bundled native selection by default", () =
   assert.equal(parsed.nativePackageCacheRoot, defaultNativePackageCacheRoot());
 });
 
+test("project native polling is explicit and requires a positive safe interval", () => {
+  const config = projectConfig();
+  assert.equal(Object.hasOwn(parseProjectConfig(config, configPath), "fuelEpochPollInterval"), false);
+  assert.equal(
+    parseProjectConfig({ ...config, fuelEpochPollInterval: 100_000 }, configPath).fuelEpochPollInterval,
+    100_000
+  );
+  for (const interval of [null, undefined, 0, -1, 0.5, "100000", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => parseProjectConfig({ ...config, fuelEpochPollInterval: interval }, configPath),
+      /fuelEpochPollInterval must be a positive integer/u
+    );
+  }
+});
+
 test("project matrix tools use the gate-owned Wasmtime runner", () => {
   const config = projectConfig();
   delete config.matrixReports;

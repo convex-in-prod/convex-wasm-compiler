@@ -1,3 +1,4 @@
+import { normalizeEngineConfig } from "./convex-wasm-engine-config.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -678,28 +679,6 @@ function requireNonnegativeSafeInteger(value, description) {
     fail(`${description} must be a nonnegative safe integer`);
   }
   return value;
-}
-
-function normalizeEngineConfig(engineConfig, description) {
-  assertPlainObject(engineConfig, description);
-  assertExactKeys(
-    engineConfig,
-    new Set(["consumeFuel", "epochInterruption", "profilingStrategy", "wasmExceptions"]),
-    description
-  );
-  return {
-    consumeFuel: requireBoolean(engineConfig.consumeFuel, `${description}.consumeFuel`),
-    epochInterruption: requireBoolean(
-      engineConfig.epochInterruption,
-      `${description}.epochInterruption`
-    ),
-    profilingStrategy: requireEnum(
-      engineConfig.profilingStrategy,
-      new Set(["perf-map"]),
-      `${description}.profilingStrategy`
-    ),
-    wasmExceptions: requireBoolean(engineConfig.wasmExceptions, `${description}.wasmExceptions`),
-  };
 }
 
 export function normalizeEngineIdentity(engineIdentity, expectedEngineConfig, expectedTarget) {
@@ -2656,9 +2635,12 @@ function normalizeStableCoreModule(
     if (retained.role !== role) {
       fail(`stable Core Wasm identity was already authenticated for ${retained.role}, not ${role}`);
     }
-    if (retained.engineCompatibilitySha256 !== engineCompatibilitySha256) {
+    if (
+      retained.module.contract.authority.kind === "convex-wasm-wasmtime-module-contract-v1" &&
+      retained.engineCompatibilitySha256 !== engineCompatibilitySha256
+    ) {
       fail(
-        `${role} module contract was inspected under a different Wasmtime engine compatibility identity`
+        `${role} module contract legacy contract names a different native engine compatibility identity`
       );
     }
     const availableProviders = new Set([...roles, "host", "loader", "weak-zero"]);
@@ -2784,10 +2766,11 @@ function normalizeModuleGraphManifestWithModules(
     }
     if (
       builtModule !== undefined &&
+      builtModule.contract.authority.kind === "convex-wasm-wasmtime-module-contract-v1" &&
       builtModule.contract.authority.engineCompatibilitySha256 !== engine.compatibilitySha256
     ) {
       fail(
-        `${role} module contract was inspected under a different Wasmtime engine compatibility identity`
+        `${role} module contract legacy contract names a different native engine compatibility identity`
       );
     }
     if (currentFormat && role !== MODULE_GRAPH_LEAF_ROLE) {

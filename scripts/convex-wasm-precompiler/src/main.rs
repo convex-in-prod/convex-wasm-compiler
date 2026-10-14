@@ -27,6 +27,7 @@ const USAGE: &str = "usage: convex-wasm-precompiler INPUT.wasm OUTPUT.cwasm \
     --target-triple TARGET_TRIPLE \
     --target-cpu baseline \
     --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS \
+    [--fuel-epoch-poll-interval POSITIVE_SAFE_INTEGER] \
     [--incremental-cache-trace ABSOLUTE_NEW_JSONL]\n\
     or: convex-wasm-precompiler --normalize-core INPUT.wasm OUTPUT.wasm";
 const MAX_CORE_WASM_BYTES: usize = 320 * 1024 * 1024;
@@ -37,6 +38,8 @@ const MAX_AOT_BYTES: usize = 1024 * 1024 * 1024;
 struct EngineConfigIdentity {
     consume_fuel: bool,
     epoch_interruption: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fuel_epoch_poll_interval: Option<u64>,
     profiling_strategy: &'static str,
     wasm_exceptions: bool,
 }
@@ -213,20 +216,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     if target_cpu != "baseline" {
         return Err("target-cpu must be baseline".into());
     }
-    require_option(&mut arguments, "--parallel-compilation-workers")?;
-    let parallel_compilation_workers = required_parallel_compilation_workers(arguments.next())?;
-    let trace_path = match arguments.next() {
-        None => None,
-        Some(option) if option == "--incremental-cache-trace" => Some(PathBuf::from(
-            arguments
-                .next()
-                .ok_or("incremental-cache-trace requires an output path")?,
-        )),
-        Some(_) => return Err(USAGE.into()),
-    };
-    if arguments.next().is_some() {
-        return Err(USAGE.into());
-    }
+    let PrecompileOptions {
+        parallel_compilation_workers,
+        fuel_epoch_poll_interval,
+        trace_path,
+    } = parse_precompile_options(&mut arguments)?;
 
     ensure_distinct_new_outputs(&output, &engine_identity_path, trace_path.as_deref())?;
 
@@ -235,6 +229,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .target(&target_triple)?
         .consume_fuel(consume_fuel)
         .epoch_interruption(epoch_interruption)
+        .fuel_epoch_poll_interval(fuel_epoch_poll_interval.unwrap_or(0))
         .wasm_exceptions(wasm_exceptions)
         .parallel_compilation(true)
         .profiler(ProfilingStrategy::PerfMap);
@@ -268,6 +263,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         engine_config: EngineConfigIdentity {
             consume_fuel,
             epoch_interruption,
+            fuel_epoch_poll_interval,
             profiling_strategy: "perf-map",
             wasm_exceptions,
         },
@@ -292,6 +288,47 @@ fn run() -> Result<(), Box<dyn Error>> {
         serde_json::to_string(&cache_report)?
     );
     Ok(())
+}
+
+struct PrecompileOptions {
+    parallel_compilation_workers: usize,
+    fuel_epoch_poll_interval: Option<u64>,
+    trace_path: Option<PathBuf>,
+}
+
+fn parse_precompile_options(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<PrecompileOptions, String> {
+    let mut workers = None;
+    let mut interval = None;
+    let mut trace = None;
+    while let Some(option) = arguments.next() {
+        if option == "--parallel-compilation-workers" && workers.is_none() {
+            workers = Some(required_parallel_compilation_workers(arguments.next())?);
+        } else if option == "--fuel-epoch-poll-interval" && interval.is_none() {
+            let value = required_utf8(arguments.next(), "fuel-epoch-poll-interval value")?;
+            let parsed = value.parse::<u64>().map_err(|_| {
+                "fuel-epoch-poll-interval must be a positive safe integer".to_owned()
+            })?;
+            // JSON consumers authenticate this value as an exact integer.
+            if parsed == 0 || parsed > 9_007_199_254_740_991 {
+                return Err("fuel-epoch-poll-interval must be a positive safe integer".into());
+            }
+            interval = Some(parsed);
+        } else if option == "--incremental-cache-trace" && trace.is_none() {
+            trace = Some(PathBuf::from(required_argument(
+                arguments.next(),
+                "trace output path",
+            )?));
+        } else {
+            return Err(format!("unknown or repeated precompile option\n{USAGE}"));
+        }
+    }
+    Ok(PrecompileOptions {
+        parallel_compilation_workers: workers.ok_or("missing parallel-compilation-workers")?,
+        fuel_epoch_poll_interval: interval,
+        trace_path: trace,
+    })
 }
 
 fn incremental_cache_root() -> Result<PathBuf, Box<dyn Error>> {
@@ -483,6 +520,66 @@ mod tests {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
     use wasmtime::Module;
+
+    #[test]
+    fn polling_options_preserve_legacy_identity_and_require_explicit_interval() {
+        let parse = |args: &[&str]| parse_precompile_options(&mut args.iter().map(OsString::from));
+        let legacy = parse(&["--parallel-compilation-workers", "1"]).unwrap();
+        assert_eq!(legacy.fuel_epoch_poll_interval, None);
+        let identity = EngineConfigIdentity {
+            consume_fuel: true,
+            epoch_interruption: true,
+            fuel_epoch_poll_interval: legacy.fuel_epoch_poll_interval,
+            profiling_strategy: "perf-map",
+            wasm_exceptions: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&identity).unwrap(),
+            r#"{"consumeFuel":true,"epochInterruption":true,"profilingStrategy":"perf-map","wasmExceptions":true}"#
+        );
+        for args in [
+            vec![
+                "--fuel-epoch-poll-interval",
+                "100000",
+                "--parallel-compilation-workers",
+                "1",
+            ],
+            vec![
+                "--parallel-compilation-workers",
+                "1",
+                "--fuel-epoch-poll-interval",
+                "100000",
+            ],
+        ] {
+            assert_eq!(
+                parse(&args).unwrap().fuel_epoch_poll_interval,
+                Some(100_000)
+            );
+        }
+        for value in ["0", "-1", "0.5", "9007199254740992", "x"] {
+            assert!(
+                parse(&[
+                    "--parallel-compilation-workers",
+                    "1",
+                    "--fuel-epoch-poll-interval",
+                    value
+                ])
+                .is_err()
+            );
+        }
+        assert!(parse(&["--fuel-epoch-poll-interval", "100000"]).is_err());
+        assert!(
+            parse(&[
+                "--parallel-compilation-workers",
+                "1",
+                "--fuel-epoch-poll-interval",
+                "100000",
+                "--fuel-epoch-poll-interval",
+                "200000"
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn incremental_compilation_reuses_unchanged_functions_after_an_edit() {

@@ -103,8 +103,36 @@ test("normalizes graph contracts and rejects a different inspection engine", () 
   assert.deepEqual(normalizeModuleGraphContract(contract, "base", ENGINE_SHA256), contract);
   assert.throws(
     () => normalizeModuleGraphContract(contract, "base", "5".repeat(64)),
-    /different Wasmtime engine compatibility identity/u
+    /different native engine compatibility identity/u
   );
+});
+
+test("portable Core contracts authenticate inspection without a native engine", () => {
+  const { contractSha256: _contractSha256, ...payload } = emptyContract();
+  delete payload.authority.engineCompatibilitySha256;
+  payload.authority.kind = "convex-wasm-core-module-contract-v1";
+  const contract = { ...payload, contractSha256: fingerprintJson(payload) };
+  for (const engineHash of [undefined, ENGINE_SHA256, "5".repeat(64)]) {
+    assert.deepEqual(normalizeModuleGraphContract(contract, "base", engineHash), contract);
+  }
+  for (const engineHash of [null, ENGINE_SHA256]) {
+    assert.throws(() => normalizeModuleGraphContract({
+      ...contract,
+      authority: { ...contract.authority, engineCompatibilitySha256: engineHash },
+    }, "base"), /authority/u);
+  }
+  assert.throws(() => normalizeModuleGraphContract({
+    ...contract,
+    authority: { ...contract.authority, kind: "unknown-contract" },
+  }, "base"), /unsupported/u);
+  assert.throws(() => normalizeModuleGraphContract({
+    ...contract,
+    authority: { ...contract.authority, kind: "convex-wasm-wasmtime-module-contract-v1" },
+  }, "base"), /authority/u);
+  assert.throws(() => normalizeModuleGraphContract({
+    ...contract,
+    authority: { ...contract.authority, inspectionSha256: "6".repeat(64) },
+  }, "base"), /contractSha256 is invalid/u);
 });
 
 test("normalizes the closed host ABI in canonical import order", () => {

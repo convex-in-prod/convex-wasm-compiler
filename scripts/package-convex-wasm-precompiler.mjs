@@ -20,6 +20,7 @@ import {
   precompilerPackageKind,
   precompilerPackageManifestName,
   precompilerPackageSchemaVersion,
+  precompilerWasmtimeRepositories,
 } from "./lib/convex-wasm-precompiler-package.mjs";
 import {
   describeNativeCommandTermination,
@@ -97,9 +98,13 @@ export function wasmtimeIdentityFromLockedPackages(lockedPackages) {
   }
   const [wasmtimeSource] = wasmtimeSources;
   const wasmtimeSourceMatch = wasmtimeSource.match(
-    /^git\+(https:\/\/github\.com\/bytecodealliance\/wasmtime)\?rev=([0-9a-f]{40})#([0-9a-f]{40})$/u
+    /^git\+(https:\/\/github\.com\/[^?]+)\?rev=([0-9a-f]{40})#([0-9a-f]{40})$/u
   );
-  if (wasmtimeSourceMatch === null || wasmtimeSourceMatch[2] !== wasmtimeSourceMatch[3]) {
+  if (
+    wasmtimeSourceMatch === null ||
+    !precompilerWasmtimeRepositories.includes(wasmtimeSourceMatch[1]) ||
+    wasmtimeSourceMatch[2] !== wasmtimeSourceMatch[3]
+  ) {
     throw new Error(
       "Cargo.lock must bind Wasmtime's requested revision to the same resolved commit"
     );
@@ -301,10 +306,6 @@ async function buildPrecompiler(targetTriple, buildInputs, source, cargoBuildJob
   );
   let binaryPath;
   for (const [operation, argumentsList] of [
-    [
-      "Convex Wasm frontend Cargo test",
-      ["test", "--locked", "--release", "--target", targetTriple, "--workspace", "--lib"],
-    ],
     ["Convex Wasm precompiler Cargo test", cargoTestArguments],
     ["Convex Wasm precompiler Cargo build", cargoArguments],
     ["Convex Wasm matrix runner Cargo build", runnerCargoArguments],
@@ -527,6 +528,7 @@ export async function packagePrecompiler({
     },
     engineContract: {
       consumeFuel: true,
+      fuelEpochPolling: true,
       epochInterruption: true,
       engineIdentityKind: "convex-wasm-wasmtime-engine-identity",
       profilingStrategy: "perf-map",

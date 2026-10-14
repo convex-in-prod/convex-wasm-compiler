@@ -12,6 +12,7 @@ import {
   convexWasmSerializedModuleMaxBytes,
 } from "./lib/convex-wasm-artifact-pipeline.mjs";
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
+import { normalizeEngineConfig, validatePrecompilerEngineRequest } from "./lib/convex-wasm-engine-config.mjs";
 import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
 import { binaryenHelperNames, verifyBinaryenGate } from "./setup-gate.mjs";
 
@@ -51,6 +52,7 @@ function usage() {
     "       --policy PROJECT_POLICY.json",
     "       --artifact-config-output ARTIFACT_CONFIG.json",
     "       --platform-limits-output PLATFORM_LIMITS.json",
+    "       [--fuel-epoch-poll-interval POSITIVE_SAFE_INTEGER]",
   ].join("\n");
 }
 
@@ -80,6 +82,7 @@ export function parseArguments(argumentsList) {
     "--platform-limits-output",
     "--policy",
     "--precompiler-package",
+    "--fuel-epoch-poll-interval",
   ]);
   for (let index = 0; index < argumentsList.length; index += 2) {
     const option = argumentsList[index];
@@ -116,6 +119,9 @@ export function parseArguments(argumentsList) {
   }
   return {
     artifactConfigOutputPath,
+    ...(values.has("--fuel-epoch-poll-interval")
+      ? { fuelEpochPollInterval: Number(values.get("--fuel-epoch-poll-interval")) }
+      : {}),
     gateRoot: resolve(values.get("--gate-root")),
     platformLimitsOutputPath,
     policyPath: resolve(values.get("--policy")),
@@ -325,6 +331,7 @@ async function verifyPrivateJson(path, expectedValue, description) {
 }
 
 export function createStaticHermesGateArtifactConfig({
+  fuelEpochPollInterval,
   gateRoot,
   policy,
   precompilerPackageDirectory,
@@ -462,12 +469,13 @@ export function createStaticHermesGateArtifactConfig({
         revision: gateRevisions.hermes,
       },
       wasmtime: {
-        engineConfig: {
+        engineConfig: normalizeEngineConfig({
           consumeFuel: true,
           epochInterruption: true,
+          ...(fuelEpochPollInterval === undefined ? {} : { fuelEpochPollInterval }),
           profilingStrategy: "perf-map",
           wasmExceptions: true,
-        },
+        }, "native target engine config"),
         materialInputs: [],
         packageDirectory: precompilerPackageDirectory,
         revision: wasmtimeRevision,
@@ -477,7 +485,7 @@ export function createStaticHermesGateArtifactConfig({
   };
 }
 
-async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
+async function verifyGate({ fuelEpochPollInterval, gateRoot, policy, precompilerPackageDirectory }) {
   const normalizedPolicy = normalizeGatePolicy(policy);
   await verifyBinaryenGate(gateRoot);
   const [hermesRevision, emsdkRevision, precompilerPackage] =
@@ -499,20 +507,25 @@ async function verifyGate({ gateRoot, policy, precompilerPackageDirectory }) {
   const packagedWasmtimeRevision =
     precompilerPackage.manifest.identities.wasmtime.revision;
   if (
-    packagedWasmtimeRevision !== gateRevisions.wasmtime ||
     precompilerPackage.manifest.platform.targetTriple !== targetTriple() ||
     !/^[0-9a-f]{40}$/u.test(packagedWasmtimeRevision)
   ) {
     throw new Error(
-      "verified precompiler package does not match the current gate Wasmtime target",
+      "verified precompiler package does not match the native host target",
     );
   }
   const config = createStaticHermesGateArtifactConfig({
+    fuelEpochPollInterval,
     gateRoot,
     policy: normalizedPolicy,
     precompilerPackageDirectory,
     wasmtimeRevision: packagedWasmtimeRevision,
   });
+  validatePrecompilerEngineRequest(
+    config.toolchain.wasmtime.engineConfig,
+    precompilerPackage.manifest.engineContract,
+    config.toolchain.wasmtime.target.cpu,
+  );
   // Keep Emscripten's cache identity stable when the gate links to a shared SDK.
   config.command.environment.EM_CONFIG = await fs.realpath(config.command.environment.EM_CONFIG);
   config.command.environment.EMSDK = await fs.realpath(config.command.environment.EMSDK);
