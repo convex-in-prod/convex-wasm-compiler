@@ -281,7 +281,7 @@ async function buildRunner(gateRoot, jobs) {
   await requireFile(built, "built Wasmtime runner", true);
   const binDirectory = join(gateRoot, "bin");
   await fs.mkdir(binDirectory, { recursive: true });
-  const stage = await fs.mkdtemp(join(gateRoot, ".runner-publication-"));
+  const stage = await fs.mkdtemp(join(binDirectory, ".runner-publication-"));
   try {
     const stagedBinary = join(stage, runnerName);
     const stagedManifest = `${stagedBinary}.json`;
@@ -406,9 +406,22 @@ export async function verifyBinaryenGate(gateRoot) {
   }
 }
 
+export async function retainedCmakeSourceDirectory(buildRoot, sourceRoot) {
+  const expected = await fs.realpath(sourceRoot);
+  const configured = await cmakeCacheValue(join(buildRoot, "CMakeCache.txt"), "CMAKE_HOME_DIRECTORY").catch(error => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (configured !== null && await fs.realpath(configured) !== expected) {
+    throw new Error("CMake build does not use the authenticated source checkout");
+  }
+  // Preserve the existing spelling: CMake embeds it in every compile command.
+  return configured ?? expected;
+}
+
 export async function buildBinaryen(gateRoot, jobs) {
   const inputSha256 = await binaryenInputSha256();
-  const sourceRoot = join(gateRoot, "binaryen");
+  const sourceRoot = await fs.realpath(join(gateRoot, "binaryen"));
   const options = { cwd: sourceRoot, timeoutMs: 30_000, capture: true };
   const tree = await run("git", ["write-tree"], options);
   const originalTree = await run("git", ["rev-parse", "HEAD^{tree}"], options);
@@ -416,13 +429,28 @@ export async function buildBinaryen(gateRoot, jobs) {
     await run("git", ["apply", "--index", ...binaryenSource.patches.map(({ file }) => join(binaryenVendor, file))], options);
   }
   await verifyBinaryenSource(sourceRoot);
-  const build = join(gateRoot, "build-binaryen");
-  if (await binaryenStatus(gateRoot, inputSha256) !== "verified") {
+  await fs.mkdir(join(gateRoot, "build-binaryen"), { recursive: true });
+  // CMake embeds these paths in compile commands. An alias must not invalidate
+  // every retained object when only the gate runner needs refreshing.
+  const build = await fs.realpath(join(gateRoot, "build-binaryen"));
+  const configuredSource = await retainedCmakeSourceDirectory(build, sourceRoot);
+  const status = await binaryenStatus(gateRoot, inputSha256);
+  if (status === "verified") {
+    const configuredFlags = await Promise.all(binaryenCmakeFlags.map(async flag => {
+      const [key, value] = flag.slice(2).split("=");
+      return await cmakeCacheValue(join(build, "CMakeCache.txt"), key).catch(error => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      }) === value;
+    }));
+    if (configuredFlags.every(Boolean) && !await buildTargetsPending(build, ["wasm-opt"])) return;
+  }
+  if (status !== "verified") {
     // Ninja tracks dependency timestamps, not the published tool's digest.
     // Relink a stale output from retained objects instead of signing it again.
     await fs.rm(join(build, "bin", "wasm-opt"), { force: true });
   }
-  await run("cmake", ["-S", sourceRoot, "-B", build, "-G", "Ninja", ...binaryenCmakeFlags], {
+  await run("cmake", ["-S", configuredSource, "-B", build, "-G", "Ninja", ...binaryenCmakeFlags], {
     cwd: gateRoot, timeoutMs: 10 * 60 * 1000,
   });
   await run("cmake", ["--build", build, "--target", "wasm-opt", "--parallel", String(jobs)], {
@@ -431,7 +459,9 @@ export async function buildBinaryen(gateRoot, jobs) {
   if (await binaryenStatus(gateRoot, inputSha256) === "verified") return;
   const destination = join(gateRoot, "binaryen-tools");
   await fs.mkdir(join(destination, "bin"), { recursive: true });
-  const stage = await fs.mkdtemp(join(gateRoot, ".binaryen-publication-"));
+  // The tool directory may be an alias onto another filesystem. Keep staged
+  // replacements there so publication still uses atomic rename.
+  const stage = await fs.mkdtemp(join(destination, ".binaryen-publication-"));
   try {
     const binaries = {};
     for (const name of ["wasm-opt", ...binaryenHelperNames]) {
@@ -614,9 +644,11 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
 
   await buildBinaryen(gateRoot, jobs);
 
-  const hermes = join(gateRoot, "hermes");
-  const host = join(gateRoot, "build-host");
-  const wasm = join(gateRoot, "build-wasm");
+  const hermes = await fs.realpath(join(gateRoot, "hermes"));
+  await Promise.all(["build-host", "build-wasm"].map(name =>
+    fs.mkdir(join(gateRoot, name), { recursive: true })));
+  const [host, wasm] = await Promise.all(["build-host", "build-wasm"].map(name =>
+    fs.realpath(join(gateRoot, name))));
   const hostCompiler = join(host, "bin", "shermes");
   const hostBytecodeCompiler = join(host, "bin", "hermesc");
   const hostCompilerImport = join(host, "ImportHostCompilers.cmake");
@@ -669,6 +701,14 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
     ].join(":"),
   };
   const wasmNativeIntlReady = await nativeIntlConfigured(wasm);
+  const importedHostCompiler = await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "IMPORT_HOST_COMPILERS").catch(error => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  const importedHostCompilerPath = importedHostCompiler === null ? null : await fs.realpath(importedHostCompiler).catch(error => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
   const wasmNeedsConfiguration = !wasmNativeIntlReady || wasmBuildOutputStates.some((state) => state === null) ||
     !(await cmakeCacheHas(
       join(wasm, "CMakeCache.txt"),
@@ -686,10 +726,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
       if (error?.code === "ENOENT") return false;
       throw error;
     })) ||
-    (await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "IMPORT_HOST_COMPILERS").catch((error) => {
-      if (error?.code === "ENOENT") return null;
-      throw error;
-    })) !== hostCompilerImport ||
+    importedHostCompilerPath !== await fs.realpath(hostCompilerImport) ||
     (await cmakeCacheValue(join(wasm, "CMakeCache.txt"), "CMAKE_C_FLAGS").catch((error) => {
       if (error?.code === "ENOENT") return null;
       throw error;

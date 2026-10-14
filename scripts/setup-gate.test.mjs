@@ -10,10 +10,26 @@ import { promisify } from "node:util";
 import { gateRevisions, wasmtimeRepository } from "./lib/convex-wasm-gate-pins.mjs";
 import {
   binaryenHelperNames, binaryenInputSha256, binaryenStatus,
-  runnerInputSha256, verifyBinaryenSource, verifyStaticHermesHostCompilerImport,
+  retainedCmakeSourceDirectory, runnerInputSha256, verifyBinaryenSource, verifyStaticHermesHostCompilerImport,
 } from "./setup-gate.mjs";
 
 const execute = promisify(execFile);
+
+test("CMake setup preserves an authenticated source alias and rejects a different checkout", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "cmake-retained-source-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const alias = join(root, "alias");
+  const build = join(root, "build");
+  const other = join(root, "other");
+  await Promise.all([source, build, other].map(path => fs.mkdir(path)));
+  await fs.symlink(source, alias);
+  assert.equal(await retainedCmakeSourceDirectory(build, alias), await fs.realpath(source));
+  const cache = join(build, "CMakeCache.txt");
+  await fs.writeFile(cache, `CMAKE_HOME_DIRECTORY:INTERNAL=${alias}\n`);
+  assert.equal(await retainedCmakeSourceDirectory(build, source), alias);
+  await assert.rejects(retainedCmakeSourceDirectory(build, other), /authenticated source checkout/u);
+});
 
 test("imported host compilers accept aliases of the same file but reject other builds", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "hermes-imported-host-"));
