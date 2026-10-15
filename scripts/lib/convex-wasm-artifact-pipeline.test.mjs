@@ -1756,7 +1756,7 @@ test("builds a module-graph package from a separate application's source graph",
   assert.equal(verified.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256);
 });
 
-for (const partition of ["lexical", "combined"]) {
+for (const partition of ["automatic", "combined"]) {
 test(`builds an authenticated ${partition} project package from a separate application's staged source`, async (t) => {
   const fixture = await createFixture(t, { moduleGraphWasm: true });
   const application = await buildSyntheticDeploymentApplication(t, { bindAnalysis: false, entryCount: 9 });
@@ -1799,7 +1799,10 @@ test(`builds an authenticated ${partition} project package from a separate appli
     },
     resourceGuard,
   });
-  assert.equal(built.schedule.cohorts.length, partition === "combined" ? 1 : 2);
+  assert.deepEqual(
+    built.schedule.cohorts.flatMap(({ entries }) => entries.map(({ entryPath }) => entryPath)).sort(),
+    application.inventory.functions.map(({ entryPath }) => entryPath).sort()
+  );
   assert.equal(activeNativeCommands, 0);
   assert.ok(peakNativeCommands > 0, "project build must execute native commands");
   assert.ok(peakNativeCommands <= launchPolicy.jobs, `native concurrency ${peakNativeCommands} exceeds ${launchPolicy.jobs} jobs`);
