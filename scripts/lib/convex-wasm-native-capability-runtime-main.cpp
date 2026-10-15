@@ -27,6 +27,11 @@ void installNativeUrl(facebook::jsi::Runtime &runtime);
 #include <utility>
 #include <vector>
 
+#if defined(CONVEX_WASM_LOCAL_INITIALIZATION_TRACE)
+#include <cstddef>
+#include <wasi/api.h>
+#endif
+
 extern "C" SHUnit *CONVEX_WASM_BRIDGE_EXPORTED_UNIT(void);
 extern "C" SHUnit *CONVEX_WASM_FORMATTER_EXPORTED_UNIT(void);
 extern "C" int32_t convex_wasm_application_entry_count(void);
@@ -128,6 +133,84 @@ struct ChunkApplicationUnitSlot {
 #endif
 
 SHRuntime *runtime = nullptr;
+
+#if defined(CONVEX_WASM_LOCAL_INITIALIZATION_TRACE)
+// Local measurements only: no JS values or heap walks. Clock reads use WASI.
+// Keep failed initialization records until the Store is discarded by the runner.
+struct InitializationTraceRecord {
+  int32_t kind;
+  int32_t unit_slot;
+  int32_t parent;
+  uint32_t finished;
+  uint64_t wall_start;
+  uint64_t cpu_start;
+  uint64_t wall_end;
+  uint64_t cpu_end;
+  SHHeapStatistics heap_before;
+  SHHeapStatistics heap_after;
+};
+static_assert(sizeof(InitializationTraceRecord) == 128);
+static_assert(offsetof(InitializationTraceRecord, heap_before) == 48);
+static_assert(offsetof(InitializationTraceRecord, heap_after) == 88);
+std::array<InitializationTraceRecord, 4096> initialization_trace_records{};
+uint32_t initialization_trace_count = 0;
+int32_t initialization_trace_parent = -1;
+SHHeapStatistics initialization_trace_heap{};
+
+enum class InitializationTraceKind : int32_t {
+  RuntimeCreate = 1,
+  RuntimeSupport = 2,
+  LogicalModule = 3,
+  EntryPublication = 4,
+  IntrinsicValidation = 5,
+  ApplicationEvaluation = 6,
+  GuestBridge = 7,
+};
+
+uint64_t initialization_trace_clock(__wasi_clockid_t clock) {
+  uint64_t nanos;
+  if (__wasi_clock_time_get(clock, 1, &nanos) != 0) __builtin_trap();
+  return nanos;
+}
+
+struct InitializationTraceScope {
+  const uint32_t index;
+
+  InitializationTraceScope(InitializationTraceKind kind, int32_t unit_slot)
+      : index(initialization_trace_count++) {
+    if (index >= initialization_trace_records.size()) __builtin_trap();
+    auto &record = initialization_trace_records[index];
+    record.kind = static_cast<int32_t>(kind);
+    record.unit_slot = unit_slot;
+    record.parent = initialization_trace_parent;
+    if (runtime != nullptr) _sh_get_heap_statistics(runtime, &record.heap_before);
+    record.wall_start = initialization_trace_clock(__WASI_CLOCKID_MONOTONIC);
+    record.cpu_start = initialization_trace_clock(__WASI_CLOCKID_THREAD_CPUTIME_ID);
+    initialization_trace_parent = static_cast<int32_t>(index);
+  }
+
+  ~InitializationTraceScope() {
+    if (initialization_trace_parent != static_cast<int32_t>(index)) __builtin_trap();
+    auto &record = initialization_trace_records[index];
+    record.cpu_end = initialization_trace_clock(__WASI_CLOCKID_THREAD_CPUTIME_ID);
+    record.wall_end = initialization_trace_clock(__WASI_CLOCKID_MONOTONIC);
+    if (record.cpu_end < record.cpu_start || record.wall_end < record.wall_start) {
+      __builtin_trap();
+    }
+    if (runtime != nullptr) _sh_get_heap_statistics(runtime, &record.heap_after);
+    record.finished = 1;
+    initialization_trace_parent = record.parent;
+  }
+
+  InitializationTraceScope(const InitializationTraceScope &) = delete;
+  InitializationTraceScope &operator=(const InitializationTraceScope &) = delete;
+};
+#define CONVEX_WASM_TRACE_INITIALIZATION(kind, slot) \
+  InitializationTraceScope initialization_trace_scope(InitializationTraceKind::kind, slot)
+#else
+#define CONVEX_WASM_TRACE_INITIALIZATION(kind, slot)
+#endif
+
 std::unique_ptr<GuestBridge> guest_bridge;
 std::unique_ptr<CompileProfileOutputSlot> compile_profile_output_slot;
 std::shared_ptr<Function> bridge_bootstrap;
@@ -158,21 +241,24 @@ void record_fixture_initialization_event(uint8_t event) {
 }
 #endif
 
-constexpr int32_t kMaxApplicationEntrySlots = 8;
-std::array<ApplicationExportSlot, kMaxApplicationEntrySlots>
-    application_export_slots;
-
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
 constexpr int32_t kMaxApplicationUnitSlots = 1024;
+constexpr int32_t kMaxApplicationEntrySlots = kMaxApplicationUnitSlots;
+// Runtime grouping does not prescribe an entry count. Size entry state to the
+// authenticated graph while retaining the existing total-unit resource bound.
+std::vector<ApplicationExportSlot> application_export_slots;
 std::array<ChunkApplicationUnitSlot, kMaxApplicationUnitSlots>
     chunk_application_unit_slots;
-std::array<std::unique_ptr<Value>, kMaxApplicationEntrySlots>
-    pending_application_exports;
+std::vector<std::unique_ptr<Value>> pending_application_exports;
 bool official_chunk_initialization_dirty = false;
 // Only loader callbacks and reset mutate the chunk slot table. Invalidate before
 // those writes; unchanged invocations can reuse its complete validation. Entry
 // publication, dirty state and the other retained-runtime checks remain live.
 int32_t validated_chunk_slot_count = 0;
+#else
+constexpr int32_t kMaxApplicationEntrySlots = 8;
+std::array<ApplicationExportSlot, kMaxApplicationEntrySlots>
+    application_export_slots;
 #endif
 
 constexpr int32_t kSelectedUdfKindQuery = 1;
@@ -1816,6 +1902,7 @@ Function guest_initialization_reporter(Runtime &js, int32_t unit_slot) {
 void evaluate_application_initializer(Runtime &js,
                                       SHUnitCreator factory,
                                       int32_t unit_slot) {
+  CONVEX_WASM_TRACE_INITIALIZATION(ApplicationEvaluation, unit_slot);
   const uint64_t reports_before = guest_initialization_report_count;
   try {
     _sh_get_hermes_runtime(runtime)->evaluateSHUnit(factory);
@@ -1980,6 +2067,7 @@ Value initialize_official_chunk_unit(Runtime &js, int32_t unit_slot) {
     official_chunk_initialization_dirty = true;
     throw JSError(js, "Official chunk unit factory is unavailable");
   }
+  CONVEX_WASM_TRACE_INITIALIZATION(LogicalModule, unit_slot);
   try {
     validated_chunk_slot_count = 0;
     slot.state = ChunkApplicationUnitState::Initializing;
@@ -2169,6 +2257,7 @@ void initialize_official_chunk_entry(Runtime &js,
   }
   try {
     (void)initialize_official_chunk_unit(js, entry_chunk_slot);
+    CONVEX_WASM_TRACE_INITIALIZATION(EntryPublication, publication_unit_slot);
     js_error_phase = JSErrorPhase::InitializeOfficialEntryPublicationUnit;
     const SHUnitCreator publication_factory =
         convex_wasm_application_factory_by_unit_slot(publication_unit_slot);
@@ -2283,6 +2372,7 @@ void install_intrinsic_snapshot_factory(Runtime &js) {
 }
 
 void validate_intrinsic_descriptor_state(Runtime &js) {
+  CONVEX_WASM_TRACE_INITIALIZATION(IntrinsicValidation, -1);
   if (intrinsic_descriptor_state_validator == nullptr) {
     throw JSError(js, "Intrinsic descriptor validator is unavailable");
   }
@@ -2363,6 +2453,7 @@ void install_guest_bridge(Runtime &js) {
   if (guest_bridge != nullptr) {
     return;
   }
+  CONVEX_WASM_TRACE_INITIALIZATION(GuestBridge, -1);
   if (bridge_bootstrap == nullptr) {
     throw JSError(js, "Capability bootstrap is unavailable");
   }
@@ -2749,15 +2840,14 @@ void reset_runtime_state() {
     application_slot.unit_initialization_count = 0;
   }
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
+  application_export_slots.clear();
   validated_chunk_slot_count = 0;
   for (auto &unit_slot : chunk_application_unit_slots) {
     unit_slot.namespace_value.reset();
     unit_slot.state = ChunkApplicationUnitState::Uninitialized;
     unit_slot.published = false;
   }
-  for (auto &pending_export : pending_application_exports) {
-    pending_export.reset();
-  }
+  pending_application_exports.clear();
   official_chunk_initialization_dirty = false;
 #endif
   bridge_unit_initialization_count = 0;
@@ -2792,6 +2882,9 @@ bool retained_runtime_state_is_empty() {
     }
   }
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
+  if (!application_export_slots.empty() || !pending_application_exports.empty()) {
+    return false;
+  }
   for (const auto &unit_slot : chunk_application_unit_slots) {
     if (unit_slot.namespace_value != nullptr ||
         unit_slot.state != ChunkApplicationUnitState::Uninitialized ||
@@ -2825,6 +2918,9 @@ bool retained_runtime_state_is_valid() {
       formatter_unit_initialization_count != 1 ||
       declared_application_entry_count <= 0 ||
       declared_application_entry_count > kMaxApplicationEntrySlots ||
+      application_export_slots.size() !=
+          static_cast<size_t>(declared_application_entry_count) ||
+      pending_application_exports.size() != application_export_slots.size() ||
       declared_application_unit_count < 2 ||
       declared_application_unit_count > kMaxApplicationUnitSlots ||
       chunk_slot_count <= 0 ||
@@ -2849,11 +2945,10 @@ bool retained_runtime_state_is_valid() {
 #endif
     return false;
   }
-  for (int32_t entry_slot = 0; entry_slot < kMaxApplicationEntrySlots;
+  for (size_t entry_slot = 0; entry_slot < application_export_slots.size();
        ++entry_slot) {
     const auto &application_slot = application_export_slots[entry_slot];
-    const bool declared = entry_slot < declared_application_entry_count;
-#if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
+    const bool declared = entry_slot < static_cast<size_t>(declared_application_entry_count);
     const bool initialized = application_slot.exports != nullptr ||
         application_slot.unit_initialization_count != 0;
     if (declared
@@ -2864,18 +2959,6 @@ bool retained_runtime_state_is_valid() {
                   application_slot.unit_initialization_count != 0) {
       return false;
     }
-#else
-    const bool initialized = application_slot.exports != nullptr ||
-        application_slot.unit_initialization_count != 0;
-    if (declared
-            ? initialized &&
-                  (application_slot.exports == nullptr ||
-                   application_slot.unit_initialization_count != 1)
-            : application_slot.exports != nullptr ||
-                  application_slot.unit_initialization_count != 0) {
-      return false;
-    }
-#endif
   }
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
   if (validated_chunk_slot_count != chunk_slot_count) {
@@ -3123,6 +3206,24 @@ Object invocation_context(Runtime &js,
 
 }  // namespace
 
+#if defined(CONVEX_WASM_LOCAL_INITIALIZATION_TRACE)
+extern "C" __attribute__((export_name("convex_wasm_initialization_diagnostics")))
+uint32_t convex_wasm_initialization_diagnostics(int32_t operation) {
+  if (initialization_trace_parent != -1) __builtin_trap();
+  switch (operation) {
+    case 0: return 1;  // Diagnostic ABI version.
+    case 1: return reinterpret_cast<uintptr_t>(initialization_trace_records.data());
+    case 2: return initialization_trace_count;
+    case 3: return sizeof(InitializationTraceRecord);
+    case 4:
+      if (runtime == nullptr) __builtin_trap();
+      _sh_get_heap_statistics(runtime, &initialization_trace_heap);
+      return reinterpret_cast<uintptr_t>(&initialization_trace_heap);
+    default: __builtin_trap();
+  }
+}
+#endif
+
 extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
   const int32_t package_entry_count =
       convex_wasm_application_entry_count();
@@ -3163,7 +3264,10 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
       reset_runtime_state();
       return 9;
     }
-    runtime = initialize_runtime();
+    {
+      CONVEX_WASM_TRACE_INITIALIZATION(RuntimeCreate, -1);
+      runtime = initialize_runtime();
+    }
     if (runtime == nullptr) {
       return 1;
     }
@@ -3176,8 +3280,13 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
   int32_t caught_status = 5;
   try {
     if (new_runtime) {
+      CONVEX_WASM_TRACE_INITIALIZATION(RuntimeSupport, -1);
       declared_application_entry_count = package_entry_count;
       declared_application_unit_count = package_unit_count;
+#if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT)
+      application_export_slots.resize(package_entry_count);
+      pending_application_exports.resize(package_entry_count);
+#endif
       js_error_phase = JSErrorPhase::ReserveCompileProfileOutput;
       reserve_compile_profile_output(js);
       install_intrinsic_snapshot_factory(js);

@@ -14,6 +14,10 @@ export const convexWasmOfficialOutputCohortPartitionPolicy = Object.freeze({
   maximumEntries: 8,
   order: "entry-path-utf16-ascending-contiguous",
 });
+export const convexWasmOfficialOutputExplicitPartitionPolicy = Object.freeze({
+  kind: "convex-wasm-official-output-explicit-entry-partition-v1",
+  order: "entry-path-utf16-ascending-within-groups-and-by-first-entry",
+});
 
 const COHORT_ID_DOMAIN = "convex-wasm-official-output-cohort-v1";
 const ENTRY_ID_DOMAIN = "convex-wasm-official-output-cohort-entry-v1";
@@ -102,11 +106,14 @@ function expectedEntryIdentity(entry) {
   });
 }
 
-function expectedCohortId(entries) {
+function expectedCohortId(
+  entries,
+  partitionPolicy = convexWasmOfficialOutputCohortPartitionPolicy
+) {
   return fingerprintJson({
     domain: COHORT_ID_DOMAIN,
     entryIds: entries.map(({ entryId }) => entryId),
-    partitionPolicy: convexWasmOfficialOutputCohortPartitionPolicy,
+    partitionPolicy,
   });
 }
 
@@ -183,6 +190,35 @@ function createCohorts(entries) {
   return cohorts;
 }
 
+function createExplicitCohorts(entries, groups) {
+  if (!Array.isArray(groups) || groups.length === 0) {
+    fail("explicit entry groups must be a non-empty array");
+  }
+  const remaining = new Map(entries.map((entry) => [entry.entryPath, entry]));
+  const cohorts = groups.map((group) => {
+    if (!Array.isArray(group) || group.length === 0) {
+      fail("each explicit entry group must be non-empty");
+    }
+    const members = group
+      .map((path) => {
+        const entry = remaining.get(path);
+        if (entry === undefined) fail("explicit groups repeat or select an unknown entry");
+        remaining.delete(path);
+        return entry;
+      })
+      .sort((left, right) => compareStrings(left.entryPath, right.entryPath));
+    return {
+      cohortId: expectedCohortId(members, convexWasmOfficialOutputExplicitPartitionPolicy),
+      entries: members,
+      entryCount: members.length,
+    };
+  });
+  if (remaining.size !== 0) fail("explicit groups omit selected entries");
+  return cohorts.sort((left, right) =>
+    compareStrings(left.entries[0].entryPath, right.entries[0].entryPath)
+  );
+}
+
 function retainedCohorts(namespaces) {
   const entries = namespaces.map((namespace) => {
     let entry = retainedScheduleEntries.get(namespace);
@@ -239,11 +275,11 @@ function sourceEnvelopeProvenance(sourceEnvelope, sourceEnvelopeFileIdentity) {
   };
 }
 
-function scheduleIdentity({ cohorts, provenance }) {
+function scheduleIdentity({ cohorts, provenance, partitionPolicy }) {
   return {
     cohorts,
     kind: convexWasmOfficialOutputCohortScheduleKind,
-    partitionPolicy: convexWasmOfficialOutputCohortPartitionPolicy,
+    partitionPolicy,
     provenance,
   };
 }
@@ -310,8 +346,15 @@ export function createConvexWasmOfficialOutputCohortSchedule(options) {
   const sourceEnvelope = validateConvexWasmSourceEnvelope(rawSourceEnvelope);
   const sourceEnvelopeFileIdentity = normalizeSourceEnvelopeFileIdentity(options);
   const namespaces = retainedConvexWasmSourceEnvelopeEntryNamespaces(sourceEnvelope);
-  const cohorts =
-    namespaces === undefined
+  const explicit = Object.hasOwn(options, "entryGroups");
+  const partitionPolicy = explicit
+    ? convexWasmOfficialOutputExplicitPartitionPolicy
+    : convexWasmOfficialOutputCohortPartitionPolicy;
+  const cohorts = explicit
+    ? freezeJsonTree(
+        createExplicitCohorts(selectedEntriesFromSourceEnvelope(sourceEnvelope), options.entryGroups)
+      )
+    : namespaces === undefined
       ? createCohorts(selectedEntriesFromSourceEnvelope(sourceEnvelope))
       : retainedCohorts(namespaces);
   if (cohorts.length === 0) {
@@ -319,7 +362,7 @@ export function createConvexWasmOfficialOutputCohortSchedule(options) {
   }
   const provenance = sourceEnvelopeProvenance(sourceEnvelope, sourceEnvelopeFileIdentity);
   if (namespaces !== undefined) freezeJsonTree(provenance);
-  const identity = scheduleIdentity({ cohorts, provenance });
+  const identity = scheduleIdentity({ cohorts, provenance, partitionPolicy });
   const schedule = Object.freeze({
     cohorts: Object.freeze(cohorts),
     identity: Object.freeze({
@@ -455,6 +498,15 @@ export function authenticateConvexWasmOfficialOutputCohortSchedule(options) {
   if (!Array.isArray(schedule.cohorts) || schedule.cohorts.length === 0) {
     fail("cohort schedule must contain at least one cohort");
   }
+  const partitionPolicy = schedule.identity?.partitionPolicy;
+  const explicit =
+    canonicalJson(partitionPolicy) === canonicalJson(convexWasmOfficialOutputExplicitPartitionPolicy);
+  if (
+    !explicit &&
+    canonicalJson(partitionPolicy) !== canonicalJson(convexWasmOfficialOutputCohortPartitionPolicy)
+  ) {
+    fail("cohort schedule partition policy is invalid");
+  }
   schedule.cohorts.forEach((cohort, cohortIndex) => {
     const value = requireExactKeys(
       cohort,
@@ -465,7 +517,8 @@ export function authenticateConvexWasmOfficialOutputCohortSchedule(options) {
       fail(`cohort ${cohortIndex} entries must be a non-empty array`);
     }
     if (
-      value.entries.length > convexWasmOfficialOutputCohortPartitionPolicy.maximumEntries ||
+      (!explicit &&
+        value.entries.length > convexWasmOfficialOutputCohortPartitionPolicy.maximumEntries) ||
       value.entryCount !== value.entries.length
     ) {
       fail(`cohort ${cohortIndex} violates the maximum entry count`);
@@ -473,7 +526,7 @@ export function authenticateConvexWasmOfficialOutputCohortSchedule(options) {
     const entries = value.entries.map((entry, entryIndex) =>
       validateEntry(entry, cohortIndex, entryIndex)
     );
-    if (value.cohortId !== expectedCohortId(entries)) {
+    if (value.cohortId !== expectedCohortId(entries, partitionPolicy)) {
       fail(`cohort ${cohortIndex} identity does not match its members`);
     }
   });
@@ -486,8 +539,6 @@ export function authenticateConvexWasmOfficialOutputCohortSchedule(options) {
   const { sha256, ...identityPayload } = identity;
   if (
     identity.kind !== convexWasmOfficialOutputCohortScheduleKind ||
-    canonicalJson(identity.partitionPolicy) !==
-      canonicalJson(convexWasmOfficialOutputCohortPartitionPolicy) ||
     canonicalJson(identity.cohorts) !== canonicalJson(schedule.cohorts) ||
     canonicalJson(identity.provenance) !== canonicalJson(provenance) ||
     sha256 !== fingerprintJson(identityPayload)
@@ -498,6 +549,9 @@ export function authenticateConvexWasmOfficialOutputCohortSchedule(options) {
   const sourceEnvelopeFileIdentity = normalizeSourceEnvelopeFileIdentity(options);
   const expected = createConvexWasmOfficialOutputCohortSchedule({
     sourceEnvelope,
+    ...(explicit
+      ? { entryGroups: schedule.cohorts.map(({ entries }) => entries.map(({ entryPath }) => entryPath)) }
+      : {}),
     ...(sourceEnvelopeFileIdentity === undefined
       ? {}
       : {

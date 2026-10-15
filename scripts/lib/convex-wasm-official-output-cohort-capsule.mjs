@@ -38,7 +38,7 @@ export const convexWasmOfficialOutputCohortCapsuleKind =
 export const convexWasmOfficialOutputCohortCapsuleStage = "module-graph-cohort-planning-capsule";
 
 const CAPSULE_SCHEMA_VERSION = 6;
-const MAX_CAPSULE_BYTES = 8 * 1024 * 1024;
+const MAX_CAPSULE_BYTES = 64 * 1024 * 1024;
 const MAX_RETAINED_CAPSULE_PROJECTION_BYTES = 96 * 1024 * 1024;
 const MAX_RETAINED_CAPSULE_PROJECTIONS = 32;
 const COMPILER_OUTPUT_TOPOLOGY_KIND =

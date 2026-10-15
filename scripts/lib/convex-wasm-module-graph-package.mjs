@@ -5592,13 +5592,15 @@ function deriveModuleGraphPhysicalShardPlanMonolithic(
       })
     )
     .sort((left, right) => compareStrings(left.codeIdentitySha256, right.codeIdentitySha256));
-  // Use a bounded PIC-byte target so shared code does not accumulate into one large module.
-  // Oversize SCCs remain singleton shards regardless of the target.
+  // Compilation boundaries also matter with one runtime cohort: folding its reusable units
+  // into the residual leaf would make an entry edit invalidate unrelated native code.
+  // Use the same bounded PIC-byte target; oversize SCCs remain singleton shards.
   const plan = planConvexWasmPhysicalShards({
     kind: convexWasmPhysicalShardPlanningRequestKind,
     logicalUnits: plannerLogicalUnits,
     policy: {
       kind: convexWasmPhysicalShardPolicyKind,
+      minimumCohortCount: 1,
       targetShardWeight: MODULE_GRAPH_PHYSICAL_SHARD_TARGET_PIC_OBJECT_BYTES,
     },
   });
@@ -5819,6 +5821,7 @@ function deriveModuleGraphPhysicalShardPlanFromCohortContributions({
     logicalUnits: plannerLogicalUnits,
     policy: {
       kind: convexWasmPhysicalShardPolicyKind,
+      minimumCohortCount: 1,
       targetShardWeight: MODULE_GRAPH_PHYSICAL_SHARD_TARGET_PIC_OBJECT_BYTES,
     },
   });

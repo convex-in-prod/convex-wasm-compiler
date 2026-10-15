@@ -1,4 +1,6 @@
 import { buildConvexWasmModuleGraphCoreArtifact } from "./convex-wasm-module-graph-build.mjs";
+import { convexWasmCapabilitySourcePipelineSha256 } from "./convex-wasm-capability-identity.mjs";
+export { convexWasmCapabilitySourcePipelineSha256 };
 import { normalizeEngineConfig, validatePrecompilerEngineRequest } from "./convex-wasm-engine-config.mjs";
 import {
   readStaticHermesPrecompileResponse,
@@ -1360,22 +1362,6 @@ function verifyGuestSourceProvenance(source, provenance) {
   ) {
     fail("guestSourceProvenance compiler bundle does not match generated JavaScript");
   }
-}
-
-export function convexWasmCapabilitySourcePipelineSha256(localProfiles) {
-  if (!Array.isArray(localProfiles) || localProfiles.length === 0 || localProfiles.length > 8) {
-    fail("capability source pipeline requires between one and eight local profiles");
-  }
-  const profileSha256s = localProfiles.map((profile, index) => {
-    assertPlainObject(profile, `capability local profile ${index}`);
-    return requireSha256(profile.sha256, `capability local profile ${index} SHA-256`);
-  });
-  return profileSha256s.length === 1
-    ? profileSha256s[0]
-    : fingerprintJson({
-        domain: "convex-wasm-capability-package-source-pipeline-v2",
-        profiles: profileSha256s,
-      });
 }
 
 function hashBytes(bytes) {
@@ -26224,7 +26210,7 @@ async function compileNormalizedConvexWasmCohorts(
     if (
       capabilityPackage !== undefined &&
       (capabilityPackage.length < 2 ||
-        capabilityPackage.length > 8 ||
+        (chunkApplicationDescriptor === undefined && capabilityPackage.length > 8) ||
         capabilityPackage.some((entry) => entry === undefined))
     ) {
       fail("capability package compilation requires between two and eight entry units");
@@ -28997,7 +28983,7 @@ async function normalizeCapabilityArtifactOptionsList(
   if (
     !Array.isArray(rawOptionsList) ||
     rawOptionsList.length < minimumEntries ||
-    rawOptionsList.length > 8
+    (!selectorMemberRoutes && rawOptionsList.length > 8)
   ) {
     fail(cardinalityDescription);
   }
@@ -29083,7 +29069,7 @@ export async function compileConvexWasmOfficialOutputModuleGraphInputs(rawOption
   const optionsList = await normalizeCapabilityArtifactOptionsList(
     rawOptionsList,
     1,
-    "official-output module-graph input compilation requires between one and eight entries",
+    "official-output module-graph input compilation requires at least one entry",
     { selectorMemberRoutes: true }
   );
   if (optionsList[0].capabilityChunkApplication === undefined) {
@@ -29129,7 +29115,7 @@ export async function compileConvexWasmOfficialOutputModuleGraphInputsInMaterial
     const optionsList = await normalizeCapabilityArtifactOptionsList(
       rawOptionsList,
       1,
-      "official-output module-graph input compilation requires between one and eight entries",
+      "official-output module-graph input compilation requires at least one entry",
       { selectorMemberRoutes: true, materialSessionRecord: record }
     );
     if (optionsList[0].capabilityChunkApplication === undefined) {

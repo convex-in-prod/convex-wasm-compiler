@@ -1756,7 +1756,8 @@ test("builds a module-graph package from a separate application's source graph",
   assert.equal(verified.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256);
 });
 
-test("builds an authenticated project package from a separate application's staged source", async (t) => {
+for (const partition of ["lexical", "combined"]) {
+test(`builds an authenticated ${partition} project package from a separate application's staged source`, async (t) => {
   const fixture = await createFixture(t, { moduleGraphWasm: true });
   const application = await buildSyntheticDeploymentApplication(t, { bindAnalysis: false, entryCount: 9 });
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 2 };
@@ -1782,6 +1783,7 @@ test("builds an authenticated project package from a separate application's stag
   };
   const built = await buildConvexWasmProjectPackage({
     config: { projectRoot: application.applicationRoot, selectedExports: application.inventory.functions.map(({ modulePath }) => `${modulePath}:read`) },
+    ...(partition === "combined" ? { entryGroups: [application.inventory.functions.map(({ entryPath }) => entryPath)] } : {}),
     inputs: {
       artifactConfig: fixture.options,
       buildDirectory: fixture.root,
@@ -1797,11 +1799,11 @@ test("builds an authenticated project package from a separate application's stag
     },
     resourceGuard,
   });
-  assert.equal(built.schedule.cohorts.length, 2);
+  assert.equal(built.schedule.cohorts.length, partition === "combined" ? 1 : 2);
   assert.equal(activeNativeCommands, 0);
   assert.ok(peakNativeCommands > 0, "project build must execute native commands");
   assert.ok(peakNativeCommands <= launchPolicy.jobs, `native concurrency ${peakNativeCommands} exceeds ${launchPolicy.jobs} jobs`);
-  const artifacts = built.artifact.artifacts;
+  const artifacts = built.artifact.artifacts ?? [built.artifact];
   assert.equal(artifacts.length, built.schedule.cohorts.length);
   for (const [index, artifact] of artifacts.entries()) {
     assert.equal(artifact.graphManifest.routing.cohortId, built.schedule.cohorts[index].cohortId);
@@ -1834,6 +1836,7 @@ test("builds an authenticated project package from a separate application's stag
   });
   const repeated = await buildConvexWasmProjectPackage({
     config: { projectRoot: secondApplication.applicationRoot, selectedExports: secondApplication.inventory.functions.map(({ modulePath }) => `${modulePath}:read`) },
+    ...(partition === "combined" ? { entryGroups: [secondApplication.inventory.functions.map(({ entryPath }) => entryPath)] } : {}),
     inputs: {
       artifactConfig: fixture.options,
       buildDirectory: secondBuildDirectory,
@@ -1854,10 +1857,11 @@ test("builds an authenticated project package from a separate application's stag
   assert.ok(repeated.chunkPreparation.persistentPreparationCacheHits > 0);
   assert.equal(repeated.chunkPreparation.persistentPreparationCacheMisses, 0);
   assert.deepEqual(
-    repeated.artifact.artifacts.map(({ graphManifest }) => graphManifest.moduleReferences.map(({ artifacts }) => artifacts)),
+    (repeated.artifact.artifacts ?? [repeated.artifact]).map(({ graphManifest }) => graphManifest.moduleReferences.map(({ artifacts }) => artifacts)),
     artifacts.map(({ graphManifest }) => graphManifest.moduleReferences.map(({ artifacts }) => artifacts))
   );
   assert.equal(activeNativeCommands, 0);
   assert.ok(peakNativeCommands <= launchPolicy.jobs);
   await repeated.artifact.verifyMaterials();
 });
+}

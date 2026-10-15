@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
+import { planConvexWasmOfficialOutputEntryGroups } from "./convex-wasm-entry-grouping.mjs";
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
 import {
@@ -355,14 +356,20 @@ test("selects and authenticates an exact output closure from a separate graph se
     entryPath: "convex/entry.ts",
     graphSession,
   });
-  assert.deepEqual(selected.modules.map(({ identity }) => identity.path), ["entry.js", "shared.js"]);
-  assert.equal(selected.identity.sha256, fingerprintJson({
-    entryModulePath: selected.identity.entryModulePath,
-    imports: selected.identity.imports,
-    kind: selected.identity.kind,
-    metafileSha256: selected.identity.metafileSha256,
-    modules: selected.identity.modules,
-  }));
+  assert.deepEqual(
+    selected.modules.map(({ identity }) => identity.path),
+    ["entry.js", "shared.js"]
+  );
+  assert.equal(
+    selected.identity.sha256,
+    fingerprintJson({
+      entryModulePath: selected.identity.entryModulePath,
+      imports: selected.identity.imports,
+      kind: selected.identity.kind,
+      metafileSha256: selected.identity.metafileSha256,
+      modules: selected.identity.modules,
+    })
+  );
   assert.strictEqual(
     selectConvexWasmDeploymentOutputClosure({
       authentication,
@@ -478,7 +485,9 @@ test("retains one projection and immutable member validation across entry select
   assert.equal(canDeferConvexWasmDeploymentOutputClosureAuthentication(second), true);
   assert.equal(repeatedSharedMetadataReads, 0);
   const firstClosure = first.graphSession.deploymentOutputClosureByEntry.get(entries[0].entryPath);
-  const secondClosure = second.graphSession.deploymentOutputClosureByEntry.get(entries[1].entryPath);
+  const secondClosure = second.graphSession.deploymentOutputClosureByEntry.get(
+    entries[1].entryPath
+  );
   assert.equal(firstClosure.modules[1], secondClosure.modules[1]);
   assert.equal(
     select(entries[0]).graphSession.deploymentOutputClosureByEntry.get(entries[0].entryPath),
@@ -517,4 +526,46 @@ test("build input graph shares freeze admission and permanently rejects changed 
   assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession), false);
   graphSession.inputMaterials.set("source.ts", input);
   assert.equal(isCurrentConvexWasmDeploymentBuildInputGraph(token, graphSession), false);
+});
+
+test("default grouping derives complete authenticated closures including cycles", () => {
+  const graphSession = closureGraphSession(
+    fixtureDeploymentOutputGraph({
+      entries: ["a", "b", "light"].map((name) => ({
+        entryPath: `convex/${name}.ts`,
+        modulePath: `${name}.js`,
+      })),
+      importsByModulePath: new Map([
+        ["a.js", [{ path: "shared.js" }]],
+        ["b.js", [{ path: "shared.js" }]],
+        ["shared.js", [{ path: "cycle.js" }]],
+        ["cycle.js", [{ path: "shared.js" }]],
+      ]),
+      inputs: {},
+    })
+  );
+  const entryPaths = ["convex/a.ts", "convex/b.ts", "convex/light.ts"];
+  const result = planConvexWasmOfficialOutputEntryGroups({ graphSession, entryPaths });
+  assert.deepEqual(result.entryGroups, [["convex/a.ts", "convex/b.ts"], ["convex/light.ts"]]);
+  assert.deepEqual(
+    result.groups.map(({ dependencyCount }) => dependencyCount),
+    [4, 1]
+  );
+  assert.equal(result.policy.maximumLogicalUnits, 1024);
+  assert.deepEqual(
+    planConvexWasmOfficialOutputEntryGroups({ graphSession, entryPaths: entryPaths.toReversed() }),
+    result
+  );
+  assert.throws(
+    () => planConvexWasmOfficialOutputEntryGroups({ graphSession, entryPaths: [] }),
+    /selected entry paths/u
+  );
+  graphSession.deploymentOutputModulesByPath.set("shared.js", {
+    ...graphSession.deploymentOutputModulesByPath.get("shared.js"),
+    source: "changed source",
+  });
+  assert.throws(
+    () => planConvexWasmOfficialOutputEntryGroups({ graphSession, entryPaths }),
+    /bytes disagree with its authenticated identity/u
+  );
 });

@@ -99,18 +99,117 @@ test("requires explicit native memory and worker limits", () => {
     jobs: 3,
   });
   assert.equal(Object.isFrozen(policy), true);
+  assert.throws(() => createRawScheduler({ aotWorkers: 2, jobs: 3 }), /native launch policy/u);
   assert.throws(
-    () => createRawScheduler({ aotWorkers: 2, jobs: 3 }),
-    /native launch policy/u
-  );
-  assert.throws(
-    () => normalizeConvexWasmNativeLaunchPolicy({
-      aggregateMemoryMaxBytes: 5 * GIBIBYTE,
-      aotWorkers: 4,
-      jobs: 3,
-    }),
+    () =>
+      normalizeConvexWasmNativeLaunchPolicy({
+        aggregateMemoryMaxBytes: 5 * GIBIBYTE,
+        aotWorkers: 4,
+        jobs: 3,
+      }),
     /native launch AOT workers must not exceed jobs/u
   );
+});
+
+test("scheduler retains every invocation's incremental counters with explicit coverage and isolated reports", async () => {
+  const scheduler = createScheduler({ jobs: 2 });
+  const counters = {
+    hits: 7,
+    misses: 3,
+    inserts: 2,
+    evictions: 1,
+    rejectedRecords: 4,
+    oversizedValues: 5,
+  };
+  await scheduler.run("wasmtime-aot", async () => ({ ...timing(), incrementalCache: counters }));
+  const first = scheduler.report();
+  await Promise.all([
+    scheduler.run("wasmtime-aot", async () => ({ ...timing(), incrementalCache: counters })),
+    scheduler.run("wasmtime-aot", async () => timing()),
+  ]);
+  const report = scheduler.report();
+  for (const stats of [report.stages, report.classes]) {
+    assert.equal(stats[0].completedCount, 3);
+    assert.deepEqual(stats[0].resourceUsage.incrementalCache, {
+      reportedCommandCount: 2,
+      hits: 14,
+      misses: 6,
+      inserts: 4,
+      evictions: 2,
+      rejectedRecords: 8,
+      oversizedValues: 10,
+    });
+  }
+  assert.equal(first.stages[0].resourceUsage.incrementalCache.hits, 7);
+  report.stages[0].resourceUsage.incrementalCache.hits = 999;
+  report.classes[0].resourceUsage.incrementalCache.misses = 999;
+  const next = scheduler.report();
+  assert.equal(next.stages[0].resourceUsage.incrementalCache.hits, 14);
+  assert.equal(next.classes[0].resourceUsage.incrementalCache.misses, 6);
+});
+
+test("invalid incremental counters fail without recording a completed command or partial counters", async () => {
+  const valid = {
+    hits: 1,
+    misses: 2,
+    inserts: 3,
+    evictions: 0,
+    rejectedRecords: 0,
+    oversizedValues: 0,
+  };
+  for (const invalid of [
+    null,
+    [],
+    {},
+    { ...valid, hits: -1 },
+    { ...valid, misses: 0.5 },
+    { ...valid, inserts: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const scheduler = createScheduler({ jobs: 1 });
+    await scheduler.run("wasmtime-aot", async () => ({ ...timing(), incrementalCache: valid }));
+    await assert.rejects(
+      scheduler.run("wasmtime-aot", async () => ({
+        ...timing(),
+        incrementalCache: invalid,
+      })),
+      /incremental cache counters/u
+    );
+    const report = scheduler.report();
+    assert.equal(report.completedCount, 1);
+    assert.equal(report.failedCount, 1);
+    for (const stat of [report.stages[0], report.classes[0]]) {
+      assert.equal(stat.completedCount, 1);
+      assert.equal(stat.failedCount, 1);
+      assert.deepEqual(stat.resourceUsage.incrementalCache, { reportedCommandCount: 1, ...valid });
+    }
+  }
+});
+
+test("incremental aggregate overflow leaves the preceding command totals intact", async () => {
+  const scheduler = createScheduler({ jobs: 1 });
+  const counters = {
+    hits: Number.MAX_SAFE_INTEGER,
+    misses: 0,
+    inserts: 0,
+    evictions: 0,
+    rejectedRecords: 0,
+    oversizedValues: 0,
+  };
+  await scheduler.run("wasmtime-aot", async () => ({ ...timing(), incrementalCache: counters }));
+  await assert.rejects(
+    scheduler.run("wasmtime-aot", async () => ({
+      ...timing(),
+      incrementalCache: counters,
+    })),
+    /total exceeds safe integer precision/u
+  );
+  const report = scheduler.report();
+  assert.equal(report.completedCount, 1);
+  assert.equal(report.failedCount, 1);
+  assert.deepEqual(report.stages[0].resourceUsage.incrementalCache, {
+    reportedCommandCount: 1,
+    ...counters,
+  });
 });
 
 test("scheduler charges inner parallel work against the shared jobs budget without RSS kill caps", async () => {
@@ -571,9 +670,14 @@ test("AOT process concurrency and per-process workers are independent", async ()
   ]);
   assert.equal(convexWasmNativeCommandWorkerSlots({ args: ["-c", "input.c"] }, launchPolicy), 1);
   for (const prefix of [[], ["--package", "/fixture/precompiler", "--"]]) {
-    const normalizationCommand = { args: [...prefix, "--normalize-core", "module.wasm", "module.normalized.wasm"] };
+    const normalizationCommand = {
+      args: [...prefix, "--normalize-core", "module.wasm", "module.normalized.wasm"],
+    };
     assert.equal(convexWasmNativeCommandWorkerSlots(normalizationCommand, launchPolicy), 1);
-    assert.deepEqual(convexWasmNativeCommandArguments(normalizationCommand, launchPolicy), normalizationCommand.args);
+    assert.deepEqual(
+      convexWasmNativeCommandArguments(normalizationCommand, launchPolicy),
+      normalizationCommand.args
+    );
   }
 
   const scheduler = createScheduler(launchPolicy);

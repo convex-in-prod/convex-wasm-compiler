@@ -360,6 +360,58 @@ test("sharing requires a fully shared dependency closure", () => {
   );
 });
 
+test("single-consumer shards survive cohort consolidation and a residual entry edit", () => {
+  const dependencies = (cohortNames) => [
+    unit({ name: "base", cohortNames, weight: 6 }),
+    unit({ name: "library", cohortNames, dependencyNames: ["base"], weight: 6 }),
+  ];
+  const baseline = planConvexWasmPhysicalShards(request(dependencies(["first", "second"])));
+  const combined = (entryMaterial) =>
+    planConvexWasmPhysicalShards(
+      request(
+        [
+          ...dependencies(["combined"]),
+          unit({
+            name: "entry",
+            codeMaterial: entryMaterial,
+            picMaterial: entryMaterial,
+            cohortNames: ["combined"],
+            dependencyNames: ["library"],
+            shareable: false,
+          }),
+        ],
+        { minimumCohortCount: 1 }
+      )
+    );
+  const beforeEdit = combined("entry");
+  const afterEdit = combined("edited-entry");
+
+  assert.equal(beforeEdit.sharedShards.length, 2);
+  assert.deepEqual(beforeEdit.sharedShards, baseline.sharedShards);
+  assert.deepEqual(afterEdit.sharedShards, beforeEdit.sharedShards);
+  assert.equal(beforeEdit.residualComponents.length, 1);
+  assert.equal(afterEdit.residualComponents.length, 1);
+  assert.notEqual(afterEdit.planSha256, beforeEdit.planSha256);
+  assertShardOrderIsValid(afterEdit);
+});
+
+test("single-consumer policy retains unsafe closures in the residual leaf", () => {
+  const plan = planConvexWasmPhysicalShards(
+    request(
+      [
+        unit({ name: "private", cohortNames: ["only"], shareable: false }),
+        unit({ name: "dependent", cohortNames: ["only"], dependencyNames: ["private"] }),
+        unit({ name: "independent", cohortNames: ["only"] }),
+      ],
+      { minimumCohortCount: 1 }
+    )
+  );
+  assert.equal(plan.sharedShards.length, 1);
+  assert.equal(residualReasonForCode(plan, "private"), "contains-non-shareable-logical-unit");
+  assert.equal(residualReasonForCode(plan, "dependent"), "depends-on-residual-component");
+  assert.deepEqual(shardForCode(plan, "independent").dependencies, []);
+});
+
 test("cyclic logical units stay atomic and must have coherent occurrence evidence", () => {
   const first = unit({ name: "cycle-first", dependencyNames: ["cycle-second"], weight: 3 });
   const second = unit({ name: "cycle-second", dependencyNames: ["cycle-first"], weight: 4 });

@@ -94,8 +94,7 @@ function defaultStageWorkingSetEstimateBytes(stagePolicy) {
 
 function workingSetEstimateWithHeadroomBytes(estimateBytes) {
   return Math.ceil(
-    (estimateBytes * WORKING_SET_HEADROOM_NUMERATOR) /
-      WORKING_SET_HEADROOM_DENOMINATOR
+    (estimateBytes * WORKING_SET_HEADROOM_NUMERATOR) / WORKING_SET_HEADROOM_DENOMINATOR
   );
 }
 
@@ -243,6 +242,15 @@ export const convexWasmNativePhaseSchedulingPolicy = Object.freeze({
   stages: nativePhaseSchedulingStages,
 });
 
+const incrementalCacheCounterFields = [
+  "hits",
+  "misses",
+  "inserts",
+  "evictions",
+  "rejectedRecords",
+  "oversizedValues",
+];
+
 function nativePhaseSchedulingStat(name, schedulingClass) {
   return {
     activeCount: 0,
@@ -258,6 +266,10 @@ function nativePhaseSchedulingStat(name, schedulingClass) {
     requestCount: 0,
     schedulingClass,
     resourceUsage: {
+      incrementalCache: {
+        reportedCommandCount: 0,
+        ...Object.fromEntries(incrementalCacheCounterFields.map((field) => [field, 0])),
+      },
       maximumRssKiB: 0,
       systemCpuMilliseconds: 0,
       userCpuMilliseconds: 0,
@@ -282,6 +294,7 @@ function nativePhaseSchedulingStatReport(stat) {
       stat.completedCount === 0
         ? null
         : {
+            incrementalCache: { ...stat.resourceUsage.incrementalCache },
             maximumRssKiB: stat.resourceUsage.maximumRssKiB,
             systemCpuMilliseconds: stat.resourceUsage.systemCpuMilliseconds,
             userCpuMilliseconds: stat.resourceUsage.userCpuMilliseconds,
@@ -307,6 +320,24 @@ function requireNativePhaseTiming(timing, stage) {
     if (typeof timing[field] !== "number" || !Number.isFinite(timing[field]) || timing[field] < 0) {
       throw new ConvexWasmNativeCommandFailure(
         `Convex Wasm artifact pipeline: ${stage} native phase timing ${field} must be a nonnegative finite number`,
+        { kind: "output-validation", reason: "timing-incomplete" }
+      );
+    }
+  }
+  // Older compatible precompilers omit these counters. Missing coverage is distinct from
+  // a reported zero, and every actual invocation must survive graph-local cache-hit reports.
+  if (timing.incrementalCache !== undefined) {
+    const counters = timing.incrementalCache;
+    if (
+      typeof counters !== "object" ||
+      counters === null ||
+      Array.isArray(counters) ||
+      incrementalCacheCounterFields.some(
+        (field) => !Number.isSafeInteger(counters[field]) || counters[field] < 0
+      )
+    ) {
+      throw new ConvexWasmNativeCommandFailure(
+        `Convex Wasm artifact pipeline: ${stage} incremental cache counters must be nonnegative safe integers`,
         { kind: "output-validation", reason: "timing-incomplete" }
       );
     }
@@ -568,9 +599,32 @@ export function createConvexWasmNativePhaseScheduler(launchPolicy) {
             await nativeCommandWorkerSlots.run(entry.workerSlots, entry.operation),
             entry.stage
           );
+          if (timing.incrementalCache !== undefined) {
+            // Validate both aggregates before recording completion or changing either one.
+            updateStats(entry, (stat) => {
+              for (const field of incrementalCacheCounterFields) {
+                if (
+                  !Number.isSafeInteger(
+                    stat.resourceUsage.incrementalCache[field] + timing.incrementalCache[field]
+                  )
+                ) {
+                  throw new ConvexWasmNativeCommandFailure(
+                    `Convex Wasm artifact pipeline: ${entry.stage} incremental cache total exceeds safe integer precision`,
+                    { kind: "output-validation", reason: "timing-incomplete" }
+                  );
+                }
+              }
+            });
+          }
           completedCount += 1;
           updateStats(entry, (stat) => {
             stat.completedCount += 1;
+            if (timing.incrementalCache !== undefined) {
+              stat.resourceUsage.incrementalCache.reportedCommandCount += 1;
+              for (const field of incrementalCacheCounterFields) {
+                stat.resourceUsage.incrementalCache[field] += timing.incrementalCache[field];
+              }
+            }
             stat.resourceUsage.maximumRssKiB = Math.max(
               stat.resourceUsage.maximumRssKiB,
               timing.maxRssKiB
@@ -805,7 +859,8 @@ export function convexWasmNativeCommandArguments(command, launchPolicy) {
   if (
     command.args[0] !== "--package" ||
     (command.args[2] === "--" && command.args[3] === "--normalize-core")
-  ) return command.args;
+  )
+    return command.args;
   const operationalWorkerSlots = nativeCommandWorkerSlots.getStore() ?? configuredWorkerSlots;
   if (operationalWorkerSlots > configuredWorkerSlots) {
     fail(

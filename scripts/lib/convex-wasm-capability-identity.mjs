@@ -43,8 +43,8 @@ const PRE_STORAGE_CANONICAL_CAPABILITY_REQUEST_ENVELOPE_VECTOR_PRODUCER_KIND =
 const CANONICAL_CAPABILITY_REQUEST_ENVELOPE_VECTOR_PRODUCER_KIND =
   "convex-sdk-backend-capability-request-envelope-producer-v4";
 export function convexWasmCapabilitySourcePipelineSha256(localProfiles) {
-  if (!Array.isArray(localProfiles) || localProfiles.length === 0 || localProfiles.length > 8) {
-    fail("capability source pipeline requires between one and eight local profiles");
+  if (!Array.isArray(localProfiles) || localProfiles.length === 0) {
+    fail("capability source pipeline requires at least one local profile");
   }
   const profileSha256s = localProfiles.map((profile, index) => {
     assertPlainObject(profile, `capability local profile ${index}`);

@@ -821,6 +821,10 @@ requests, guest errors, and nonzero statuses fail the command. This amortizes
 compilation without retaining guest state. This diagnostic uses the runner's
 unmetered engine configuration, not a backend invocation policy.
 
+See [module grouping and initialization measurements](docs/module-grouping.md)
+for the default dependency-based grouping policy, unequal partitions, and local
+preparation measurements of authenticated module graphs.
+
 ## SDK syscall replay diagnostic
 
 `scripts/lib/convex-wasm-syscall-replay.mjs` prepares a captured JSON syscall

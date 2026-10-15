@@ -6,12 +6,64 @@ import { convexWasmSourceEnvelopeKind } from "./convex-wasm-source-envelope.mjs"
 import {
   authenticateConvexWasmOfficialOutputCohortSchedule,
   convexWasmOfficialOutputCohortPartitionPolicy,
+  convexWasmOfficialOutputExplicitPartitionPolicy,
   createConvexWasmOfficialOutputCohortSchedule,
   scheduleConvexWasmOfficialOutputCohortBuildsFromAuthenticatedSchedule,
   scheduleConvexWasmOfficialOutputCohortBuilds,
 } from "./convex-wasm-official-output-cohort-schedule.mjs";
 
 const digest = (character) => character.repeat(64);
+
+test("explicit partitions retain all namespaces with unequal groups larger than eight", () => {
+  const envelope = sourceEnvelope({ entryCount: 13, routesPerEntry: () => 2 });
+  const entryGroups = [envelope.entryPaths.slice(0, 10), envelope.entryPaths.slice(10)];
+  const schedule = createConvexWasmOfficialOutputCohortSchedule({ sourceEnvelope: envelope, entryGroups });
+  assert.deepEqual(schedule.cohorts.map(({ entryCount }) => entryCount), [10, 3]);
+  assert.deepEqual(schedule.identity.partitionPolicy, convexWasmOfficialOutputExplicitPartitionPolicy);
+  assert.deepEqual(authenticateConvexWasmOfficialOutputCohortSchedule({
+    schedule: JSON.parse(JSON.stringify(schedule)), sourceEnvelope: envelope,
+  }), schedule);
+  const reordered = createConvexWasmOfficialOutputCohortSchedule({
+    sourceEnvelope: envelope,
+    entryGroups: entryGroups.toReversed().map((group) => group.toReversed()),
+  });
+  assert.deepEqual(reordered, schedule);
+  assert.equal(schedule.cohorts.flatMap(({ entries }) => entries).flatMap(({ routes }) => routes).length, 26);
+});
+
+test("all-entry and singleton partitions use the same coverage authority", () => {
+  const envelope = sourceEnvelope({ entryCount: 17, routesPerEntry: () => 1 });
+  for (const entryGroups of [[envelope.entryPaths], envelope.entryPaths.map((path) => [path])]) {
+    const schedule = createConvexWasmOfficialOutputCohortSchedule({ sourceEnvelope: envelope, entryGroups });
+    assert.equal(schedule.cohorts.length, entryGroups.length);
+    authenticateConvexWasmOfficialOutputCohortSchedule({
+      schedule: JSON.parse(JSON.stringify(schedule)), sourceEnvelope: envelope,
+    });
+  }
+});
+
+test("explicit partitions reject missing, duplicated, unknown and empty membership", () => {
+  const envelope = sourceEnvelope({ entryCount: 3, routesPerEntry: () => 1 });
+  const [a, b, c] = envelope.entryPaths;
+  for (const entryGroups of [[[a, b]], [[a, b], [a, c]], [[a, b, c, "convex/unknown.ts"]], [[], [a,b,c]], []]) {
+    assert.throws(() => createConvexWasmOfficialOutputCohortSchedule({
+      sourceEnvelope: envelope, entryGroups,
+    }), /explicit/u);
+  }
+});
+
+test("changing other groups does not change an unchanged explicit cohort identity", () => {
+  const envelope = sourceEnvelope({ entryCount: 12, routesPerEntry: () => 1 });
+  const unchanged = envelope.entryPaths.slice(0, 9);
+  const first = createConvexWasmOfficialOutputCohortSchedule({
+    sourceEnvelope: envelope, entryGroups: [unchanged, envelope.entryPaths.slice(9)],
+  });
+  const second = createConvexWasmOfficialOutputCohortSchedule({
+    sourceEnvelope: envelope, entryGroups: [unchanged, ...envelope.entryPaths.slice(9).map((path) => [path])],
+  });
+  assert.equal(first.cohorts[0].cohortId, second.cohorts[0].cohortId);
+  assert.notEqual(first.identity.sha256, second.identity.sha256);
+});
 
 function withSourceEnvelopeIdentity(envelope) {
   const { sourceEnvelopeSha256: ignoredSourceEnvelopeSha256, ...payload } = envelope;

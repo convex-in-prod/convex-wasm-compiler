@@ -20,7 +20,6 @@ export const convexWasmOfficialOutputCohortPrototypeKind =
   "convex-wasm-official-output-cohort-prototype-v1";
 export const convexWasmOfficialOutputCohortPrototypeGlobal =
   "__convexWasmOfficialOutputCohortPrototype";
-export const convexWasmOfficialOutputCohortMaximumEntries = 8;
 export const convexWasmOfficialOutputSelectionSourceAuthenticationKind =
   "convex-wasm-official-output-selection-source-authentication-v1";
 
@@ -825,10 +824,8 @@ function normalizedCohortSelections(selections) {
       runtimeModulePath: requireString(item.route.runtimeModulePath, "cohort runtime module path"),
     });
   }
-  if (entries.length < 2 || entries.length > convexWasmOfficialOutputCohortMaximumEntries) {
-    fail(
-      `cohort must contain between two and ${convexWasmOfficialOutputCohortMaximumEntries} entries`
-    );
+  if (entries.length < 2) {
+    fail("cohort prototype must contain at least two entries");
   }
   return {
     entries,
@@ -980,7 +977,6 @@ export function authenticateConvexWasmOfficialOutputCohortPrototype(prototype) {
     identity.unitCount !== 1 ||
     !Array.isArray(identity.entries) ||
     identity.entries.length < 2 ||
-    identity.entries.length > convexWasmOfficialOutputCohortMaximumEntries ||
     sha256 !== fingerprintJson(identityPayload)
   ) {
     fail("official-output cohort prototype identity is invalid");

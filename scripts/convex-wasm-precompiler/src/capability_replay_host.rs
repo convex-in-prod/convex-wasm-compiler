@@ -61,6 +61,7 @@ pub struct State {
     pub console_calls: usize,
     pub object_layouts: [u64; 4],
     pub gc: [u64; 6],
+    pub environment_reads: BTreeMap<String, Option<String>>,
     environment: BTreeMap<String, Option<String>>,
     timestamp_ms: f64,
     started: Instant,
@@ -103,6 +104,7 @@ impl State {
             console_calls: 0,
             object_layouts: [0; 4],
             gc: [0; 6],
+            environment_reads: BTreeMap::new(),
             environment,
             timestamp_ms: 0.0,
             started: Instant::now(),
@@ -692,6 +694,10 @@ fn dispatch(
                 .as_str()
                 .ok_or_else(|| Error::msg("Invalid replay environment key"))?;
             let value = caller.data().environment.get(name).cloned().flatten();
+            caller
+                .data_mut()
+                .environment_reads
+                .insert(name.to_owned(), value.clone());
             let bytes = codec::encode_value(&json!({"value": value}), false).map_err(Error::msg)?;
             Val::I64(caller.data_mut().insert(Stored::Value(bytes))?)
         }
