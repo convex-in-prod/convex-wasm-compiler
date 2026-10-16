@@ -145,6 +145,12 @@ adding downstream dependency identities to this repository. The supplemental
 file uses the embedded policy schema and must not collide with its surface IDs
 or package fingerprints.
 
+Runtime `require` must be a direct literal call confined to module initialization.
+Use static imports for handler dependencies. A bundler can convert a deferred
+literal `require` into a cached initializer whose retained exports capture request
+configuration outside initialization dependency tracking; context-reuse admission
+rejects that source shape.
+
 `analyzeContextReuse` in `scripts/lib/convex-context-reuse.mjs` accepts an
 application `repoRoot`, an authenticated `compilerPackage`, optional
 `inventoryOptions.configPath` for additional registration builders, and

@@ -5,6 +5,9 @@
 #include <iostream>
 #include <stdexcept>
 
+extern "C" double convex_invocation_unix_timestamp_ms(void) { return 1; }
+extern "C" long long convex_capability_current(void) { return 0; }
+
 extern "C" SHUnit *sh_export_test_valid_chunk(void);
 extern "C" SHUnit *sh_export_test_failed_chunk(void);
 extern "C" int32_t convex_wasm_application_chunk_slot_count(void) { return 2; }
@@ -38,6 +41,8 @@ int main() {
     bridge_unit_initialization_count = formatter_unit_initialization_count = 1;
     declared_application_entry_count = 1;
     declared_application_unit_count = 3;
+    application_export_slots.resize(declared_application_entry_count);
+    pending_application_exports.resize(declared_application_entry_count);
 
     unsigned inspected_initializations = 0;
     js.global().setProperty(js, "inspectChunkInitialization",

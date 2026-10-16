@@ -45,7 +45,7 @@ authenticates its semantic inputs. Current boundaries are:
 | Data versions | ICU 78.2, CLDR 48, timezone data 2025c | Locale names, patterns, calendar data, zone aliases and offsets can differ from a host with other data. The local Node reference has timezone data 2026a. |
 | Constructor families | DateTimeFormat, NumberFormat and Collator | Locale, PluralRules, RelativeTimeFormat, ListFormat, DisplayNames, Segmenter and DurationFormat are absent. `Intl.supportedValuesOf` is also absent. |
 | Locale matching | Lookup for both `lookup` and `best fit` | Matches the pinned V8's default configuration; its experimental best-fit matcher and other engine configurations are not covered. |
-| Clock observations | Native date formatting with an omitted value reads the guest realtime clock | The embedding host must provide the invocation clock and account for that observation. A JavaScript Date facade alone does not intercept it. |
+| Clock observations | Native Date and omitted/undefined-date Intl formatting use the invocation clock | They require an active invocation and reject initialization-time clock access. Explicit-date formatting does not need a clock. Internal runtime clocks remain separate. |
 | Error text | Native Hermes/provider error messages | Error classes and observable coercion order are tested; messages and stack traces are not V8-identical. |
 | Intrinsic hardening | Compiler policy prevents extension and validates intrinsic descriptors | Ordinary V8 objects may permit mutations that the retained guest runtime rejects. |
 | Native allocation failure | ICU exhaustion traps the Wasm instance | This is not a catchable JavaScript error. The host must discard the instance without further guest calls or cleanup. |

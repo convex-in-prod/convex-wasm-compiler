@@ -7,6 +7,17 @@
 #include <iterator>
 #include <stdexcept>
 
+namespace {
+long long clock_capability = 0;
+double clock_timestamp_ms = 0;
+size_t clock_reads = 0;
+}
+extern "C" long long convex_capability_current(void) { return clock_capability; }
+extern "C" double convex_invocation_unix_timestamp_ms(void) {
+  ++clock_reads;
+  return clock_timestamp_ms;
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) throw std::runtime_error("Hardening and SDK source paths are required");
   std::unique_ptr<SHRuntime, decltype(&_sh_done)> hermes(initialize_runtime(), &_sh_done);
@@ -32,6 +43,41 @@ int main(int argc, char **argv) {
       "month: '2-digit', day: '2-digit'}).format(0) === '01/01/1970' && "
       "new Intl.Collator('en', {sensitivity: 'base'}).compare('caf\\u00e9', 'cafe') === 0"
       ).getBool());
+  evaluate("globalThis.clockFormatter = new Intl.DateTimeFormat('en-GB', "
+           "{timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit'}); "
+           "globalThis.clockFormat = clockFormatter.format;");
+  for (const bool active : {false, true, false}) {
+    clock_capability = active ? 1 : 0;
+    clock_timestamp_ms = 86400000;
+    const auto reads_before = clock_reads;
+    require(evaluate(
+        "clockFormat(0) === '01/01/1970' && "
+        "clockFormatter.formatToParts(0).map(p => p.value).join('') === '01/01/1970' && "
+        "new Date(0).getTime() === 0").getBool());
+    require(clock_reads == reads_before);
+    for (const auto *source : {
+             "Date.now()", "Date()", "new Date()", "clockFormat()",
+             "clockFormat(undefined)", "clockFormatter.formatToParts()",
+             "clockFormatter.formatToParts(undefined)"}) {
+      bool rejected = false;
+      try {
+        evaluate(source);
+      } catch (const JSError &) {
+        rejected = true;
+      }
+      require(rejected != active);
+    }
+    if (active) {
+      require(evaluate(
+          "Date.now() === 86400000 && new Date().getTime() === 86400000 && "
+          "clockFormat() === '02/01/1970' && "
+          "clockFormatter.formatToParts().map(p => p.value).join('') === '02/01/1970'"
+          ).getBool());
+    } else {
+      require(clock_reads == reads_before);
+    }
+  }
+  evaluate("delete globalThis.clockFormatter; delete globalThis.clockFormat;");
   auto array_buffer = js.global().getPropertyAsFunction(js, "ArrayBuffer");
   const QueryAbiProperties query_properties(js);
   const Value pending = Value::undefined();

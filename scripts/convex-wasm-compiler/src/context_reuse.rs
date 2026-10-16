@@ -11481,6 +11481,65 @@ invokeShadowedService();
     }
 
     #[test]
+    fn deferred_literal_require_cannot_hide_retained_initialization() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = TemporaryDirectory(
+            env::temp_dir().join(format!("convex-context-reuse-deferred-require-{unique}")),
+        );
+        fs::create_dir_all(root.0.join("convex")).unwrap();
+        for (name, source, rejected) in [
+            (
+                "deferred",
+                "export function handler() { return require('./settings').setting; }",
+                true,
+            ),
+            (
+                "nested",
+                "const load = () => require('./settings'); export function handler() { return load().setting; }",
+                true,
+            ),
+            (
+                "eager",
+                "const settings = require('./settings'); export function handler() { return settings.setting; }",
+                false,
+            ),
+            (
+                "shadowed",
+                "export function handler(require) { return require('./settings'); }",
+                false,
+            ),
+        ] {
+            let module_key = format!("convex/{name}.mts");
+            fs::write(root.0.join(&module_key), source).unwrap();
+            let mut modules = BTreeMap::new();
+            load_module(
+                &root.0,
+                &root.0.join("cache"),
+                &module_key,
+                &mut modules,
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            let facts = &modules
+                .get(&module_key)
+                .unwrap()
+                .summary
+                .context_reuse
+                .facts;
+            assert_eq!(
+                facts.iter().any(|fact| {
+                    fact.rule == "deferred-runtime-require" && fact.severity == "hard"
+                }),
+                rejected,
+                "module {module_key}"
+            );
+        }
+    }
+
+    #[test]
     fn spread_property_alias_preserves_global_require_provenance() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -13988,6 +14047,18 @@ fn analyze_call(
                 "hard",
                 "unsupported-construct",
                 "Runtime require must be a direct call to require with a string literal target.",
+                start,
+                end,
+                anchor_start,
+            ));
+        } else if !import_time {
+            // Bundlers can turn a literal require into a cached module initializer. If it
+            // first runs in a handler, retained exports escape initialization read tracking.
+            facts.push(fact(
+                "deferred-runtime-require",
+                "hard",
+                "unsupported-construct",
+                "Runtime require must be statically confined to module initialization; use a static import for handler dependencies.",
                 start,
                 end,
                 anchor_start,

@@ -1483,6 +1483,12 @@ Value take_typed_host_value(Runtime &js,
       .decode();
 }
 
+bool invocation_current_time(void *, double *time_ms) {
+  if (convex_capability_current() <= 0) return false;
+  *time_ms = convex_invocation_unix_timestamp_ms();
+  return true;
+}
+
 SHRuntime *initialize_runtime() {
   char program[] = "convex-wasm-native-capability";
   char init_heap[] = "--gc-init-heap=4MiB";
@@ -1500,7 +1506,11 @@ SHRuntime *initialize_runtime() {
       register_stack,
       native_promise,
   };
-  return _sh_init(7, argv);
+  auto *created = _sh_init(7, argv);
+  if (created != nullptr) {
+    _sh_set_current_time_provider(created, invocation_current_time, nullptr);
+  }
+  return created;
 }
 
 std::shared_ptr<Function> guest_function(Runtime &js, const Value &value) {
