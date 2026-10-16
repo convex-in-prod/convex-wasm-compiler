@@ -169,6 +169,10 @@ import {
   wasmContractTableType,
 } from "./convex-wasm-contract-reader.mjs";
 import {
+  certifyConvexWasmImmutableStaticData,
+  convexWasmImmutableStaticDataPolicy,
+} from "./convex-wasm-immutable-static-data.mjs";
+import {
   renderConvexWasmModuleGraphHostForwarders,
   renderConvexWasmModuleGraphStructuralTraps,
 } from "./convex-wasm-module-graph-selector-sources.mjs";
@@ -19634,6 +19638,7 @@ function moduleGraphLinkFlags(options, role) {
     "-sMAIN_MODULE=2",
     "-sFILESYSTEM=0",
     "-Wl,--export-all",
+    "-Wl,-Map,module.map",
   ];
 }
 
@@ -19685,6 +19690,7 @@ async function buildModuleGraphPrelink({
       revision: options.toolchain.emscripten.revision,
     },
     kind: "convex-wasm-official-output-module-graph-prelink-v1",
+    immutableStaticData: role === MODULE_GRAPH_BASE_ROLE ? convexWasmImmutableStaticDataPolicy : null,
     objects: objects.map(({ entry, identity: objectIdentity, name }) => ({
       identity: objectIdentity,
       name,
@@ -19808,9 +19814,17 @@ async function buildModuleGraphPrelink({
             ]
           : []),
       ]);
+      const normalizedPath = join(workPath, "module.normalized.wasm");
+      if (role === MODULE_GRAPH_BASE_ROLE) {
+        const [normalized, linkMap] = await settleConcurrentWork([
+          fs.readFile(normalizedPath),
+          fs.readFile(join(workPath, "module.map"), "utf8"),
+        ]);
+        await fs.writeFile(normalizedPath, certifyConvexWasmImmutableStaticData(normalized, linkMap));
+      }
       return {
         metadata: null,
-        outputPath: join(workPath, "module.normalized.wasm"),
+        outputPath: normalizedPath,
         timing: {
           kind: "convex-wasm-normalized-core-timing-v1",
           link: timing,

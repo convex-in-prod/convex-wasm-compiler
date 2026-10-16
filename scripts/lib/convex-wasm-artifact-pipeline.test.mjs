@@ -605,6 +605,7 @@ if (${String(moduleGraphWasm)} && tool === "emcc" && args[outputIndex + 1] === "
   const vector = (values) => Buffer.concat([u32(values.length), ...values]);
   const section = (id, contents) => Buffer.concat([Buffer.from([id]), u32(contents.length), contents]);
   const main = args.includes("-sMAIN_MODULE=2");
+  if (main) writeFileSync("module.map", "Addr Off Size Out In Symbol\\n");
   const memoryInfo = Buffer.concat([u32(main ? 0 : 16), u32(0), u32(main ? 0 : 1), u32(0)]);
   const dylink = section(0, Buffer.concat([
     string("dylink.0"), Buffer.from([1]), u32(memoryInfo.length), memoryInfo,

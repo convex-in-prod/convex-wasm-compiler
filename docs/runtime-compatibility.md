@@ -103,3 +103,44 @@ Where output is a fixed application convention, make that convention explicit
 in application code and execute the same code in both engines. Do not infer
 cross-engine parity from formatting examples alone or weaken paired comparison
 to conceal a difference.
+
+## Immutable static data accounting contract
+
+Module-graph base artifacts certify non-relocated native read-only data using
+lld's `.rodata` output-section layout. The compiler emits immutable i32 exports
+named `convex_wasm_immutable_static_v1_<start>_<end>_<payloadBytes>`. Their numeric
+names describe half-open wasm32 byte ranges and the number of emitted data bytes
+inside each range; an exclusive end may equal 4 GiB. Memory uses 64 KiB Wasm
+pages. The globals' values are unused. The export contract, Core-Wasm
+hash, AOT identity and producer identity authenticate these declarations. Link
+maps remain build scratch; source filenames and symbol names are not published
+in this metadata. Other conforming Wasm runtimes may ignore the exports.
+
+The classification applies to every eligible native library, not a named data
+blob. It excludes writable output sections, `.data.rel.ro`, relocated side-module
+data, stacks, heaps and application objects. A const input section inside a
+writable output section does not qualify. The base compilation is non-PIC;
+normalization preserves linear-memory addresses. Emitted payload counts exclude
+zero-filled gaps, so a loader can remove static payload from a Core-Wasm-size
+metadata allowance without also removing segment descriptors or other metadata.
+Only names in the linker's output-section column establish ranges; an input or
+symbol named `.rodata` does not. Empty segments emit no payload and do not
+overlap other segments. The certification policy participates in the prelink
+cache identity, independently of the published producer identity.
+
+These declarations assert native const semantics under the authenticated
+compiler/runtime contract. They are not a WebAssembly read-only-memory feature:
+an arbitrary Wasm store can still target any in-bounds address. An adopting host
+must trust the producer and its native libraries, verify actual copy-on-write
+backing, credit only complete immutable host pages, preserve the backing across
+memory growth and keep its owner charged once. File-backed AOT and its memory
+initialization mappings may refer to the same physical pages; a separate memory
+image needs a separate shared charge. Pages containing any writable bytes keep
+their per-instance charge. Neither logical memory capacity nor the credited
+amount is a measurement of resident RAM or live JavaScript objects.
+Retained Stores and error backtraces can outlive cache entries; their module
+owners must remain charged until those references and initialization images
+are destroyed. Missing mapping evidence grants no per-instance credit.
+Absence of declarations is supported and must not add memory-layout or export-name
+requirements to an otherwise supported artifact. In particular, a compatibility
+graph may expose its provider's memory under a different name.

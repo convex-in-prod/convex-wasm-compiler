@@ -152,6 +152,7 @@
     "scripts/lib/convex-wasm-generated-c-build.mjs",
     "scripts/lib/convex-wasm-git-blob-material.mjs",
     "scripts/lib/convex-wasm-git-source-snapshot.mjs",
+    "scripts/lib/convex-wasm-immutable-static-data.mjs",
     "scripts/lib/convex-wasm-incremental-cache-trace.mjs",
     "scripts/lib/convex-wasm-intrinsic-hardening.mjs",
     "scripts/lib/convex-wasm-lowering.mjs",
