@@ -44,7 +44,9 @@
       "id": "zod",
       "fingerprints": [
         "0eb44446fd6106d86d3290d7f85b7278030f701f4a9fe0876fb66751e5ea870b",
-        "48cca9ed62ef3c27c770dbd0f3e20af950ae5b7c31cb47a65eb2e2e8ec518a02"
+        "48cca9ed62ef3c27c770dbd0f3e20af950ae5b7c31cb47a65eb2e2e8ec518a02",
+        "be9fd70925c345fc11dcc24d58c72afe1929ff99d593b93eb44e86b57be7e251",
+        "f971a35b303b5739decabf2ef9255329dd91d24f4782bc76da5877c7de478d32"
       ],
       "admission": {
         "mode": "named-derived-members",
