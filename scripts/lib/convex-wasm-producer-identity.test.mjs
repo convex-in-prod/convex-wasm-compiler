@@ -89,7 +89,7 @@ test("the compiler producer manifest covers its owned source files", async () =>
     )
   );
   const libraryFiles = (await fs.readdir(join(repositoryRoot, "scripts", "lib")))
-    .filter((name) => (name.endsWith(".mjs") && !name.endsWith(".test.mjs")) || name.endsWith(".cpp") || name.endsWith(".h"))
+    .filter((name) => (name.endsWith(".mjs") && !name.endsWith(".test.mjs")) || name.endsWith(".cpp") || name.endsWith(".c") || name.endsWith(".h"))
     .map((name) => `scripts/lib/${name}`);
   assert.deepEqual(
     manifest.roots.filter((path) => path.startsWith("scripts/lib/")),
@@ -121,6 +121,9 @@ test("the compiler producer manifest covers its owned source files", async () =>
     undefined
   );
   for (const path of [
+    "scripts/build-wasm-allocator.py",
+    "scripts/lib/convex-wasm-allocator.c",
+    "scripts/lib/convex-wasm-allocator.h",
     "scripts/lib/convex-wasm-capability-identity.mjs",
     "scripts/lib/convex-wasm-module-graph-cohort-contract.mjs",
     "scripts/lib/convex-wasm-module-graph-deployment-binding.mjs",

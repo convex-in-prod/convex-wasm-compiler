@@ -1,6 +1,6 @@
 {
   "build": {
-    "buildRevision": "8aaed41bf6ad524d4b418414afdc0aa17e933222",
+    "buildRevision": "3e382ca444d2e2399a630fe5615575af242d5b6b",
     "cmake": {
       "host": {
         "flags": {
@@ -27,7 +27,7 @@
         }
       }
     },
-    "observedCheckoutRevision": "8aaed41bf6ad524d4b418414afdc0aa17e933222",
+    "observedCheckoutRevision": "3e382ca444d2e2399a630fe5615575af242d5b6b",
     "sourceMaterials": {
       "globalObject": {
         "path": "lib/VM/JSLib/GlobalObject.cpp",
@@ -42,12 +42,12 @@
         "sha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352"
       }
     },
-    "sourceRevision": "8aaed41bf6ad524d4b418414afdc0aa17e933222"
+    "sourceRevision": "3e382ca444d2e2399a630fe5615575af242d5b6b"
   },
   "harness": {
     "generatedC": {
-      "bytes": 4048,
-      "sha256": "0fa3e86595853b0d36a3c6b475efb497dc32f2b3209985ef64a6ba1fc9fae707"
+      "bytes": 4193,
+      "sha256": "2048e7c096616402284ac3aff2d991c9d363a98fd177ec6cca6397ac98d64b3b"
     },
     "generator": {
       "bytes": 14668,
@@ -537,12 +537,12 @@
       "sha256": "5db0ad61a43d90718e232fcfc08ab52fd2fa9e33bf349f34755ae5b788ffb456"
     },
     "wasm": {
-      "bytes": 40711519,
-      "sha256": "92002154359ca964cd1c908e7c04c412546360b6a962b4b2d49bb0c3ab75e1e5"
+      "bytes": 40712130,
+      "sha256": "74d5be4c41d4b0f9b5e8974cc13702a5fc0c54ce4f199ceedcf0633e2490e6d1"
     },
     "wasmLibhermesvmArchive": {
-      "bytes": 14208046,
-      "sha256": "e59cbf8fca0a45dde0c011ca9a90ff758f1462116a2a36b5ef14e4d5ef15825f"
+      "bytes": 14220346,
+      "sha256": "45dbddd7d4dbe2a209482db76140cf7628fcf91118dd05cc9ab9750803524163"
     }
   },
   "tools": {
@@ -551,12 +551,12 @@
       "sha256": "498eba9b6aacffca1c358ba340fc7b37015d7867cb211c7f2d45784ee9310f03"
     },
     "runner": {
-      "bytes": 19829312,
-      "sha256": "2397c6d09f3eeb26969dafec1ae4b3f422bbaa0b81ee3124b19d47af8bb4028c"
+      "bytes": 19833144,
+      "sha256": "2f1b3ce3852644db58cd98932dd9d788bc00ae044d4eb2d17171d03a0afbb088"
     },
     "shermes": {
-      "bytes": 4699320,
-      "sha256": "467a556c44ec0d49b3bd3a7333aa138d04b42a030ea63c56f80f1dc37b60e4a8"
+      "bytes": 4699072,
+      "sha256": "cee532189befab289fd985a5182f6de3c437f1eed4cd06c1692d14f09770dea1"
     }
   },
   "typedDeclarations": {
@@ -627,5 +627,5 @@
     ],
     "kind": "libhermes-runtime-declarations-plus-typed-arrays-v1"
   },
-  "reportSha256": "dfe7e36dd380d05aba560da0655f5f0da56b6358aef4ec05b1d5d48d0ec2783f"
+  "reportSha256": "e36ce22c640843f29eef310b59f91976307b69d9eeda85be4e09faf44adbb1bf"
 }
