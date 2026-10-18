@@ -15,12 +15,15 @@
     "convex-wasm-transfer-registry": "scripts/transfer-registry.sh"
   },
   "files": [
+    "docs/guest-memory-maintenance.md",
+    "docs/memory-reclamation.md",
     "docs/module-grouping.md",
     "docs/runtime-compatibility.md",
     "examples/items/**",
     "scripts/*.mjs",
     "scripts/*.sh",
     "scripts/*.json",
+    "scripts/build-wasm-allocator.py",
     "scripts/convex-wasm-precompiler/Cargo.toml",
     "scripts/convex-wasm-precompiler/Cargo.lock",
     "scripts/convex-wasm-precompiler/rust-toolchain.toml",

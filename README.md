@@ -29,6 +29,9 @@ need to be established.
 
 The repository currently provides:
 
+- optional [runtime memory reclamation primitives](docs/memory-reclamation.md)
+  for prepared literal layouts, explicit young-collection outcomes and
+  allocator-owned discardable payload;
 - a source-graph compiler that validates the supported JavaScript and
   TypeScript surface and emits authenticated lowering material;
 - a Wasmtime precompiler that converts compatible Core Wasm modules into
@@ -209,7 +212,7 @@ The development runner pins a reproducible Wasmtime revision. Artifact builds
 use the revision authenticated by the caller-selected precompiler package;
 it need not match the development runner. Setup does not need a second Wasmtime
 source checkout.
-The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/2539448f49dec017d502164f46736b64c561e070/DOWNSTREAM.md)
+The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/e7f307dadc8e2a8de3b4d09837985e07382f7305/DOWNSTREAM.md)
 owns compiler and runtime metering changes, including register preservation in
 fuel and epoch handlers and exception fuel accounting. Compiler package identities
 separate AOT cache entries when generated-code policy changes; runtime ABI

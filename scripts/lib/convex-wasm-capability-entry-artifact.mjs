@@ -71,20 +71,22 @@ async function settleCapabilityArtifactWork(promises) {
   return settlements.map(({ value }) => value);
 }
 
-async function validateCapabilityRuntimeHeader(cacheRoot, directory, expectedSource) {
+async function validateCapabilityRuntimeHeader(cacheRoot, directory, expectedSources) {
   await requirePrivateCacheDirectory(cacheRoot, directory);
-  const names = await fs.readdir(directory);
-  if (names.length !== 1 || names[0] !== "convex_wasm_opaque_abi_v3.h") {
+  const names = (await fs.readdir(directory)).sort(compareStrings);
+  if (canonicalJson(names) !== canonicalJson(Object.keys(expectedSources).sort(compareStrings))) {
     throw new Error("Convex Wasm capability runtime header directory has unexpected files");
   }
-  const path = join(directory, names[0]);
-  await requirePrivateCacheFile(cacheRoot, path);
-  const [source, stat] = await settleCapabilityArtifactWork([
-    fs.readFile(path, "utf8"),
-    fs.lstat(path),
-  ]);
-  if (!stat.isFile() || source !== expectedSource) {
-    throw new Error("Convex Wasm capability runtime header material is invalid");
+  for (const name of names) {
+    const path = join(directory, name);
+    await requirePrivateCacheFile(cacheRoot, path);
+    const [source, stat] = await settleCapabilityArtifactWork([
+      fs.readFile(path, "utf8"),
+      fs.lstat(path),
+    ]);
+    if (!stat.isFile() || source !== expectedSources[name]) {
+      throw new Error("Convex Wasm capability runtime header material is invalid");
+    }
   }
 }
 
@@ -105,12 +107,17 @@ export async function stageConvexWasmCapabilityRuntimeHeader({ cacheLayout, cach
 }
 
 async function stagePrivateCapabilityRuntimeHeader({ cacheLayout, cacheRoot }) {
-  const source = renderOpaqueAbiHeader();
+  const sources = {
+    "convex_wasm_opaque_abi_v3.h": renderOpaqueAbiHeader(),
+    "convex-wasm-allocator.h": await fs.readFile(
+      new URL("./convex-wasm-allocator.h", import.meta.url), "utf8"
+    ),
+  };
   const root = join(cacheLayout.work.scratch, "capability-runtime-headers");
-  const directory = join(root, sha256(source));
+  const directory = join(root, sha256(canonicalJson(sources)));
   await fs.mkdir(root, { mode: 0o700, recursive: true });
   try {
-    await validateCapabilityRuntimeHeader(cacheRoot, directory, source);
+    await validateCapabilityRuntimeHeader(cacheRoot, directory, sources);
     return directory;
   } catch (error) {
     if (error?.code !== "ENOENT") {
@@ -120,10 +127,9 @@ async function stagePrivateCapabilityRuntimeHeader({ cacheLayout, cacheRoot }) {
 
   const publication = await fs.mkdtemp(join(root, ".publish-"));
   try {
-    await fs.writeFile(join(publication, "convex_wasm_opaque_abi_v3.h"), source, {
-      flag: "wx",
-      mode: 0o600,
-    });
+    await settleCapabilityArtifactWork(Object.entries(sources).map(([name, source]) =>
+      fs.writeFile(join(publication, name), source, { flag: "wx", mode: 0o600 })
+    ));
     try {
       await fs.rename(publication, directory);
     } catch (error) {
@@ -134,7 +140,7 @@ async function stagePrivateCapabilityRuntimeHeader({ cacheLayout, cacheRoot }) {
   } finally {
     await fs.rm(publication, { force: true, recursive: true });
   }
-  await validateCapabilityRuntimeHeader(cacheRoot, directory, source);
+  await validateCapabilityRuntimeHeader(cacheRoot, directory, sources);
   return directory;
 }
 

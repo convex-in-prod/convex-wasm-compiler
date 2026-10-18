@@ -69,23 +69,40 @@ async function withNativeProbeBuild({ configuration, fixtureName, program, expor
     ]);
     objects.push(join(temporary, "runtime.o"));
     const module = join(temporary, "probe.wasm");
-    const archives = [
+    const archiveInputs = [
       join(wasmBuild, "lib/libhermesvm_a.a"), join(wasmBuild, "jsi/libjsi.a"),
       join(wasmBuild, "external/icu-small/libhermesStaticIcu.a"),
+      join(wasmBuild, "lib/libconvex_wasm_allocator.a"),
     ];
+    const archives = [];
+    const archiveHashes = [];
+    // Link exactly the bytes identified by this result, even if another build
+    // replaces the input archives. Keep these copies private until link ends.
+    for (const [index, input] of archiveInputs.entries()) {
+      const contents = await fs.readFile(input);
+      const path = join(temporary, `archive-${index}.a`);
+      await fs.writeFile(path, contents, { flag: "wx", mode: 0o600 });
+      archives.push(path);
+      archiveHashes.push(createHash("sha256").update(contents).digest("hex"));
+    }
     run(emcc, [
-      ...flags, ...objects, ...archives,
+      ...flags, ...objects, ...archives.slice(0, 3),
+      "-Wl,--whole-archive", archives[3], "-Wl,--no-whole-archive",
+      // The maintained archive supplies matching malloc and sbrk. Letting the
+      // SDK select another allocator would invalidate this diagnostic's scope.
+      "-sMALLOC=none",
       "--no-entry", "-sSTANDALONE_WASM=1", "-sSUPPORT_LONGJMP=wasm", "-sFILESYSTEM=0",
       "-sALLOW_MEMORY_GROWTH=1", "-sSTACK_SIZE=512KB", "-sINITIAL_HEAP=2MB",
       "-sMAXIMUM_MEMORY=134217728",
       ...exportedFunctions.map((name) => `-Wl,--export=${name}`), "-o", module,
     ]);
-    const hashes = await Promise.all([module, ...archives, fixture].map(async (path) =>
+    const hashes = await Promise.all([module, fixture].map(async (path) =>
       createHash("sha256").update(await fs.readFile(path)).digest("hex")));
     return await consume({ module, run, identity: {
       ...(program === null ? {} : { sourceSha256: createHash("sha256").update(program).digest("hex") }),
-      moduleSha256: hashes[0], hermesArchiveSha256: hashes[1], jsiArchiveSha256: hashes[2],
-      icuArchiveSha256: hashes[3], fixtureSha256: hashes[4],
+      moduleSha256: hashes[0], fixtureSha256: hashes[1],
+      hermesArchiveSha256: archiveHashes[0], jsiArchiveSha256: archiveHashes[1],
+      icuArchiveSha256: archiveHashes[2], allocatorArchiveSha256: archiveHashes[3],
     } });
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });

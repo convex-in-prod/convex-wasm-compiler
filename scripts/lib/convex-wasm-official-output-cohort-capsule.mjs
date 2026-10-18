@@ -32,13 +32,13 @@ import { decodeUtf8 } from "./convex-wasm-artifact-material.mjs";
 import { normalizeConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { authenticateConvexContextReuseCohortAnalysisIdentity } from "./convex-context-reuse-cohort-identity.mjs";
 import { isRetainedConvexWasmOfficialOutputCohort } from "./convex-wasm-official-output-cohort-schedule.mjs";
+import { convexWasmOfficialOutputCohortCapsuleMaxBytes } from "./convex-wasm-official-output-cohort-capsule-identity.mjs";
 
 export const convexWasmOfficialOutputCohortCapsuleKind =
   "convex-wasm-official-output-cohort-planning-capsule-v6";
 export const convexWasmOfficialOutputCohortCapsuleStage = "module-graph-cohort-planning-capsule";
 
 const CAPSULE_SCHEMA_VERSION = 6;
-const MAX_CAPSULE_BYTES = 64 * 1024 * 1024;
 const MAX_RETAINED_CAPSULE_PROJECTION_BYTES = 96 * 1024 * 1024;
 const MAX_RETAINED_CAPSULE_PROJECTIONS = 32;
 const COMPILER_OUTPUT_TOPOLOGY_KIND =
@@ -1224,7 +1224,7 @@ export async function probeConvexWasmOfficialOutputCohortCapsule({
     convexWasmOfficialOutputCohortCapsuleStage,
     cacheKey,
     "json",
-    MAX_CAPSULE_BYTES
+    convexWasmOfficialOutputCohortCapsuleMaxBytes
   );
   if (entry === undefined) return undefined;
   requireAuthenticatedArtifactCacheEntryJsonDigests(entry);
@@ -1380,7 +1380,7 @@ export async function publishConvexWasmOfficialOutputCohortCapsule({
     cacheRoot,
     extension: "json",
     identity: capsuleCacheIdentity(identity),
-    maxArtifactBytes: MAX_CAPSULE_BYTES,
+    maxArtifactBytes: convexWasmOfficialOutputCohortCapsuleMaxBytes,
     stage: convexWasmOfficialOutputCohortCapsuleStage,
   });
   if (

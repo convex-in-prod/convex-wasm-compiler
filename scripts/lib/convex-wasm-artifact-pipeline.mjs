@@ -19938,6 +19938,11 @@ async function buildModuleGraphBaseArtifacts({
       MODULE_GRAPH_SELECTOR_REGISTRATION_SYMBOL,
       "convex_wasm_graph_select_entry",
       "convex_wasm_udf_prepare_selected_entry",
+      // Custom runtime mains may omit this optional ABI. The maintained main
+      // must define it; keep a missing symbol a link error for that producer.
+      ...(compilerOutput.options.runtime.mainSourcePath === CAPABILITY_RUNTIME_MAIN_PATH
+        ? ["convex_wasm_udf_memory_maintenance"]
+        : []),
       "convex_wasm_udf_run",
     ],
     objects: baseObjects,

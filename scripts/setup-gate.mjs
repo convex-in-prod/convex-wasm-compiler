@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { emscriptenVersion, gateRevisions, wasmtimeRepository } from "./lib/convex-wasm-gate-pins.mjs";
 import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
+import { fingerprintMaterialPaths } from "./lib/convex-wasm-artifact-material.mjs";
 import binaryenSource from "./vendor/binaryen/source.json" with { type: "json" };
 
 const sources = Object.freeze({
@@ -197,6 +198,84 @@ async function fileIdentity(path) {
     size += bytes.length;
   }
   return { sha256: hash.digest("hex"), size };
+}
+
+export async function allocatorInputSha256(root) {
+  const emscripten = join(root, "emsdk", "upstream", "emscripten");
+  const llvm = join(root, "emsdk", "upstream");
+  const inputs = [
+    ["builder", join(scriptDirectory, "build-wasm-allocator.py")],
+    ["extension", join(scriptDirectory, "lib", "convex-wasm-allocator.c")],
+    ["interface", join(scriptDirectory, "lib", "convex-wasm-allocator.h")],
+    ["allocator", join(emscripten, "system", "lib", "dlmalloc.c")],
+    ["sbrk", join(emscripten, "system", "lib", "libc", "sbrk.c")],
+    ["driver", join(emscripten, "emcc.py")],
+    ["version", join(emscripten, "emscripten-version.txt")],
+    ["settings", join(emscripten, "src", "settings.js")],
+    ["internal-settings", join(emscripten, "src", "settings_internal.js")],
+    ["sdk-config", join(root, "emsdk", ".emscripten")],
+    ["sysroot-headers", join(emscripten, "cache", "sysroot", "include")],
+    ["clang-headers", join(llvm, "lib", "clang")],
+    ["clang", join(llvm, "bin", "clang")],
+    ["ar", join(llvm, "bin", "llvm-ar")],
+  ].map(([label, path]) => ({ label, path }));
+  // Driver imports and system-library flags are build inputs too. Exclude Python
+  // bytecode caches, whose creation during setup must not invalidate the build.
+  const toolsRoot = join(emscripten, "tools");
+  for (const name of (await fs.readdir(toolsRoot, { recursive: true })).sort()) {
+    if (name.endsWith(".py")) inputs.push({ label: `tools/${name}`, path: join(toolsRoot, name) });
+  }
+  const material = await fingerprintMaterialPaths(inputs, "allocator build inputs");
+  return createHash("sha256").update(emscriptenVersion).update(material.sha256).digest("hex");
+}
+
+async function allocatorReady(root) {
+  const archive = join(root, "build-wasm", "lib", "libconvex_wasm_allocator.a");
+  try {
+    const manifest = JSON.parse(await fs.readFile(`${archive}.json`, "utf8"));
+    if (manifest.inputSha256 !== await allocatorInputSha256(root)) return false;
+    const actual = await fileIdentity(archive);
+    return manifest.archiveSha256 === actual.sha256 && manifest.archiveBytes === actual.size;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export async function verifyAllocatorGate(root) {
+  if (!(await allocatorReady(root))) {
+    throw new Error("Wasm allocator archive is missing or stale; rerun convex-wasm-setup-gate");
+  }
+}
+
+async function buildAllocator(root, env) {
+  if (await allocatorReady(root)) return;
+  const archive = join(root, "build-wasm", "lib", "libconvex_wasm_allocator.a");
+  await fs.mkdir(dirname(archive), { recursive: true });
+  const stage = await fs.mkdtemp(join(dirname(archive), ".allocator-publication-"));
+  try {
+    const inputSha256 = await allocatorInputSha256(root);
+    const stagedArchive = join(stage, "libconvex_wasm_allocator.a");
+    await run("python3", [
+      "-E", join(scriptDirectory, "build-wasm-allocator.py"),
+      "--emscripten", await fs.realpath(join(root, "emsdk", "upstream", "emscripten")),
+      "--output", stagedArchive,
+    ], { cwd: root, env, timeoutMs: 10 * 60 * 1000 });
+    // Hash this build's private output, never another setup process's published
+    // archive. Publish the receipt last so interruption leaves a detectable miss.
+    const identity = await fileIdentity(stagedArchive);
+    if (inputSha256 !== await allocatorInputSha256(root)) {
+      throw new Error("Allocator build inputs changed during compilation");
+    }
+    const manifest = join(stage, "manifest.json");
+    await fs.writeFile(manifest, `${JSON.stringify({
+      inputSha256, archiveSha256: identity.sha256, archiveBytes: identity.size,
+    })}\n`);
+    await fs.rename(stagedArchive, archive);
+    await fs.rename(manifest, `${archive}.json`);
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true });
+  }
 }
 
 export async function runnerInputSha256(crateDirectory = runnerCrate) {
@@ -582,6 +661,7 @@ async function checkGate(root) {
   if (!version.includes(emscriptenVersion)) {
     throw new Error(`Emscripten compiler must be version ${emscriptenVersion}`);
   }
+  await verifyAllocatorGate(root);
   const runner = await runnerStatus(root);
   if (runner !== "verified") {
     throw new Error(`Wasmtime runner is ${runner}; rerun convex-wasm-setup-gate without --check-only`);
@@ -758,6 +838,7 @@ export async function setupGate({ gateRoot, jobs, checkOnly }) {
     });
     if (!(await buildTargetsPending(wasm, ["hermesvm_a", "jsi", "hermesStaticIcu"]))) break;
   }
+  await buildAllocator(gateRoot, wasmBuildEnv);
   if ((await runnerStatus(gateRoot)) !== "verified") {
     await buildRunner(gateRoot, jobs);
   }

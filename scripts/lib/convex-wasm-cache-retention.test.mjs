@@ -2156,6 +2156,66 @@ test("immutable GC rejects compiler-output retention authority for a different a
   );
 });
 
+test("immutable GC authenticates a large cohort capsule and retains its compiler closure", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("large-cohort-capsule");
+  const { compilerOutput, dependencies, record } = await writeCompilerOutputFixture(cacheLayout);
+  const { capsule, topologyCertificate } = await writeCohortCapsuleFixture(
+    cacheLayout,
+    compilerOutput,
+    record
+  );
+  const payload = JSON.parse(
+    await fs.readFile(
+      join(cacheLayout.immutable.artifacts, capsule.stage, capsule.key, capsule.entry.artifactFile),
+      "utf8"
+    )
+  );
+  // Retention authenticates topology without rehydrating the other planning fields.
+  // Grow that opaque fixture data beyond the former byte limit with fewer UTF-16 code units.
+  payload.planning.cohortContract = { fixture: "\u00e9".repeat(5 * 1024 * 1024) };
+  const source = `${canonicalJson(payload)}\n`;
+  assert.ok(source.length < 8 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(source) > 8 * 1024 * 1024);
+  const largeCapsule = await writeGenericArtifact({
+    cacheLayout,
+    extension: "json",
+    identity: capsule.entry.identity,
+    metadata: capsule.entry.metadata,
+    payload: source,
+    stage: capsule.stage,
+  });
+  assert.equal(largeCapsule.key, capsule.key);
+  const unrelated = await writeGenericArtifact({
+    cacheLayout,
+    extension: "c",
+    identity: { fixture: "unrelated-generated-c" },
+    metadata: { fixture: "compiler-output-generated-c" },
+    payload: "unrelated-generated-c",
+    stage: dependencies[0].stage,
+  });
+  const closure = [compilerOutput, topologyCertificate, ...dependencies];
+  await Promise.all(
+    [...closure, unrelated].map((artifact) => ageGenericArtifact(cacheLayout, artifact))
+  );
+  const plan = await withHeavyLock(value.environment, () =>
+    planConvexWasmImmutableGc({
+      cacheLayout,
+      environment: value.environment,
+      highWatermarkAllocatedBytes: 1,
+      nowMs: Date.now(),
+      recentRetentionMilliseconds: 60_000,
+    })
+  );
+  assert.equal(plan.authenticated.invalid, 0);
+  assert.ok(closure.every(({ key, stage }) => plan.retained.artifacts.includes(`${stage}\0${key}`)));
+  assert.ok(!plan.retained.artifacts.includes(`${unrelated.stage}\0${unrelated.key}`));
+  assert.deepEqual(
+    plan.evictions.map(({ key, stage }) => ({ key, stage })),
+    [{ key: unrelated.key, stage: unrelated.stage }]
+  );
+});
+
 test("artifact-only sweep removes a cohort capsule before its strict compiler closure", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("cohort-capsule-root-sweep");

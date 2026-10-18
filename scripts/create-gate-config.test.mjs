@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { allocatorInputSha256, verifyAllocatorGate } from "./setup-gate.mjs";
 
 import {
   createStaticHermesGateArtifactConfig,
@@ -9,6 +16,7 @@ import {
 } from "./create-gate-config.mjs";
 
 const wasmtimeRevision = "a".repeat(40);
+const execFile = promisify(execFileCallback);
 const policy = {
   command: {
     environment: { HOME: "/home/build", PATH: "/usr/bin:/bin" },
@@ -174,11 +182,13 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     "/toolchain/build-wasm/lib/libhermesvm_a.a",
     "/toolchain/build-wasm/jsi/libjsi.a",
     "/toolchain/build-wasm/external/icu-small/libhermesStaticIcu.a",
+    "/toolchain/build-wasm/lib/libconvex_wasm_allocator.a",
   ]);
   assert.deepEqual(config.runtime.mainCompileFlags, [
     "-DCONVEX_WASM_LOCAL_TEST_GUEST_INITIALIZATION_DIAGNOSTICS=1",
   ]);
   assert.equal(config.runtime.linkFlags.at(0), "-O2");
+  assert.equal(config.runtime.linkFlags.includes("-sMALLOC=none"), true);
   assert.equal(
     config.runtime.linkFlags.includes(
       "-Wl,--export=convex_wasm_udf_prepare_selected_entry",
@@ -186,9 +196,91 @@ test("Static Hermes gate config separates total linear memory from the Hermes GC
     true,
   );
   assert.equal(
+    config.runtime.linkFlags.includes(
+      "-Wl,--export=convex_wasm_udf_memory_maintenance",
+    ),
+    true,
+  );
+  assert.equal(
     config.runtime.linkFlags.at(-1),
     "-Wl,--export=convex_wasm_udf_destroy_runtime",
   );
+});
+
+test("allocator gate receipt rejects changed SDK inputs and replaced archives", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "allocator-gate-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sdk = join(root, "emsdk");
+  const llvm = join(sdk, "upstream");
+  const emscripten = join(llvm, "emscripten");
+  const inputs = [
+    join(sdk, ".emscripten"),
+    join(llvm, "bin/clang"), join(llvm, "bin/llvm-ar"),
+    join(llvm, "lib/clang/fixture/include/stddef.h"),
+    ...[
+      "emcc.py", "emscripten-version.txt", "src/settings.js",
+      "src/settings_internal.js", "system/lib/dlmalloc.c",
+      "system/lib/libc/sbrk.c", "tools/system_libs.py", "tools/shared.py",
+      "cache/sysroot/include/emscripten/heap.h",
+    ].map(name => join(emscripten, name)),
+  ];
+  for (const path of inputs) {
+    await fs.mkdir(dirname(path), { recursive: true });
+    await fs.writeFile(path, "original\n");
+  }
+  const archive = join(root, "build-wasm/lib/libconvex_wasm_allocator.a");
+  const bytes = Buffer.from("fixture archive\n");
+  await fs.mkdir(dirname(archive), { recursive: true });
+  await fs.writeFile(archive, bytes);
+  const inputSha256 = await allocatorInputSha256(root);
+  await fs.writeFile(`${archive}.json`, JSON.stringify({
+    inputSha256,
+    archiveSha256: createHash("sha256").update(bytes).digest("hex"),
+    archiveBytes: bytes.length,
+  }));
+  await verifyAllocatorGate(root);
+  for (const path of inputs) {
+    await fs.appendFile(path, "changed\n");
+    await assert.rejects(verifyAllocatorGate(root), /missing or stale/u);
+    await fs.writeFile(path, "original\n");
+  }
+  await fs.mkdir(join(emscripten, "tools/__pycache__"));
+  await fs.writeFile(join(emscripten, "tools/__pycache__/shared.pyc"), "generated");
+  await verifyAllocatorGate(root);
+  await fs.writeFile(archive, "replacement\n");
+  await assert.rejects(verifyAllocatorGate(root), /missing or stale/u);
+  await fs.writeFile(archive, bytes);
+  await verifyAllocatorGate(root);
+  await fs.unlink(`${archive}.json`);
+  await assert.rejects(verifyAllocatorGate(root), /missing or stale/u);
+});
+
+test("allocator builder reads current SDK source despite timestamp-valid bytecode", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "allocator-bytecode-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sdk = join(root, "emscripten");
+  const source = join(sdk, "tools/system_libs.py");
+  await fs.mkdir(dirname(source), { recursive: true });
+  await fs.writeFile(join(sdk, "tools/__init__.py"), "");
+  const timestamp = new Date("2025-01-01T00:00:00Z");
+  await fs.writeFile(source, "raise RuntimeError('stale SDK source')\n");
+  await fs.utimes(source, timestamp, timestamp);
+  await execFile("python3", [
+    "-E", "-c",
+    "import py_compile, sys; py_compile.compile(sys.argv[1], doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)",
+    source,
+  ], { timeout: 30_000 });
+  // Python's default cache validation checks only timestamp seconds and size.
+  // Stop at the first SDK import so this regression needs no native compilation.
+  await fs.writeFile(source, "raise RuntimeError('fresh SDK source')\n");
+  await fs.utimes(source, timestamp, timestamp);
+  await assert.rejects(execFile("python3", [
+    "-E", fileURLToPath(new URL("./build-wasm-allocator.py", import.meta.url)),
+    "--emscripten", sdk, "--output", join(root, "allocator.a"),
+  ], { timeout: 30_000 }), (error) => {
+    assert.match(error.stderr, /RuntimeError: fresh SDK source/u);
+    return true;
+  });
 });
 
 test("Static Hermes gate config emits production guest-initialization classes without details", () => {

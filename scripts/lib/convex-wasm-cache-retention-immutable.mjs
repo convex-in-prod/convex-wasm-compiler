@@ -32,6 +32,7 @@ import {
 } from "./convex-wasm-compiler-topology-witness.mjs";
 import {
   convexWasmOfficialOutputCohortCapsuleKind,
+  convexWasmOfficialOutputCohortCapsuleMaxBytes,
   convexWasmOfficialOutputCohortCapsuleStage,
   normalizeConvexWasmOfficialOutputCohortCapsuleIdentity,
 } from "./convex-wasm-official-output-cohort-capsule-identity.mjs";
@@ -92,7 +93,6 @@ const MAX_COMPLETION_MARKER_BYTES = 65;
 const MAX_CERTIFICATE_BYTES = 128 * 1024 * 1024;
 const MAX_CERTIFICATE_CANDIDATES = 256;
 const MAX_COMPILER_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024;
-const MAX_COHORT_CAPSULE_BYTES = 8 * 1024 * 1024;
 const MAX_RECENT_SUCCESS_SNAPSHOT_BYTES = 64 * 1024;
 const MAX_SWEEP_QUARANTINE_RECORD_BYTES = 64 * 1024;
 const MAX_RECENT_SUCCESS_SNAPSHOT_CERTIFICATES = 8;
@@ -1272,7 +1272,7 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
   );
   const payload = await readCanonical(
     entry.artifactPath,
-    MAX_COHORT_CAPSULE_BYTES,
+    convexWasmOfficialOutputCohortCapsuleMaxBytes,
     "cohort capsule",
     entry
   );

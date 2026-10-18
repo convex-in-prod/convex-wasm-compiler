@@ -1493,6 +1493,34 @@ test("deployment support preactivation adopts the ordinary capability header ide
   }
 });
 
+test("custom module-graph runtime mains can omit memory maintenance", async (t) => {
+  const fixture = await createFixture(t, { moduleGraphWasm: true });
+  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
+  fixture.options.resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy,
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  const options = await moduleGraphMaterialSessionInputFixture(fixture, "functions/read.ts");
+  const session = await createConvexWasmCapabilityArtifactMaterialSession(options, {
+    launchPolicy,
+    nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
+  });
+  try {
+    await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(
+      session, [options], { packageReceiptTopologyOnly: true }
+    );
+  } finally {
+    await finalizeConvexWasmArtifactMaterialSession(session);
+  }
+  const commands = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").map(JSON.parse);
+  const baseLink = commands.find(({ tool, args }) => tool === "emcc" && args.includes("-sMAIN_MODULE=2"));
+  assert.ok(baseLink, "custom runtime must reach the ordinary base link");
+  assert.equal(baseLink.args.includes("-Wl,--export=convex_wasm_udf_memory_maintenance"), false);
+});
+
 test("public artifact pipeline constructs a module-graph package with Core Wasm and AOT", async (t) => {
   const fixture = await createFixture(t, { moduleGraphWasm: true, staticHermesCBundle: true });
   fixture.options.toolchain.staticHermes.flags.push("-Xemit-c-layout");
@@ -1545,6 +1573,7 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     assert.equal(compile.args.includes("-fPIC"), false);
   }
   const baseLink = baseCommands.find(({ tool, args }) => tool === "emcc" && args.includes("-sMAIN_MODULE=2"));
+  assert.ok(baseLink.args.includes("-Wl,--export=convex_wasm_udf_memory_maintenance"));
   assert.ok(normalizedHashes.length > 0, "base preactivation must normalize with retained material");
   await fs.rename(hiddenPackageDirectory, packageDirectory);
   const preactivationNormalizations = normalizedHashes.length;

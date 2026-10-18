@@ -1,7 +1,9 @@
 #include "convex_wasm_opaque_abi_v3.h"
+#include "convex-wasm-allocator.h"
 #include "hermes/hermes.h"
 #include "hermes/VM/static_h.h"
 #include "jsi/jsi.h"
+#include "jsi/instrumentation.h"
 
 namespace convex_wasm {
 // Linked from the separately cached compiler-owned platform support object.
@@ -133,6 +135,10 @@ struct ChunkApplicationUnitSlot {
 #endif
 
 SHRuntime *runtime = nullptr;
+bool guest_call_active = false;
+bool memory_boundary_ready = false;
+bool invocation_has_started = false;
+bool memory_image_prepared = false;
 
 #if defined(CONVEX_WASM_LOCAL_INITIALIZATION_TRACE)
 // Local measurements only: no JS values or heap walks. Clock reads use WASI.
@@ -358,7 +364,15 @@ bool valid_invocation_abi(int32_t invocation_abi) {
 }
 
 struct SelectedEntryLease {
-  ~SelectedEntryLease() { convex_wasm_clear_selected_entry(); }
+  SelectedEntryLease() {
+    if (guest_call_active) __builtin_trap();
+    guest_call_active = true;
+    memory_boundary_ready = false;
+  }
+  ~SelectedEntryLease() {
+    convex_wasm_clear_selected_entry();
+    guest_call_active = false;
+  }
 };
 
 struct InvocationFailure {
@@ -2837,6 +2851,9 @@ void install_guest_bridge(Runtime &js) {
 }
 
 void reset_runtime_state() {
+  memory_boundary_ready = false;
+  invocation_has_started = false;
+  memory_image_prepared = false;
   guest_bridge.reset();
   bridge_bootstrap.reset();
   intrinsic_descriptor_state_validator.reset();
@@ -3235,6 +3252,9 @@ uint32_t convex_wasm_initialization_diagnostics(int32_t operation) {
 #endif
 
 extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
+  // Even an invalid selection ends the previous boundary's authority. Acquire
+  // before reading selector state so nested calls cannot mutate the outer lease.
+  SelectedEntryLease selected_entry_lease;
   const int32_t package_entry_count =
       convex_wasm_application_entry_count();
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT) || \
@@ -3260,14 +3280,11 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
 #endif
       export_name == nullptr || udf_kind == nullptr ||
       !valid_invocation_abi(invocation_abi)) {
-    convex_wasm_clear_selected_entry();
     return 8;
   }
-  SelectedEntryLease selected_entry_lease;
   bool new_runtime = false;
   if (runtime == nullptr) {
     if (convex_typed_value_abi_v1() != 1) {
-      convex_wasm_clear_selected_entry();
       return 8;
     }
     if (!retained_runtime_state_is_empty()) {
@@ -3494,6 +3511,7 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
       reset_runtime_state();
       return static_cast<int32_t>(js_error_phase);
     }
+    memory_boundary_ready = true;
     return 0;
   } catch (const JSError &) {
     caught_status = static_cast<int32_t>(js_error_phase);
@@ -3505,6 +3523,7 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
 }
 
 extern "C" int convex_wasm_udf_run(void) {
+  SelectedEntryLease selected_entry_lease;
   const int32_t package_entry_count = convex_wasm_application_entry_count();
 #if defined(CONVEX_WASM_CHUNK_APPLICATION_UNIT) || \
     defined(CONVEX_WASM_MULTI_ENTRY_APPLICATION_UNIT)
@@ -3529,10 +3548,8 @@ extern "C" int convex_wasm_udf_run(void) {
 #endif
       export_name == nullptr || udf_kind == nullptr ||
       !valid_invocation_abi(invocation_abi)) {
-    convex_wasm_clear_selected_entry();
     return 8;
   }
-  SelectedEntryLease selected_entry_lease;
   if (runtime == nullptr ||
       package_entry_count != declared_application_entry_count ||
       package_unit_count != declared_application_unit_count ||
@@ -3545,6 +3562,7 @@ extern "C" int convex_wasm_udf_run(void) {
   }
 
   auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
+  invocation_has_started = true;
   auto js_error_phase = JSErrorPhase::ReadCapabilityIdentity;
   const bool observe_execution = convex_execution_observation_enabled() != 0;
   SHHeapStatistics heap_before{};
@@ -3700,6 +3718,7 @@ extern "C" int convex_wasm_udf_run(void) {
     if (!retained_runtime_state_is_valid()) {
       reset_runtime_state();
     }
+    memory_boundary_ready = invocation_status == 0 && runtime != nullptr;
     return invocation_status;
   } catch (const JSError &) {
     caught_status = static_cast<int32_t>(js_error_phase);
@@ -3733,7 +3752,102 @@ extern "C" int convex_wasm_udf_run(void) {
   return caught_status;
 }
 
+#if defined(__wasm32__)
+// This optional export has no runtime-specific host import. It returns a fixed
+// wasm32 wire layout, keeping Hermes pointers and allocator offsets private.
+// Only count ranges are meaningful; callers copy them before another call and
+// keep allocation/collection quiescent until discard finishes. The allocator
+// probe itself does not invalidate a previously returned empty nursery range.
+struct MemoryMaintenanceResult {
+  uint32_t version = 1;
+  uint32_t byte_length = sizeof(MemoryMaintenanceResult);
+  uint32_t operation = 0;
+  uint32_t status = 0;
+  ConvexWasmFreePayload payload{};
+};
+static_assert(sizeof(size_t) == 4);
+static_assert(offsetof(MemoryMaintenanceResult, payload) == 16);
+static_assert(offsetof(ConvexWasmFreePayload, count) == 0);
+static_assert(offsetof(ConvexWasmFreePayload, visited) == 4);
+static_assert(offsetof(ConvexWasmFreePayload, ranges) == 8);
+static_assert(offsetof(ConvexWasmFreePayloadRange, end) == 4);
+static_assert(sizeof(ConvexWasmFreePayloadRange) == 8);
+static_assert(sizeof(MemoryMaintenanceResult) == 1048);
+MemoryMaintenanceResult memory_maintenance_result{};
+
+extern "C" uint32_t convex_wasm_udf_memory_maintenance(
+    uint32_t operation, uint32_t page_size) {
+  // Success is a quiescent boundary, not merely a returned Wasm call. Traps and
+  // unsuccessful handlers cannot authorize reclamation or template capture.
+  const bool boundary_ready = memory_boundary_ready;
+  SelectedEntryLease lease;
+  if (!boundary_ready || runtime == nullptr ||
+      !retained_runtime_state_is_valid() || operation > 2 ||
+      (operation != 1 && page_size != 0)) {
+    __builtin_trap();
+  }
+  auto &result = memory_maintenance_result;
+  result.operation = operation;
+  result.status = 0;
+  result.payload.count = 0;
+  result.payload.visited = 0;
+  try {
+    if (operation == 0) {
+      // A second attempt can defer after mutating the heap. It must not inherit
+      // certification from the previous successful preparation.
+      memory_image_prepared = false;
+      // Never promote an invocation's warmed state into a shared image. Every
+      // selected entry must already have initialized under preparation authority.
+      if (invocation_has_started || convex_capability_current() != 0)
+        __builtin_trap();
+      for (int32_t entry = 0; entry < declared_application_entry_count; ++entry) {
+        if (!selected_entry_is_prepared(entry)) __builtin_trap();
+      }
+      SHLegacyValue exception;
+      if (!_sh_prepare_literal_layouts(runtime, &exception)) __builtin_trap();
+      auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
+      js.instrumentation().collectGarbage("prepared-memory-image");
+    } else if (!memory_image_prepared) {
+      __builtin_trap();
+    }
+
+    if (operation == 1) {
+      result.status = convex_wasm_allocator_free_payload(
+          &result.payload, page_size, 4096);
+    } else {
+      SHYoungReclaimResult reclaimed{};
+      _sh_try_reclaim_young_generation(runtime, &reclaimed);
+      switch (reclaimed.status) {
+        case SHYoungReclaimReclaimed:
+          if (reclaimed.payload_begin >= reclaimed.payload_end) __builtin_trap();
+          result.payload.count = 1;
+          result.payload.ranges[0] = {
+              reclaimed.payload_begin, reclaimed.payload_end};
+          if (operation == 0) memory_image_prepared = true;
+          break;
+        case SHYoungReclaimDeferred:
+          result.status = 2;
+          break;
+        case SHYoungReclaimUnsupported:
+          result.status = 3;
+          break;
+        default:
+          __builtin_trap();
+      }
+    }
+  } catch (...) {
+    // GC and layout preparation may throw after changing runtime state. Trap
+    // while the lease is still active so even non-unwinding Wasm traps cannot
+    // be followed by another guest call or runtime destruction in this Store.
+    __builtin_trap();
+  }
+  memory_boundary_ready = true;
+  return reinterpret_cast<uintptr_t>(&result);
+}
+#endif
+
 extern "C" void convex_wasm_udf_destroy_runtime(void) {
+  SelectedEntryLease selected_entry_lease;
   reset_runtime_state();
 }
 

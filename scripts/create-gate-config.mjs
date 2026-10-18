@@ -14,7 +14,7 @@ import {
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
 import { normalizeEngineConfig, validatePrecompilerEngineRequest } from "./lib/convex-wasm-engine-config.mjs";
 import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
-import { binaryenHelperNames, verifyBinaryenGate } from "./setup-gate.mjs";
+import { binaryenHelperNames, verifyAllocatorGate, verifyBinaryenGate } from "./setup-gate.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -370,6 +370,7 @@ export function createStaticHermesGateArtifactConfig({
         resolve(gateRoot, "build-wasm", "lib", "libhermesvm_a.a"),
         resolve(gateRoot, "build-wasm", "jsi", "libjsi.a"),
         resolve(gateRoot, "build-wasm", "external", "icu-small", "libhermesStaticIcu.a"),
+        resolve(gateRoot, "build-wasm", "lib", "libconvex_wasm_allocator.a"),
       ],
       compileFlags: [
         "-O2",
@@ -395,9 +396,12 @@ export function createStaticHermesGateArtifactConfig({
         "-sSUPPORT_LONGJMP=wasm",
         "-sSTANDALONE_WASM=1",
         "-sALLOW_MEMORY_GROWTH=1",
+        // The authenticated runtime archive supplies malloc and matching sbrk.
+        "-sMALLOC=none",
         "-sSTACK_SIZE=512KB",
         "-sINITIAL_HEAP=2MB",
         "-Wl,--export=convex_wasm_udf_prepare_selected_entry",
+        "-Wl,--export=convex_wasm_udf_memory_maintenance",
         "-Wl,--export=convex_wasm_udf_run",
         "-Wl,--export=convex_wasm_udf_destroy_runtime",
       ],
@@ -488,6 +492,7 @@ export function createStaticHermesGateArtifactConfig({
 async function verifyGate({ fuelEpochPollInterval, gateRoot, policy, precompilerPackageDirectory }) {
   const normalizedPolicy = normalizeGatePolicy(policy);
   await verifyBinaryenGate(gateRoot);
+  await verifyAllocatorGate(gateRoot);
   const [hermesRevision, emsdkRevision, precompilerPackage] =
     await Promise.all([
       gitRevision(resolve(gateRoot, "hermes"), "Static Hermes checkout"),

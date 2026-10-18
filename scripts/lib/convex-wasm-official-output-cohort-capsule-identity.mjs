@@ -3,6 +3,8 @@ import { compareStrings, fingerprintJson, normalizeJson } from "./convex-wasm-ar
 export const convexWasmOfficialOutputCohortCapsuleKind =
   "convex-wasm-official-output-cohort-planning-capsule-v6";
 export const convexWasmOfficialOutputCohortCapsuleStage = "module-graph-cohort-planning-capsule";
+// Publication, warm reuse and retention must accept the same bounded record.
+export const convexWasmOfficialOutputCohortCapsuleMaxBytes = 64 * 1024 * 1024;
 
 const CAPSULE_SCHEMA_VERSION = 6;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
