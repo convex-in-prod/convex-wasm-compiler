@@ -3759,7 +3759,7 @@ extern "C" int convex_wasm_udf_run(void) {
 // keep allocation/collection quiescent until discard finishes. The allocator
 // probe itself does not invalidate a previously returned empty nursery range.
 struct MemoryMaintenanceResult {
-  uint32_t version = 1;
+  uint32_t version = 2;
   uint32_t byte_length = sizeof(MemoryMaintenanceResult);
   uint32_t operation = 0;
   uint32_t status = 0;
@@ -3793,8 +3793,8 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
   result.payload.visited = 0;
   try {
     if (operation == 0) {
-      // A second attempt can defer after mutating the heap. It must not inherit
-      // certification from the previous successful preparation.
+      // Clear certification before any work that can fail after mutating the
+      // heap, even when replacing an earlier successful preparation.
       memory_image_prepared = false;
       // Never promote an invocation's warmed state into a shared image. Every
       // selected entry must already have initialized under preparation authority.
@@ -3807,6 +3807,11 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
       if (!_sh_prepare_literal_layouts(runtime, &exception)) __builtin_trap();
       auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
       js.instrumentation().collectGarbage("prepared-memory-image");
+      // Capture preserves the entire heap, including any nursery or unfinished
+      // incremental collector state. Emptying the nursery is optional backing
+      // reclamation, not a prerequisite for a quiescent initialized image.
+      // Operation 0 grants no discard ranges; operation 2 owns that authority.
+      memory_image_prepared = true;
     } else if (!memory_image_prepared) {
       __builtin_trap();
     }
@@ -3814,7 +3819,7 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
     if (operation == 1) {
       result.status = convex_wasm_allocator_free_payload(
           &result.payload, page_size, 4096);
-    } else {
+    } else if (operation == 2) {
       SHYoungReclaimResult reclaimed{};
       _sh_try_reclaim_young_generation(runtime, &reclaimed);
       switch (reclaimed.status) {
@@ -3823,7 +3828,6 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
           result.payload.count = 1;
           result.payload.ranges[0] = {
               reclaimed.payload_begin, reclaimed.payload_end};
-          if (operation == 0) memory_image_prepared = true;
           break;
         case SHYoungReclaimDeferred:
           result.status = 2;

@@ -12,7 +12,7 @@ The first argument selects an operation:
 
 | Operation | Second argument | Behavior |
 | --- | --- | --- |
-| 0 | 0 | Prepare ordinary literal layouts, perform full collection, then obtain empty nursery payload for image capture. |
+| 0 | 0 | Prepare ordinary literal layouts and perform full collection for image capture, preserving the entire heap. Returns no discard ranges. |
 | 1 | Host page size | Enumerate currently free allocator payload, with at most 128 ranges and 4,096 visited free blocks. |
 | 2 | 0 | Attempt young collection and return empty nursery payload. |
 
@@ -24,14 +24,14 @@ argument or lifecycle boundary traps. The host must discard the affected Store
 after a trap rather than attempting reclamation on partially executed state.
 Entry validation failures also end the previous boundary's permission. Runtime
 destruction is exclusive with preparation, invocation and maintenance. A repeated
-operation 0 replaces its previous preparation result; deferred or unsupported
-preparation leaves no image certification, even after an earlier success.
+operation 0 replaces its previous preparation result. Failure traps and leaves
+the Store unusable, even after an earlier success.
 
 The result is 1,048 bytes, with little-endian unsigned 32-bit fields:
 
 | Byte offset | Meaning |
 | --- | --- |
-| 0 | Version, currently 1 |
+| 0 | Version, currently 2 |
 | 4 | Record byte length, 1,048 |
 | 8 | Operation echoed from the call |
 | 12 | Status: 0 complete, 1 partial, 2 deferred, 3 unsupported |
@@ -39,10 +39,11 @@ The result is 1,048 bytes, with little-endian unsigned 32-bit fields:
 | 20 | Number of visited free allocator blocks, at most 4,096 |
 | 24 | Up to 128 pairs of start and exclusive end offsets |
 
-Only the first `count` range pairs are defined. Status 1 is valid only for
-operation 1 and grants authority for exactly the returned ranges. Status 2 or 3
-is valid for operations 0 and 2 and grants no range authority. Successful nursery
-operations return one nonempty range and zero visited allocator blocks. Nursery
+Only the first `count` range pairs are defined. Operation 0 returns status 0,
+zero ranges and zero visited blocks. Status 1 is valid only for operation 1 and
+grants authority for exactly the returned ranges. Status 2 or 3 is valid only for
+operation 2 and grants no range authority. Successful operation 2 returns one
+nonempty range and zero visited allocator blocks. Nursery
 payload may need inward alignment to host pages; allocator ranges are already
 aligned. The host validates the record bounds, version, operation, status,
 counts, non-overlapping ranges and memory bounds before using any range.
@@ -52,8 +53,23 @@ disjoint from the saved nursery range before discarding either set.
 Deferred collection makes no collector progress. In particular, repeated young
 collections must yield to ordinary old-generation GC when survivors approach its
 start threshold. Do not retry operation 2 in a loop to force success: allow
-ordinary GC or restore/dispose the instance. Operation 0 can also defer, even
-after its full collection; no image is ready from that result.
+ordinary GC or restore/dispose the instance. Operation 0 does not require an
+empty nursery or completed incremental collection. In the maintained wasm32
+runtime, Hades is single-threaded: full collection may start another incremental
+old-generation cycle before returning, but no collector work executes outside a
+guest call. The single-threaded Emscripten finalizer executor runs tasks inline.
+Collector worklists, allocator metadata and native buffers remain in linear
+memory. Capture preserves them, including any live nursery pages, and restoration
+must reconstruct the same function-table indices for collector callbacks and
+finalizers. This does not certify arbitrary native or concurrent runtime state.
+
+Version 1 tied operation 0 to nursery reclamation. Its successful result contains
+one nonempty range; deferred/unsupported results contain none and do not certify
+an image. Hosts may accept both versions, but must not treat a version 1 deferred
+result as success. Hosts using this export must support version 2 before adopting
+new guests. An older host using the export must reject the unknown version;
+hosts that ignore the optional export can continue ordinary execution.
+Operations 1 and 2 retain their version 1 semantics.
 
 Copy the result before another maintenance call overwrites its storage. Keep the
 Store exclusively borrowed through enumeration and discard, with no guest
