@@ -941,6 +941,37 @@ responses omit provider execution and I/O waits, so these measurements do not
 replace production latency or paired-backend correctness evidence. Keep the
 source/toolchain identities and local replay inputs with each comparison.
 
+## Registration wrapper inventory
+
+Application registration wrappers can declare their inventory kinds in
+`scripts/convex-wasm-registration-adapters.json` using an optional
+`inventoryBuilders` array. Each entry contains `modulePath`, `exportName`, and
+`registrationKind` (`query`, `mutation`, or `action`), sorted by unique module
+and export identity in UTF-8 byte order. Paths must be normalized
+repository-relative paths. The compiler requires an exact runtime import read
+and resolved source-graph edge;
+the caller's local alias has no authority. Generated-server bindings retain their
+built-in kinds. This does not add support for namespace calls, local builder
+wrappers, or other unsupported registration syntax. Named re-exports retain
+their existing inventory and compilation restrictions.
+
+These are application-declared classifications for source inventory and context
+reuse analysis. They do not prove arbitrary wrapper behavior or authorize
+removing authentication, argument transformations, or other wrapper code.
+Compilation that preserves complete module code keeps that code intact. Direct
+callback lowering of a custom wrapper still requires an executable registration
+adapter; an inventory declaration alone leaves that lowering unsupported. A
+builder cannot also appear in the lowering-adapter list. Older descriptors may
+omit the field; an explicit empty array has the same classification meaning.
+Nulls, unknown fields, duplicate identities, and unsupported kinds are rejected.
+The descriptor file's authenticated bytes must agree with the request descriptor,
+and its hash participates in source inventory and analysis identities.
+
+The standalone API flattener's `additionalBuilders` configuration may include
+the same builder name from different source modules. It matches the callee's
+resolved declaration source before checking the configured kind and visibility;
+duplicate name/source identities and unconfigured declaration sources are rejected.
+
 ## Guarded callable specialization
 
 Source preparation can expose a small arrow function passed to an annotation or

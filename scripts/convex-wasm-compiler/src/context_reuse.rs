@@ -5945,6 +5945,17 @@ fn inventory_registration_kind(
     if is_resolved_generated_server_module(&resolved, functions_root) {
         return Ok(generated_server_udf_kind(&binding.imported).map(str::to_string));
     }
+    // These declarations classify an exact imported binding for inventory and
+    // context-reuse analysis only. They do not authorize callback extraction:
+    // ordinary compilation must still preserve the wrapper or reject lowering.
+    if let Some(builder) = registration_adapter
+        .descriptor
+        .inventory_builders
+        .iter()
+        .find(|builder| builder.module_path == resolved && builder.export_name == binding.imported)
+    {
+        return Ok(Some(builder.registration_kind.clone()));
+    }
     let matches = registration_adapter
         .descriptor
         .adapters
@@ -11134,8 +11145,10 @@ void value;
             fs::write(package.join("index.js"), "export const value = 1;\n").unwrap();
             fs::write(
                 package.join("package.json"),
-                serde_json::to_vec(&serde_json::json!({"name": "shared-package", "version": version}))
-                    .unwrap(),
+                serde_json::to_vec(
+                    &serde_json::json!({"name": "shared-package", "version": version}),
+                )
+                .unwrap(),
             )
             .unwrap();
             input.metafile.inputs.insert(
@@ -11175,7 +11188,8 @@ void value;
                 .diagnostics()
                 .iter()
                 .find(|diagnostic| {
-                    diagnostic.rule == "unsupported-runtime-dependency" && diagnostic.file == *target
+                    diagnostic.rule == "unsupported-runtime-dependency"
+                        && diagnostic.file == *target
                 })
                 .expect("unreviewed package must retain its boundary diagnostic");
             assert_eq!(diagnostic.severity, "unsupported");

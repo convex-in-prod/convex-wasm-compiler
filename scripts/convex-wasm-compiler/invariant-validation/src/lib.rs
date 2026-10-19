@@ -91,6 +91,7 @@ mod implementation {
             descriptor: RegistrationAdapterDescriptor {
                 kind: "convex-wasm-registration-adapter-descriptor".to_string(),
                 adapters: Vec::new(),
+                inventory_builders: Vec::new(),
                 source_operations: Vec::new(),
             },
             source: RegistrationAdapterSourceMaterial {

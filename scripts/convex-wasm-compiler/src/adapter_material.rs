@@ -27,7 +27,19 @@ pub(super) struct RegistrationAdapterSourceMaterial {
 pub(super) struct RegistrationAdapterDescriptor {
     pub(super) kind: String,
     pub(super) adapters: Vec<RegistrationAdapterDescriptorEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) inventory_builders: Vec<RegistrationInventoryBuilder>,
     pub(super) source_operations: Vec<RegistrationAdapterSourceOperation>,
+}
+
+/// Application-declared registration kinds, without authority to replace the
+/// wrapper or extract its callback. The complete wrapper remains executable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RegistrationInventoryBuilder {
+    pub(super) module_path: String,
+    pub(super) export_name: String,
+    pub(super) registration_kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,6 +223,7 @@ fn valid_module_path(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('/')
         && !value.contains('\\')
+        && !value.contains('\0')
         && value
             .split('/')
             .all(|part| !part.is_empty() && !matches!(part, "." | ".."))
@@ -338,6 +351,35 @@ pub(crate) fn validate_registration_adapter_material(
                 adapter.id
             );
         }
+    }
+    let mut previous_inventory_builder = None;
+    for builder in &material.descriptor.inventory_builders {
+        ensure!(
+            valid_module_path(&builder.module_path)
+                && valid_identifier(&builder.export_name)
+                && matches!(
+                    builder.registration_kind.as_str(),
+                    "query" | "mutation" | "action"
+                ),
+            "registration inventory builder has an invalid identity or kind"
+        );
+        let key = (builder.module_path.as_str(), builder.export_name.as_str());
+        if let Some(previous) = previous_inventory_builder {
+            ensure!(
+                previous < key,
+                "registration inventory builders must be sorted by unique identity"
+            );
+        }
+        previous_inventory_builder = Some(key);
+        ensure!(
+            !material.descriptor.adapters.iter().any(|adapter| {
+                (
+                    adapter.wrapper.module_path.as_str(),
+                    adapter.wrapper.export_name.as_str(),
+                ) == key
+            }),
+            "registration inventory builder duplicates a lowering adapter"
+        );
     }
     let mut previous_source_operation_id = None;
     let mut source_operation_ids = BTreeSet::new();

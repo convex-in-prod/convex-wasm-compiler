@@ -303,14 +303,19 @@ function addBuilder(name, kind, visibility, sourcePath) {
   ) {
     throw new Error(`Invalid Convex API builder configuration for ${String(name)}.`);
   }
-  if (directBuilders.has(name)) {
-    throw new Error(`Duplicate Convex API builder configuration: ${name}`);
+  const source = resolve(rootDir, sourcePath);
+  const existing = directBuilders.get(name) ?? [];
+  if (existing.some((builder) => builder.sourcePath === source)) {
+    throw new Error(`Duplicate Convex API builder configuration: ${name} from ${sourcePath}`);
   }
-  directBuilders.set(name, {
-    kind,
-    sourcePath: resolve(rootDir, sourcePath),
-    visibility,
-  });
+  directBuilders.set(name, [
+    ...existing,
+    {
+      kind,
+      sourcePath: source,
+      visibility,
+    },
+  ]);
 }
 
 for (const [name, kind, visibility] of [
@@ -509,7 +514,9 @@ function repositoryInputPaths(currentConvexInputPaths, currentAdditionalInputPat
       configPath,
       resolve(convexDir, "_generated/dataModel.d.ts"),
       resolve(convexDir, "_generated/server.d.ts"),
-      ...[...directBuilders.values()].map((builder) => builder.sourcePath),
+      ...[...directBuilders.values()].flatMap((builders) =>
+        builders.map((builder) => builder.sourcePath)
+      ),
       ...(generatedRegistryAdapter === undefined ? [] : [generatedRegistryAdapter.generatedModulePath]),
       ...patchFiles.map((path) => resolve(rootDir, path)),
       ...currentConvexInputPaths,
@@ -2104,15 +2111,10 @@ function validateRegistrationShape(candidate, parts) {
   if (ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
     const initializer = unwrapExpression(declaration.initializer);
     if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression)) {
-      const builder = directBuilders.get(initializer.expression.text);
-      if (builder === undefined) {
+      const builders = directBuilders.get(initializer.expression.text);
+      if (builders === undefined) {
         throw new Error(
           `Unsupported Convex function builder ${initializer.expression.text} for ${exportName} at ${sourceLocation(declaration)}.`
-        );
-      }
-      if (builder.kind !== parts.kind || builder.visibility !== parts.visibility) {
-        throw new Error(
-          `Builder ${initializer.expression.text} disagrees with the inferred Convex function type at ${sourceLocation(declaration)}.`
         );
       }
       const calledSymbol = checker.getSymbolAtPosition(
@@ -2123,13 +2125,22 @@ function validateRegistrationShape(candidate, parts) {
         calledSymbol !== undefined && (calledSymbol.flags & NativeSymbolFlags.Alias) !== 0
           ? checker.getAliasedSymbol(calledSymbol)
           : calledSymbol;
-      if (
-        resolvedCalledSymbol?.declarations.some((builderDeclaration) =>
-          pathsEqualForHost(resolve(builderDeclaration.path), builder.sourcePath)
-        ) !== true
-      ) {
+      // A source-local authentication wrapper may keep the standard builder name. Match its
+      // actual declaration before accepting its kind; a matching name alone grants no trust.
+      const builder = builders.find(
+        (candidateBuilder) =>
+          resolvedCalledSymbol?.declarations.some((builderDeclaration) =>
+            pathsEqualForHost(resolve(builderDeclaration.path), candidateBuilder.sourcePath)
+          ) === true
+      );
+      if (builder === undefined) {
         throw new Error(
           `Builder ${initializer.expression.text} for ${exportName} at ${sourceLocation(declaration)} does not resolve to the supported repository builder.`
+        );
+      }
+      if (builder.kind !== parts.kind || builder.visibility !== parts.visibility) {
+        throw new Error(
+          `Builder ${initializer.expression.text} disagrees with the inferred Convex function type at ${sourceLocation(declaration)}.`
         );
       }
       return;

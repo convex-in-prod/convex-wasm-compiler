@@ -84,6 +84,7 @@ fn test_registration_adapter_material() -> RegistrationAdapterMaterial {
         descriptor: RegistrationAdapterDescriptor {
             kind: "convex-wasm-registration-adapter-descriptor".to_string(),
             adapters: Vec::new(),
+            inventory_builders: Vec::new(),
             source_operations: Vec::new(),
         },
         source: RegistrationAdapterSourceMaterial {
@@ -3648,6 +3649,7 @@ export function requireWorkerSecret(providedKey: string | undefined): void {
             descriptor: RegistrationAdapterDescriptor {
                 kind: "convex-wasm-registration-adapter-descriptor".to_string(),
                 adapters: vec![adapter],
+                inventory_builders: Vec::new(),
                 source_operations: Vec::new(),
             },
             source: RegistrationAdapterSourceMaterial {
@@ -5870,6 +5872,60 @@ export const selected = registration({{
     }
 
     #[test]
+    fn inventory_builder_material_is_authenticated_and_disjoint_from_lowering() {
+        let root = temporary_directory("convex-wasm-registration-inventory-material");
+        let mut material = object_material("query");
+        material.source.path = "descriptor.json".to_string();
+        material.descriptor.inventory_builders.push(
+            crate::adapter_material::RegistrationInventoryBuilder {
+                module_path: WRAPPER.to_string(),
+                export_name: "adapted".to_string(),
+                registration_kind: "query".to_string(),
+            },
+        );
+        for (module_path, expected_error) in [
+            (WRAPPER, Some("duplicates a lowering adapter")),
+            ("fixtures/invalid\0.ts", Some("invalid identity or kind")),
+            ("fixtures/inventory.ts", None),
+        ] {
+            material.descriptor.inventory_builders[0].module_path = module_path.to_string();
+            let bytes = serde_json::to_vec(&material.descriptor).unwrap();
+            fs::write(root.0.join("descriptor.json"), &bytes).unwrap();
+            material.source.sha256 = hash_bytes(&bytes);
+            material.source.bytes = bytes.len();
+            let result = validate_registration_adapter_material(&root.0, &material);
+            match expected_error {
+                Some(expected) => assert!(result.unwrap_err().to_string().contains(expected)),
+                None => result.unwrap(),
+            }
+        }
+        material.descriptor.inventory_builders[0].registration_kind = "mutation".to_string();
+        assert!(
+            validate_registration_adapter_material(&root.0, &material)
+                .unwrap_err()
+                .to_string()
+                .contains("request descriptor disagrees with the authenticated descriptor bytes")
+        );
+
+        let legacy = serde_json::json!({
+            "kind": "convex-wasm-registration-adapter-descriptor",
+            "adapters": [],
+            "sourceOperations": [],
+        });
+        let historical: RegistrationAdapterDescriptor =
+            serde_json::from_value(legacy.clone()).unwrap();
+        let mut explicit_empty = legacy.clone();
+        explicit_empty["inventoryBuilders"] = serde_json::json!([]);
+        assert_eq!(
+            historical,
+            serde_json::from_value::<RegistrationAdapterDescriptor>(explicit_empty).unwrap()
+        );
+        let mut null_builders = legacy;
+        null_builders["inventoryBuilders"] = Value::Null;
+        assert!(serde_json::from_value::<RegistrationAdapterDescriptor>(null_builders).is_err());
+    }
+
+    #[test]
     fn value_registration_adapter_must_bind_one_callback_parameter() {
         let root = temporary_directory("convex-wasm-registration-adapter-value-result");
         let mut descriptor = object_material("query").descriptor;
@@ -6258,6 +6314,154 @@ export async function authenticate(context) {
         assert!(function_expression.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "registration-adapter-handler-shape-mismatch"
         }));
+    }
+
+    #[test]
+    fn inventory_builder_classifies_exact_import_without_lowering_its_authentication() {
+        for kind in ["query", "mutation", "action"] {
+            let mut material = super::test_registration_adapter_material();
+            material.descriptor.inventory_builders.push(
+                crate::adapter_material::RegistrationInventoryBuilder {
+                    module_path: WRAPPER.to_string(),
+                    export_name: "adapted".to_string(),
+                    registration_kind: kind.to_string(),
+                },
+            );
+            for local_name in ["registration", "query"] {
+                let (graph, mut modules) = fixture("async (ctx, args) => args", material.clone());
+                let source = format!(
+                    "import {{ adapted as {local_name} }} from \"./wrapper\";\n\
+                     export const selected = {local_name}({{ args: {{}}, handler: async (ctx, args) => args }});\n"
+                );
+                modules.insert(
+                    ENTRY.to_string(),
+                    LoadedModule::new(summary(ENTRY, &source), source),
+                );
+                let inventory = build_source_inventory(
+                    &graph.repo_root,
+                    &graph.metafile,
+                    &[ENTRY.to_string()],
+                    Path::new("/fixture-cache"),
+                    &mut modules,
+                    &mut PhaseMeasurements::default(),
+                    &material,
+                    "fixtures",
+                )
+                .unwrap();
+                assert_eq!(inventory.functions.len(), 1);
+                assert_eq!(inventory.functions[0].udf_kind, kind);
+                let compiled = compile_export(
+                    &graph,
+                    Path::new("/fixture-cache"),
+                    &mut PhaseMeasurements::default(),
+                    Instant::now(),
+                    &modules,
+                    GeneratedSourceMode::Inline,
+                );
+                if local_name == "query" {
+                    let output = compiled.unwrap().output;
+                    assert!(!output.eligible);
+                    assert!(
+                        output.diagnostics.iter().any(|diagnostic| {
+                            diagnostic.code == "unmatched-registration-adapter"
+                        })
+                    );
+                    assert!(output.applied_registration_adapter.is_none());
+                } else {
+                    // An inventory kind must not convert the existing unsupported custom-builder
+                    // error into callback lowering, even when its alias looks unambiguous.
+                    let Err(error) = compiled else {
+                        panic!("inventory-only registration compiled without a lowering adapter");
+                    };
+                    assert!(error.to_string().contains(
+                        "registration builder registration has unsupported kind registration"
+                    ));
+                }
+                for (module_path, export_name) in [
+                    ("fixtures/other.ts", "adapted"),
+                    (WRAPPER, "differentExport"),
+                ] {
+                    let mut unmatched = material.clone();
+                    unmatched.descriptor.inventory_builders[0].module_path =
+                        module_path.to_string();
+                    unmatched.descriptor.inventory_builders[0].export_name =
+                        export_name.to_string();
+                    let inventory = build_source_inventory(
+                        &graph.repo_root,
+                        &graph.metafile,
+                        &[ENTRY.to_string()],
+                        Path::new("/fixture-cache"),
+                        &mut modules,
+                        &mut PhaseMeasurements::default(),
+                        &unmatched,
+                        "fixtures",
+                    )
+                    .unwrap();
+                    assert!(inventory.functions.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inventory_builder_requires_an_exact_runtime_import_read() {
+        let mut material = super::test_registration_adapter_material();
+        material.descriptor.inventory_builders.push(
+            crate::adapter_material::RegistrationInventoryBuilder {
+                module_path: WRAPPER.to_string(),
+                export_name: "adapted".to_string(),
+                registration_kind: "query".to_string(),
+            },
+        );
+        let (mut graph, mut modules) = fixture("async () => null", material.clone());
+        for source in [
+            "import type { adapted } from \"./wrapper\"; export const selected = adapted({ args: {}, handler: async () => null });",
+            "import * as wrapper from \"./wrapper\"; export const selected = wrapper.adapted({ args: {}, handler: async () => null });",
+            "import { adapted } from \"./wrapper\"; const local = (definition) => adapted(definition); export const selected = local({ args: {}, handler: async () => null });",
+            "import { adapted } from \"./wrapper\"; export const selected = ((adapted) => adapted({ args: {}, handler: async () => null }))((definition) => definition);",
+        ] {
+            modules.insert(
+                ENTRY.to_string(),
+                LoadedModule::new(summary(ENTRY, source), source.to_string()),
+            );
+            let inventory = build_source_inventory(
+                &graph.repo_root,
+                &graph.metafile,
+                &[ENTRY.to_string()],
+                Path::new("/fixture-cache"),
+                &mut modules,
+                &mut PhaseMeasurements::default(),
+                &material,
+                "fixtures",
+            )
+            .unwrap();
+            assert!(inventory.functions.is_empty(), "{source}");
+        }
+        let source = "import { adapted } from \"./wrapper\"; export const selected = adapted({ args: {}, handler: async () => null });";
+        modules.insert(
+            ENTRY.to_string(),
+            LoadedModule::new(summary(ENTRY, source), source.to_string()),
+        );
+        graph
+            .metafile
+            .inputs
+            .get_mut(ENTRY)
+            .unwrap()
+            .imports
+            .clear();
+        assert!(
+            build_source_inventory(
+                &graph.repo_root,
+                &graph.metafile,
+                &[ENTRY.to_string()],
+                Path::new("/fixture-cache"),
+                &mut modules,
+                &mut PhaseMeasurements::default(),
+                &material,
+                "fixtures",
+            )
+            .is_err()
+        );
     }
 
     #[test]

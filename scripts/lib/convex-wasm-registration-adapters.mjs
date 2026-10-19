@@ -175,7 +175,12 @@ export async function loadConvexWasmRegistrationAdapterMaterial(repoRoot) {
   }
   const contents = await readFile(absolutePath);
   const parsed = JSON.parse(contents.toString("utf8"));
-  exactKeys(parsed, ["adapters", "kind", "sourceOperations"], "descriptor");
+  const hasInventoryBuilders = parsed !== null && Object.hasOwn(parsed, "inventoryBuilders");
+  exactKeys(
+    parsed,
+    ["adapters", "kind", "sourceOperations", ...(hasInventoryBuilders ? ["inventoryBuilders"] : [])],
+    "descriptor"
+  );
   if (parsed.kind !== DESCRIPTOR_KIND) fail(`unsupported descriptor kind ${parsed.kind}`);
   if (!Array.isArray(parsed.adapters)) {
     fail("descriptor.adapters must be an array");
@@ -211,8 +216,46 @@ export async function loadConvexWasmRegistrationAdapterMaterial(repoRoot) {
       fail("descriptor source operations must be sorted by unique ID");
     }
   }
+  let inventoryBuilders;
+  if (hasInventoryBuilders) {
+    if (!Array.isArray(parsed.inventoryBuilders)) {
+      fail("descriptor.inventoryBuilders must be an array");
+    }
+    let previousKey;
+    const loweredBuilders = new Set(
+      adapters.map(({ wrapper }) => `${wrapper.modulePath}\0${wrapper.exportName}`)
+    );
+    inventoryBuilders = parsed.inventoryBuilders.map((builder, index) => {
+      const description = `inventory builder ${index}`;
+      exactKeys(builder, ["modulePath", "exportName", "registrationKind"], description);
+      const checked = {
+        modulePath: modulePath(builder.modulePath, `${description}.modulePath`),
+        exportName: identifier(builder.exportName, `${description}.exportName`),
+        registrationKind: string(builder.registrationKind, `${description}.registrationKind`),
+      };
+      if (!["query", "mutation", "action"].includes(checked.registrationKind)) {
+        fail(`${description} has unsupported registration kind`);
+      }
+      const key = `${checked.modulePath}\0${checked.exportName}`;
+      // Match Rust string ordering for normalized paths containing non-ASCII characters.
+      if (
+        previousKey !== undefined &&
+        Buffer.compare(Buffer.from(previousKey), Buffer.from(key)) >= 0
+      ) {
+        fail("inventory builders must be sorted by unique identity");
+      }
+      if (loweredBuilders.has(key)) fail("inventory builder duplicates a lowering adapter");
+      previousKey = key;
+      return checked;
+    });
+  }
   return {
-    descriptor: { adapters, kind: DESCRIPTOR_KIND, sourceOperations },
+    descriptor: {
+      adapters,
+      kind: DESCRIPTOR_KIND,
+      sourceOperations,
+      ...(hasInventoryBuilders ? { inventoryBuilders } : {}),
+    },
     kind: MATERIAL_KIND,
     source: {
       bytes: contents.length,
