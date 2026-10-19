@@ -114,7 +114,9 @@ fn main() -> RunnerResult<()> {
     let mut arguments = std::env::args_os().skip(1);
     let first = arguments.next().ok_or("missing Wasm module path")?;
     let mut config = Config::new();
-    config.wasm_exceptions(true);
+    config
+        .collector(wasmtime::Collector::DeferredReferenceCounting)
+        .wasm_exceptions(true);
     config.consume_fuel(first == "--resource-probe");
     let engine = Engine::new(&config)?;
     if first == "--resource-probe" {

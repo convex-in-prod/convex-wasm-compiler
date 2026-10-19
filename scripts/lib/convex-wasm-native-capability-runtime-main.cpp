@@ -3759,7 +3759,7 @@ extern "C" int convex_wasm_udf_run(void) {
 // keep allocation/collection quiescent until discard finishes. The allocator
 // probe itself does not invalidate a previously returned empty nursery range.
 struct MemoryMaintenanceResult {
-  uint32_t version = 2;
+  uint32_t version = 3;
   uint32_t byte_length = sizeof(MemoryMaintenanceResult);
   uint32_t operation = 0;
   uint32_t status = 0;
@@ -3776,16 +3776,19 @@ static_assert(sizeof(MemoryMaintenanceResult) == 1048);
 MemoryMaintenanceResult memory_maintenance_result{};
 
 extern "C" uint32_t convex_wasm_udf_memory_maintenance(
-    uint32_t operation, uint32_t page_size) {
+    uint32_t operation, uint32_t argument) {
   // Success is a quiescent boundary, not merely a returned Wasm call. Traps and
   // unsuccessful handlers cannot authorize reclamation or template capture.
   const bool boundary_ready = memory_boundary_ready;
   SelectedEntryLease lease;
   if (!boundary_ready || runtime == nullptr ||
-      !retained_runtime_state_is_valid() || operation > 2 ||
-      (operation != 1 && page_size != 0)) {
+      operation > 6 || (operation == 5 && argument == 0) ||
+      (operation != 1 && operation != 3 && operation != 5 && argument != 0)) {
     __builtin_trap();
   }
+  // Preparation and invocation validate the retained entries before publishing
+  // this boundary. Maintenance preserves those roots; repeating that scan here
+  // would make the occupied-byte fast path depend on the application graph size.
   auto &result = memory_maintenance_result;
   result.operation = operation;
   result.status = 0;
@@ -3793,9 +3796,6 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
   result.payload.visited = 0;
   try {
     if (operation == 0) {
-      // Clear certification before any work that can fail after mutating the
-      // heap, even when replacing an earlier successful preparation.
-      memory_image_prepared = false;
       // Never promote an invocation's warmed state into a shared image. Every
       // selected entry must already have initialized under preparation authority.
       if (invocation_has_started || convex_capability_current() != 0)
@@ -3803,31 +3803,90 @@ extern "C" uint32_t convex_wasm_udf_memory_maintenance(
       for (int32_t entry = 0; entry < declared_application_entry_count; ++entry) {
         if (!selected_entry_is_prepared(entry)) __builtin_trap();
       }
-      SHLegacyValue exception;
-      if (!_sh_prepare_literal_layouts(runtime, &exception)) __builtin_trap();
-      auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
-      js.instrumentation().collectGarbage("prepared-memory-image");
-      // Capture preserves the entire heap, including any nursery or unfinished
-      // incremental collector state. Emptying the nursery is optional backing
-      // reclamation, not a prerequisite for a quiescent initialized image.
-      // Operation 0 grants no discard ranges; operation 2 owns that authority.
-      memory_image_prepared = true;
+      if (!memory_image_prepared) {
+        SHLegacyValue exception;
+        if (!_sh_prepare_literal_layouts(runtime, &exception)) __builtin_trap();
+        if (!_sh_begin_prepared_heap(runtime)) __builtin_trap();
+        // Publish certification only after collection and allocation separation
+        // finish. A repeated pre-invocation preparation is an observation of
+        // this same boundary, not permission to create another prepared region.
+        memory_image_prepared = true;
+      }
+      // Preparation grants no discard authority; each export below proves the
+      // current ownership again at the exclusive maintenance boundary.
     } else if (!memory_image_prepared) {
       __builtin_trap();
     }
 
     if (operation == 1) {
       result.status = convex_wasm_allocator_free_payload(
-          &result.payload, page_size, 4096);
-    } else if (operation == 2) {
+          &result.payload, argument, 4096);
+    } else if (operation == 2 || operation == 4) {
       SHYoungReclaimResult reclaimed{};
-      _sh_try_reclaim_young_generation(runtime, &reclaimed);
+      if (operation == 2)
+        _sh_try_reclaim_young_generation(runtime, &reclaimed);
+      else
+        _sh_empty_young_payload(runtime, &reclaimed);
       switch (reclaimed.status) {
         case SHYoungReclaimReclaimed:
           if (reclaimed.payload_begin >= reclaimed.payload_end) __builtin_trap();
           result.payload.count = 1;
           result.payload.ranges[0] = {
               reclaimed.payload_begin, reclaimed.payload_end};
+          break;
+        case SHYoungReclaimDeferred:
+          result.status = 2;
+          break;
+        case SHYoungReclaimUnsupported:
+          result.status = 3;
+          break;
+        default:
+          __builtin_trap();
+      }
+    } else if (operation == 3) {
+      SHFreePayloadResult free_payload;
+      _sh_dynamic_free_payload(runtime, &free_payload, argument, 4096);
+      result.status = free_payload.status;
+      result.payload.count = free_payload.count;
+      result.payload.visited = free_payload.visited;
+      for (uint32_t i = 0; i < free_payload.count; ++i)
+        result.payload.ranges[i] = {
+            free_payload.ranges[i].start, free_payload.ranges[i].end};
+    } else if (operation == 5) {
+      // Occupied nursery storage alone does not justify a major collection.
+      // Try the ordinary guarded nursery collection first, preserving its
+      // requirement to allow old-generation progress when it defers.
+      if (_sh_prepared_heap_dynamic_bytes(runtime) > argument) {
+        SHYoungReclaimResult reclaimed{};
+        _sh_empty_young_payload(runtime, &reclaimed);
+        bool collected_young = false;
+        if (reclaimed.status == SHYoungReclaimDeferred) {
+          _sh_try_reclaim_young_generation(runtime, &reclaimed);
+          collected_young = reclaimed.status == SHYoungReclaimReclaimed;
+        }
+        if (reclaimed.status != SHYoungReclaimReclaimed &&
+            reclaimed.status != SHYoungReclaimDeferred)
+          __builtin_trap();
+        // A lower-threshold retry follows an already emptied nursery. Running
+        // another nursery pass would repeat root/weak visits without removing
+        // the occupied old/native storage that triggered this pressure.
+        if (collected_young &&
+            _sh_prepared_heap_dynamic_bytes(runtime) <= argument) {
+          result.status = 4;
+        } else {
+          auto &js = *reinterpret_cast<Runtime *>(_sh_get_hermes_runtime(runtime));
+          js.instrumentation().collectGarbage("dynamic-allocation-pressure");
+          result.status = 5;
+        }
+      }
+      // Collection invalidates all previously exported payload, including the
+      // nursery result above. The caller must reacquire ranges before discard.
+    } else if (operation == 6) {
+      SHYoungReclaimResult empty{};
+      _sh_empty_young_payload(runtime, &empty);
+      switch (empty.status) {
+        case SHYoungReclaimReclaimed:
+          (void)_sh_trim_unused_weak_slots(runtime);
           break;
         case SHYoungReclaimDeferred:
           result.status = 2;

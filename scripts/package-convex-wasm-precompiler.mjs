@@ -47,7 +47,7 @@ const wasmtimeFeatures = Object.freeze([
   "all-arch",
   "async",
   "cranelift",
-  "gc-null",
+  "gc-drc",
   "incremental-cache",
   "parallel-compilation",
   "runtime",

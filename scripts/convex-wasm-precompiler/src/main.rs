@@ -225,7 +225,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     ensure_distinct_new_outputs(&output, &engine_identity_path, trace_path.as_deref())?;
 
     let mut config = Config::new();
+    // Exception references belong to a reused Store, independently of the guest
+    // heap. A null collector retains their storage across completed invocations.
+    // This choice is already part of the native engine compatibility hash.
     config
+        .collector(wasmtime::Collector::DeferredReferenceCounting)
         .target(&target_triple)?
         .consume_fuel(consume_fuel)
         .epoch_interruption(epoch_interruption)

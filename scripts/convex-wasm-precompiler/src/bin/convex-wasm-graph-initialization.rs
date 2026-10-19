@@ -815,6 +815,7 @@ fn main() -> error::Result<()> {
     let input: Input = serde_json::from_slice(&std::fs::read(input_path)?)?;
     let mut config = Config::new();
     config
+        .collector(wasmtime::Collector::DeferredReferenceCounting)
         .consume_fuel(true)
         .epoch_interruption(true)
         .wasm_exceptions(true)

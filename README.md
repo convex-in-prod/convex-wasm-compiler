@@ -12,6 +12,13 @@ capabilities of that target. A runtime outside the operator's control must be
 able to compile portable Core Wasm with its own engine, subject to supported
 Wasm features and the host ABI.
 
+The maintained native target uses Wasmtime's deferred reference-counting collector
+for Store-owned references, including caught Wasm exceptions. This is separate
+from Hermes's guest heap collector. AOT engine compatibility includes the host
+collector choice; portable Core Wasm does not require that collector. Package
+verification still accepts authenticated older precompiler packages built with
+the null collector, without claiming their AOT matches a collecting engine.
+
 Core module inspection and artifact construction are independent of the native
 engine. New `convex-wasm-core-module-contract-v1` contracts authenticate Core
 bytes, imports, exports and linking metadata without a Wasmtime identity.

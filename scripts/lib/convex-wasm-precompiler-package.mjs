@@ -142,13 +142,19 @@ function validateWasmtimeIdentity(wasmtime, sourceMaterials) {
     "all-arch",
     "async",
     "cranelift",
-    "gc-null",
     "incremental-cache",
     "parallel-compilation",
     "runtime",
     "std",
   ].sort();
-  if (canonicalCompilerPackageJson(wasmtime.features) !== canonicalCompilerPackageJson(expectedFeatures)) {
+  // Retained packages used the null collector. Both exact build profiles are
+  // authenticated here; native AOT compatibility still belongs to the receiving
+  // engine and must not become a requirement on portable Core Wasm.
+  const supportedProfile = ["gc-drc", "gc-null"].some((collector) =>
+    canonicalCompilerPackageJson(wasmtime.features) ===
+      canonicalCompilerPackageJson([...expectedFeatures, collector].sort())
+  );
+  if (!supportedProfile) {
     fail("Wasmtime features do not match the package contract");
   }
   if (!Array.isArray(wasmtime.lockedPackages) || wasmtime.lockedPackages.length === 0) {

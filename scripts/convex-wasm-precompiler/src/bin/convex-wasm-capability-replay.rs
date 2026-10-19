@@ -57,6 +57,7 @@ impl EngineVariant {
     fn engine(self, perf_map: bool) -> Result<Engine, Error> {
         let mut config = Config::new();
         config
+            .collector(wasmtime::Collector::DeferredReferenceCounting)
             .consume_fuel(self.fuel())
             .epoch_interruption(self.epochs())
             .table_lazy_init(!matches!(self, Self::EagerTables))

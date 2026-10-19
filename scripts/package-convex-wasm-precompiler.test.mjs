@@ -51,6 +51,29 @@ test("native target identities accept distinct revisions but reject mixed source
   }]), /requested revision/u);
 });
 
+test("collector profiles remain authenticated while retained packages stay readable", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "precompiler-collector-profile-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const fixture = await writeFixturePrecompilerPackage({ root, identitySeed: "collector-profile" });
+  const { packageId, ...payload } = fixture.manifest;
+  assert.equal(createPrecompilerPackageManifest(payload).packageId, packageId);
+
+  const collecting = structuredClone(payload);
+  collecting.identities.wasmtime.features = collecting.identities.wasmtime.features
+    .map((feature) => feature === "gc-null" ? "gc-drc" : feature)
+    .sort();
+  assert.notEqual(createPrecompilerPackageManifest(collecting).packageId, packageId);
+
+  for (const collectors of [[], ["gc-drc", "gc-null"], ["gc-copying"]]) {
+    const unsupported = structuredClone(payload);
+    unsupported.identities.wasmtime.features = [
+      ...payload.identities.wasmtime.features.filter((feature) => feature !== "gc-null"),
+      ...collectors,
+    ].sort();
+    assert.throws(() => createPrecompilerPackageManifest(unsupported), /features do not match/u);
+  }
+});
+
 test("legacy vendored packages retain authenticated source validation", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "precompiler-legacy-source-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
