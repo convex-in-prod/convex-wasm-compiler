@@ -32,7 +32,7 @@ libc = "=0.2.189"
 rayon = "=1.10.0"
 wasm-encoder = { version = "=0.259.0", features = ["wasmparser"] }
 wasmparser = { version = "=0.259.0", default-features = false, features = ["features", "simd", "std", "validate"] }
-wasmtime = { git = "https://github.com/convex-in-prod/wasmtime", rev = "e7f307dadc8e2a8de3b4d09837985e07382f7305", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-drc"] }
+wasmtime = { git = "https://github.com/convex-in-prod/wasmtime", rev = "3859871cecd40f551fff2f601642a6c230ccd888", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-drc"] }
 
 [profile.release]
 lto = "thin"

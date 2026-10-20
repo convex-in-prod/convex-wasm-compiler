@@ -1,16 +1,16 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "b2c882c981108b11c1eab4dabe9bf22e0273769c",
-    "sourceRevision": "b2c882c981108b11c1eab4dabe9bf22e0273769c",
-    "observedCheckoutRevision": "b2c882c981108b11c1eab4dabe9bf22e0273769c",
+    "buildRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
+    "sourceRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
+    "observedCheckoutRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
     "hostCmakeCacheSha256": "9da6acfaf4cab7d166d24cde52dadc66e25987444d6861a5dc8d566490855607",
     "hostShermesSha256": "cee532189befab289fd985a5182f6de3c437f1eed4cd06c1692d14f09770dea1",
-    "wasmCmakeCacheSha256": "9ac9c86479daf0581405d445661249790aab4ef5922137a89b633bf70c1fc317",
-    "wasmLibhermesvmArchiveSha256": "ab4f361cf8ba66d1386267aced0c63aadb4f43382e04c617b777d0fc349589a9",
+    "wasmCmakeCacheSha256": "6ea43c155d74c29e294bb14e75433f7145181c55a7632cfd7e8652ea8740de74",
+    "wasmLibhermesvmArchiveSha256": "168d94c29446b20f61cd63d1964daaf1e3bdaf7b5ecd1ed3e23ed34eb1531ae0",
     "wasmIcuArchiveSha256": "47750aeca21fdfcea5203c3a5f1a750365ed4373a63daa2541c8219098b9266b"
   },
   "buildConfiguration": {
@@ -74,8 +74,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "eb019bd4f7e9abbfa8d281a8318f59b17f0c38d1f957155fee36ad98428b407d",
-    "reportSha256": "71750f042252491b3516290c953390256a56f70fa13b7dbd0c44121efd546e10",
+    "reportFileSha256": "cae46648dc83b5425f1953fba150964904a36774fae3033cacbc5f1544c12435",
+    "reportSha256": "027808922b92830943199df16d57f3f4c233cf6600f8f2e8bfefab89de80cb99",
     "globals": [
       "$SHBuiltin",
       "AggregateError",

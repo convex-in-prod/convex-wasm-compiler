@@ -145,7 +145,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
@@ -153,7 +153,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -161,7 +161,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-entity",
  "wasmtime-internal-core",
@@ -170,7 +170,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "serde",
  "serde_derive",
@@ -180,7 +180,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -210,7 +210,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -222,12 +222,12 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 
 [[package]]
 name = "cranelift-control"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "arbitrary",
 ]
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-bitset",
  "serde",
@@ -246,7 +246,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
@@ -258,12 +258,12 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 
 [[package]]
 name = "cranelift-native"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -274,7 +274,7 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.137.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 
 [[package]]
 name = "crc32fast"
@@ -677,7 +677,7 @@ dependencies = [
 [[package]]
 name = "pulley-interpreter"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-bitset",
  "log",
@@ -688,7 +688,7 @@ dependencies = [
 [[package]]
 name = "pulley-macros"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "wasmtime"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "addr2line",
  "async-trait",
@@ -1052,7 +1052,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-environ"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -1081,7 +1081,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-macro"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -1095,12 +1095,12 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-util"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 
 [[package]]
 name = "wasmtime-internal-core"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -1110,7 +1110,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
@@ -1135,7 +1135,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-fiber"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cc",
  "libc",
@@ -1148,7 +1148,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-debug"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cc",
  "wasmtime-internal-versioned-export-macros",
@@ -1157,7 +1157,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "libc",
  "wasmtime-internal-core",
@@ -1167,7 +1167,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-unwinder"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -1178,7 +1178,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-versioned-export-macros"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1188,7 +1188,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-winch"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-codegen",
  "gimli",
@@ -1204,7 +1204,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-wit-bindgen"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",
@@ -1226,7 +1226,7 @@ dependencies = [
 [[package]]
 name = "winch-codegen"
 version = "50.0.0-dev"
-source = "git+https://github.com/convex-in-prod/wasmtime?rev=e7f307dadc8e2a8de3b4d09837985e07382f7305#e7f307dadc8e2a8de3b4d09837985e07382f7305"
+source = "git+https://github.com/convex-in-prod/wasmtime?rev=3859871cecd40f551fff2f601642a6c230ccd888#3859871cecd40f551fff2f601642a6c230ccd888"
 dependencies = [
  "cranelift-assembler-x64",
  "cranelift-codegen",

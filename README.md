@@ -219,12 +219,19 @@ The development runner pins a reproducible Wasmtime revision. Artifact builds
 use the revision authenticated by the caller-selected precompiler package;
 it need not match the development runner. Setup does not need a second Wasmtime
 source checkout.
-The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/e7f307dadc8e2a8de3b4d09837985e07382f7305/DOWNSTREAM.md)
+The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/3859871cecd40f551fff2f601642a6c230ccd888/DOWNSTREAM.md)
 owns compiler and runtime metering changes, including register preservation in
 fuel and epoch handlers and exception fuel accounting. Compiler package identities
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
-It requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
+
+Release v0.2.42 changes native function-reference metadata. Its precompiler and
+the matching backend use Wasmtime `3859871cecd40f551fff2f601642a6c230ccd888`;
+native artifacts from the previous engine must be regenerated before activating
+the backend with those application generations. Portable Core Wasm remains
+compatible. Retain the previous backend and its native artifacts together for
+rollback; changing a package version or manifest cannot convert old AOT bytes.
+Gate setup requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
 Rust toolchain named by the packaged runner source. It targets the supported
 Linux and macOS hosts; the first run builds substantial native code. A later
 run checks the pinned revisions and reuses the completed files. `--check-only`
