@@ -28,11 +28,11 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
-libc = "=0.2.189"
+libc = "=0.2.191"
 rayon = "=1.10.0"
 wasm-encoder = { version = "=0.259.0", features = ["wasmparser"] }
 wasmparser = { version = "=0.259.0", default-features = false, features = ["features", "simd", "std", "validate"] }
-wasmtime = { git = "https://github.com/convex-in-prod/wasmtime", rev = "3859871cecd40f551fff2f601642a6c230ccd888", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-drc"] }
+wasmtime = { git = "https://github.com/convex-in-prod/wasmtime", rev = "ba13bdffaa34c4cfa6af8ceb58275e761593a885", default-features = false, features = ["all-arch", "async", "cranelift", "incremental-cache", "parallel-compilation", "runtime", "std", "gc-drc"] }
 
 [profile.release]
 lto = "thin"

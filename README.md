@@ -219,14 +219,15 @@ The development runner pins a reproducible Wasmtime revision. Artifact builds
 use the revision authenticated by the caller-selected precompiler package;
 it need not match the development runner. Setup does not need a second Wasmtime
 source checkout.
-The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/3859871cecd40f551fff2f601642a6c230ccd888/DOWNSTREAM.md)
+The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/ba13bdffaa34c4cfa6af8ceb58275e761593a885/DOWNSTREAM.md)
 owns compiler and runtime metering changes, including register preservation in
 fuel and epoch handlers and exception fuel accounting. Compiler package identities
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
 
-Release v0.2.42 changes native function-reference metadata. Its precompiler and
-the matching backend use Wasmtime `3859871cecd40f551fff2f601642a6c230ccd888`;
+Release v0.2.43 refreshes Hermes, Oxc and Wasmtime from upstream. Wasmtime's
+changed tunables and builtin layout require new native artifact metadata. Its precompiler and
+the matching backend use Wasmtime `ba13bdffaa34c4cfa6af8ceb58275e761593a885`;
 native artifacts from the previous engine must be regenerated before activating
 the backend with those application generations. Portable Core Wasm remains
 compatible. Retain the previous backend and its native artifacts together for

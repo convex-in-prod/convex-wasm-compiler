@@ -13799,3 +13799,27 @@ export const invoke = mutation({
         }));
     }
 }
+
+#[cfg(test)]
+mod capability_literal_tests {
+    use super::{SourceRange, source_range_string};
+
+    #[test]
+    fn names_preserve_unicode_without_substituting_lone_surrogates() {
+        for (source, expected) in [
+            (r#""documents""#, Some("documents")),
+            (r#""\uD83D\uDE00""#, Some("😀")),
+            (r#""\u{D83D}\u{DE00}""#, Some("😀")),
+            (r#""\\uD800""#, Some(r"\uD800")),
+            (r#""\uFFFD""#, Some("�")),
+            (r#""\uD800""#, None),
+            (r#""\uDC00""#, None),
+        ] {
+            let range = SourceRange {
+                start: 0,
+                end: source.len() as u32,
+            };
+            assert_eq!(source_range_string(source, &range).as_deref(), expected);
+        }
+    }
+}

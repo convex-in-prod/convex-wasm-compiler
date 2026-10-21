@@ -1,16 +1,16 @@
 {
   "kind": "convex-wasm-static-hermes-global-inventory",
   "sourceIdentity": {
-    "buildRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
-    "sourceRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
-    "observedCheckoutRevision": "fc694affcfd1ec444876b626ecb05006737605ec",
+    "buildRevision": "c08d6ed3f8f9e6b5c96da1eaff149c4c99ed849e",
+    "sourceRevision": "c08d6ed3f8f9e6b5c96da1eaff149c4c99ed849e",
+    "observedCheckoutRevision": "c08d6ed3f8f9e6b5c96da1eaff149c4c99ed849e",
     "libhermesDeclarationSha256": "d1b1b5f96cfc1ee6cc9614f528fcd97353c9a636bc471b4fbe8a49a1ac930141",
     "typedArraysDeclarationSha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352",
     "globalObjectSourceSha256": "e9aba45b230bf2834d069991fb86a083a5a5c7d74202bc81dce99912566323d9",
-    "hostCmakeCacheSha256": "9da6acfaf4cab7d166d24cde52dadc66e25987444d6861a5dc8d566490855607",
-    "hostShermesSha256": "cee532189befab289fd985a5182f6de3c437f1eed4cd06c1692d14f09770dea1",
-    "wasmCmakeCacheSha256": "6ea43c155d74c29e294bb14e75433f7145181c55a7632cfd7e8652ea8740de74",
-    "wasmLibhermesvmArchiveSha256": "168d94c29446b20f61cd63d1964daaf1e3bdaf7b5ecd1ed3e23ed34eb1531ae0",
+    "hostCmakeCacheSha256": "179ce17f879e38355cf4d62da0de4d6245abb53567fcbb025bc70b599f8df268",
+    "hostShermesSha256": "f00381bcd2cdbaff4d17ac1ac6d45098772983e575fa5864a6bc1505257a8c16",
+    "wasmCmakeCacheSha256": "5df45f81d0003cbf36dbaf4c5c4b07a2e77b68eaa2e65d4960a0d0bea1af2925",
+    "wasmLibhermesvmArchiveSha256": "49bb1fd9c6f1fc471871de21c31b606002551b41713b5f29f9bf608aec6d15da",
     "wasmIcuArchiveSha256": "47750aeca21fdfcea5203c3a5f1a750365ed4373a63daa2541c8219098b9266b"
   },
   "buildConfiguration": {
@@ -74,8 +74,8 @@
   },
   "targetRuntimeProbe": {
     "kind": "static-hermes-no-console-sh-init-global-probe",
-    "reportFileSha256": "cae46648dc83b5425f1953fba150964904a36774fae3033cacbc5f1544c12435",
-    "reportSha256": "027808922b92830943199df16d57f3f4c233cf6600f8f2e8bfefab89de80cb99",
+    "reportFileSha256": "a070da429c2799d9becf16b4194e66d57e2b99765ff82e1fbdfbfb6281bfba93",
+    "reportSha256": "ebf2d8b6fd0975d7d9af674ad794c6df90e90bfb0af8f2f3f47ecc5c64c7d26a",
     "globals": [
       "$SHBuiltin",
       "AggregateError",

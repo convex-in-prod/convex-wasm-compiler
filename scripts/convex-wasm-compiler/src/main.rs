@@ -153,7 +153,7 @@ pub(crate) use source_graph::{
 const COMPILER_SCHEMA: &str = "convex-wasm-compiler-output";
 const MODULE_SUMMARY_SCHEMA: &str = "convex-wasm-module-summary";
 const ABI_VERSION: &str = "convex-wasm-opaque";
-const OXC_VERSION: &str = "0.150.0";
+const OXC_VERSION: &str = "0.155.0";
 const ADMITTED_LANGUAGE_VERSION: u32 = 29;
 const MAX_CONTROL_INPUT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_BATCH_DIAGNOSTIC_CENSUS_IDS_PER_EXPORT: usize = 16;
@@ -1420,7 +1420,9 @@ fn source_range_string(source: &str, range: &SourceRange) -> Option<String> {
         return None;
     }
     match expression {
-        Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+        // Capability names are UTF-8 strings. A JavaScript lone surrogate cannot
+        // name one; do not turn it into an escape or replacement character.
+        Expression::StringLiteral(literal) => literal.value.as_str().map(str::to_owned),
         _ => None,
     }
 }

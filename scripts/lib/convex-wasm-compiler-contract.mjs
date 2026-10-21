@@ -5,7 +5,7 @@ export const convexWasmCompilerAbiVersion = "convex-wasm-opaque";
 export const convexWasmCompilerOpaqueValueAbiVersion = 3;
 export const convexWasmCompilerAdmittedLanguageVersion = 29;
 export const convexWasmCompilerModuleSummarySchema = "convex-wasm-module-summary";
-export const convexWasmCompilerOxcVersion = "0.150.0";
+export const convexWasmCompilerOxcVersion = "0.155.0";
 export const convexWasmBlockingEffectExecutionMode = "blocking-fiber";
 export const convexWasmGuestPromiseEffectExecutionMode = "guest-promise-event-loop";
 

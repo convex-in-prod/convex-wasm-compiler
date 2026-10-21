@@ -430,7 +430,7 @@ mod tests {
             store.set_epoch_deadline(1);
             let table = wasmtime::Table::new(
                 &mut store,
-                wasmtime::TableType::new(wasmtime::RefType::FUNCREF, 2, Some(2)),
+                wasmtime::TableType::new(wasmtime::RefType::FUNCREF, 2, Some(2))?,
                 wasmtime::Ref::Func(None),
             )?;
             let first_module = Module::new(&engine, shared_table_module(21))?;
