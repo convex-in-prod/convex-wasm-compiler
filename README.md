@@ -225,6 +225,12 @@ fuel and epoch handlers and exception fuel accounting. Compiler package identiti
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
 
+Release v0.2.44 adopts guarded whole-operation RegExp specialization and bounded
+AOT matchers in Static Hermes. Eligible literals avoid repeated interpreter
+work and intermediate match/replacement allocations; unsupported operands and
+observable builtin overrides retain ordinary execution. This does not change
+the Wasmtime artifact format or backend ABI.
+
 Release v0.2.43 refreshes Hermes, Oxc and Wasmtime from upstream. Wasmtime's
 changed tunables and builtin layout require new native artifact metadata. Its precompiler and
 the matching backend use Wasmtime `ba13bdffaa34c4cfa6af8ceb58275e761593a885`;
