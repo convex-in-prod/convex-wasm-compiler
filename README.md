@@ -225,6 +225,13 @@ fuel and epoch handlers and exception fuel accounting. Compiler package identiti
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
 
+Release v0.2.45 extends bounded Static Hermes RegExp matchers to non-Unicode
+case-insensitive UTF-16 literals and capture-free forward alternatives. Ordered
+backtracking and existing matcher budgets are preserved. Unsupported patterns
+retain ordinary execution. The Rust compiler and precompiler packages, Wasmtime
+artifact format and backend ABI are unchanged; native packages from v0.2.44 are
+reused.
+
 Release v0.2.44 adopts guarded whole-operation RegExp specialization and bounded
 AOT matchers in Static Hermes. Eligible literals avoid repeated interpreter
 work and intermediate match/replacement allocations; unsupported operands and

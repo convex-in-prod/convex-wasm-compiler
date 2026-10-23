@@ -1,6 +1,6 @@
 {
   "build": {
-    "buildRevision": "d8759528165a85dcf8f6aec66e22ccddb7ee06eb",
+    "buildRevision": "40441111c9e369d1b87c0b0d1fa009b72539d70a",
     "cmake": {
       "host": {
         "flags": {
@@ -27,7 +27,7 @@
         }
       }
     },
-    "observedCheckoutRevision": "d8759528165a85dcf8f6aec66e22ccddb7ee06eb",
+    "observedCheckoutRevision": "40441111c9e369d1b87c0b0d1fa009b72539d70a",
     "sourceMaterials": {
       "globalObject": {
         "path": "lib/VM/JSLib/GlobalObject.cpp",
@@ -42,7 +42,7 @@
         "sha256": "78fb9e73e7438ae915cca52ab2de18d3d12e4b7f15d07589e912be5e6902d352"
       }
     },
-    "sourceRevision": "d8759528165a85dcf8f6aec66e22ccddb7ee06eb"
+    "sourceRevision": "40441111c9e369d1b87c0b0d1fa009b72539d70a"
   },
   "harness": {
     "generatedC": {
@@ -555,8 +555,8 @@
       "sha256": "0a5ed4439f49d1c016bfa59d12b70850c801c53d148a7fe15d34b0a413c53090"
     },
     "shermes": {
-      "bytes": 4756456,
-      "sha256": "8a2433edccadcaae412d0d61790656706c4245321dfe681d1b94ee3bbc611ebe"
+      "bytes": 4760736,
+      "sha256": "21bdf26a0000bf5ce0202022a0f1648d5aacda9c981c51c1df8c7ae3d0923f76"
     }
   },
   "typedDeclarations": {
@@ -627,5 +627,5 @@
     ],
     "kind": "libhermes-runtime-declarations-plus-typed-arrays-v1"
   },
-  "reportSha256": "8d12dce9057a8dfdc733bbad0707098cfadcd6812d431ffc9f1f7de7e88c2dd0"
+  "reportSha256": "90522ca81020f8eb73c3863030d05a48867d92294ace12406432002619da9a84"
 }
