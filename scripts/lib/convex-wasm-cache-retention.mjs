@@ -50,6 +50,15 @@ function isMissing(error) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+async function settleRetentionWork(work) {
+  // Occupancy scans and snapshot cleanup also run under the cache lock. Do not let their
+  // first failure release it while a sibling still reads or removes cache files.
+  const results = await Promise.allSettled(work);
+  const failure = results.find(({ status }) => status === "rejected");
+  if (failure !== undefined) throw failure.reason;
+  return results.map(({ value }) => value);
+}
+
 function requireNonNegativeSafeInteger(value, description) {
   if (!Number.isSafeInteger(value) || value < 0) {
     fail(`${description} must be a non-negative safe integer`);
@@ -714,7 +723,7 @@ export async function recordConvexWasmSuccessfulCacheUse({
   snapshots.sort(
     (left, right) => right.recordedAtMs - left.recordedAtMs || compareStrings(right.name, left.name)
   );
-  await Promise.all(
+  await settleRetentionWork(
     snapshots.slice(convexWasmRecentSuccessSnapshotLimit).map(async ({ name }) => {
       const path = join(root, name);
       await requirePrivateCacheFile(cacheLayout.cacheRoot, path);
@@ -1136,7 +1145,7 @@ export async function maintainConvexWasmCache({
     // Finish both stable snapshots before an apply run starts removing work roots. Automatic
     // maintenance measures the immutable subtree separately so unrelated cache families cannot
     // trigger the expensive authenticated graph walk after every compilation.
-    const [occupancy, immutableOccupancy] = await Promise.all([
+    const [occupancy, immutableOccupancy] = await settleRetentionWork([
       measureConvexWasmCacheOccupancy(occupancyRoot),
       automaticImmutableSweep
         ? measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)
@@ -1156,9 +1165,16 @@ export async function maintainConvexWasmCache({
     const immutableSweepBlockers = roots.filter(
       ({ action, status }) => action !== "remove" && status !== "failed" && status !== "completed"
     );
-    const automaticImmutableSweepTriggered =
+    const automaticImmutableSweepAboveHighWatermark =
       automaticImmutableSweep &&
       immutableOccupancy.uniqueAllocatedBytes > normalizedImmutableHighWatermarkAllocatedBytes;
+    // Quarantine is outside immutable/. An interrupted batch can lower that subtree below the
+    // watermark before reclaiming any bytes, so its durable recovery must trigger independently.
+    const automaticImmutableSweepRecovery = automaticImmutableSweep && await pathExists(
+      join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")
+    );
+    const automaticImmutableSweepTriggered =
+      automaticImmutableSweepAboveHighWatermark || automaticImmutableSweepRecovery;
     const immutableSweepRequested = immutableSweep || automaticImmutableSweepTriggered;
     const immutableGcOptions = {
       cacheLayout,
@@ -1189,7 +1205,7 @@ export async function maintainConvexWasmCache({
         mode: 0o600,
       });
     }
-    const rootMarkers = await Promise.all(
+    const rootMarkers = await settleRetentionWork(
       immutableRootMarkers(normalizedCacheRoot).map(async (root) => ({
         ...root,
         exists: await pathExists(root.path),
@@ -1227,7 +1243,11 @@ export async function maintainConvexWasmCache({
                 recovered: immutableSweepResult?.recovered ?? [],
                 removed: immutableSweepResult?.removed ?? [],
                 requested: true,
-                trigger: immutableSweep ? "explicit" : "above-high-watermark",
+                trigger: immutableSweep
+                  ? "explicit"
+                  : automaticImmutableSweepAboveHighWatermark
+                    ? "above-high-watermark"
+                    : "interrupted-sweep",
                 skipped: immutableSweepResult?.skipped ?? 0,
               },
             }

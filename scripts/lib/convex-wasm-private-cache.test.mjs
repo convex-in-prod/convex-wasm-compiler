@@ -51,6 +51,41 @@ test("authenticates private cache directories and files without following symlin
   assert.equal((await fs.stat(cacheRoot)).mode & 0o777, 0o700);
 });
 
+test("overlapping directory checks share only pending work and later calls check again", async (context) => {
+  const { cacheRoot, directory } = await createPrivateEntry(context);
+  const open = fs.open;
+  let opens = 0;
+  fs.open = async function (path, ...args) {
+    if (path === cacheRoot) {
+      opens += 1;
+      // Hold the open long enough for sibling readers to reach the same ancestor check.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return await open.call(this, path, ...args);
+  };
+  try {
+    await Promise.all(Array.from({ length: 4 }, () =>
+      requirePrivateCacheDirectory(cacheRoot, directory)
+    ));
+    assert.equal(opens, 1);
+    await requirePrivateCacheDirectory(cacheRoot, directory);
+    assert.equal(opens, 2);
+    await fs.chmod(cacheRoot, 0o755);
+    const failures = await Promise.allSettled(Array.from({ length: 4 }, () =>
+      requirePrivateCacheDirectory(cacheRoot, directory)
+    ));
+    assert.ok(failures.every(({ status, reason }) =>
+      status === "rejected" && /must have mode 0700/u.test(reason.message)
+    ));
+    await fs.chmod(cacheRoot, 0o700);
+    await requirePrivateCacheDirectory(cacheRoot, directory);
+    assert.equal(opens, 3);
+  } finally {
+    fs.open = open;
+    await fs.chmod(cacheRoot, 0o700);
+  }
+});
+
 test("binds direct file identities across a cache-entry read", async (context) => {
   const { cacheRoot, directory } = await createPrivateEntry(context);
   const materialPath = join(directory, "entry.json");
@@ -60,6 +95,34 @@ test("binds direct file identities across a cache-entry read", async (context) =
   await authenticated.verify();
   await fs.writeFile(materialPath, '{"changed":true}\n');
   await assert.rejects(authenticated.verify(), /changed during file authentication/u);
+});
+
+test("file identity verification drains member reads before returning a directory failure", async (context) => {
+  const { cacheRoot, directory } = await createPrivateEntry(context);
+  const materialPath = join(directory, "entry.json");
+  await fs.writeFile(materialPath, "{}\n", { mode: 0o600 });
+  const authenticated = await requirePrivateCacheDirectoryFileIdentities(cacheRoot, directory);
+  const originalLstat = fs.lstat;
+  const memberRead = Promise.withResolvers();
+  const directoryFailure = new Error("synthetic directory read failure");
+  let settled = false;
+  fs.lstat = async (path, ...args) => {
+    if (path === directory) throw directoryFailure;
+    if (path === materialPath) await memberRead.promise;
+    return await originalLstat(path, ...args);
+  };
+  const verification = authenticated.verify().then(
+    () => { settled = true; },
+    (error) => { settled = true; return error; }
+  );
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+  } finally {
+    memberRead.resolve();
+    assert.equal(await verification, directoryFailure);
+    fs.lstat = originalLstat;
+  }
 });
 
 test("rejects a cache directory changed while its file inventory is captured", async (context) => {

@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   canonicalJson,
@@ -8,16 +8,19 @@ import {
   fingerprintJson,
   requireSha256,
 } from "./convex-wasm-artifact-contract.mjs";
-import { decodeUtf8, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
+import { decodeUtf8, mapBounded, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
 import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
-import { validateArtifactCacheEntry } from "./convex-wasm-artifact-cache-entry.mjs";
+import {
+  validateArtifactCacheEntry,
+  validateArtifactCacheEntryInValidationScope,
+} from "./convex-wasm-artifact-cache-entry.mjs";
 import { staticHermesLayoutCacheReferences } from "./convex-wasm-static-hermes-layout-cache.mjs";
 import {
   authenticateStaticHermesCBundle,
   normalizeStaticHermesCBundleOutput,
   staticHermesCBundleMembers,
 } from "./convex-wasm-static-hermes-c-bundle.mjs";
-import { loadAndVerifyConvexWasmModuleGraphPackage } from "./convex-wasm-module-graph-package.mjs";
+import { loadAndVerifyConvexWasmModuleGraphPackageInValidationScope } from "./convex-wasm-module-graph-package.mjs";
 import {
   normalizeConvexWasmCacheLayout,
 } from "./convex-wasm-cache-layout.mjs";
@@ -315,7 +318,7 @@ async function verifyStableDirectoryNames(path, listing, expectedNames, descript
   }
 }
 
-async function treeStats(path) {
+async function treeStats(path, includeIdentity = true) {
   const inodes = new Map();
   const physicalStates = [];
   let allocatedBytes = 0;
@@ -364,7 +367,7 @@ async function treeStats(path) {
     // cannot make a different tree look like the planned candidate. The root directory's ctime is
     // omitted because the quarantine rename itself changes that ctime; child states still cover
     // every member and the root inode/type/size/link state remains bound.
-    physicalStates.push({
+    if (includeIdentity) physicalStates.push({
       blocks: String(status.blocks),
       dev: String(status.dev),
       gid: String(status.gid),
@@ -389,6 +392,9 @@ async function treeStats(path) {
       }
     }
   }
+  // Pressure accounting needs the complete inode walk, but never consumes its authentication
+  // digest. Avoid retaining and canonicalizing every file state for that whole-cache read.
+  if (!includeIdentity) return { allocatedBytes };
   let estimatedReclaimBytes = 0;
   for (const inode of inodes.values()) {
     // Removing this tree cannot reclaim a regular file while another hardlink remains outside it.
@@ -880,7 +886,7 @@ async function topologyCertificateCompilerOutputReference(entry) {
     "compiler-output topology certificate"
   );
   if (legacyIdentity) {
-    // The v6 predecessor cannot be selected by the v7 producer. Authenticate its complete
+    // The v6 predecessor cannot be selected by the current producer. Authenticate its complete
     // self-contained certificate before leaving it as an ordinary age-bounded artifact.
     return undefined;
   }
@@ -1121,7 +1127,7 @@ function authenticateCapsuleTopologyCertificate(certificate, record, recordAutho
   let expectedDescriptor;
   if (recordAuthority.schemaVersion === MODULE_GRAPH_COMPILER_OUTPUT_CACHE_RECORD_SCHEMA_VERSION) {
     // Schema 5 persists the exact topology descriptor used by the certificate. The record digest,
-    // strict v7 lookup identity, and exact comparison below bind that compact authority without
+    // strict current lookup identity, and exact comparison below bind that compact authority without
     // restoring the retired full descriptor.
     expectedDescriptor = record.descriptor;
   } else {
@@ -1295,7 +1301,7 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
     ["cacheIdentity", "cacheKey", "cacheRecordSha256", "certificateCacheKey", "descriptor"],
     "cohort capsule compiler-output topology"
   );
-  // Close the v7 identity shape before deriving or following any immutable references. A kind
+  // Close the current identity shape before deriving or following any immutable references. A kind
   // label alone does not authenticate the fields that define the compiler-output lookup key.
   const compilerOutputCacheIdentity = normalizeConvexWasmCompilerOutputCacheIdentity(
     topology.cacheIdentity,
@@ -1352,7 +1358,7 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
         return undefined;
       }
       // A capsule topology is only consumable with the current full compiler-output record.
-      // Legacy records cannot satisfy v5 closure merely because a certificate describes them.
+      // Legacy records cannot satisfy current closure merely because a certificate describes them.
       if (compilerOutputCacheEntrySchema(compilerOutputEntry) !== "current") {
         fail("cohort capsule compiler-output cache record has an unsupported schema");
       }
@@ -1481,12 +1487,9 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
   };
 }
 
-async function authenticateGenericArtifact({ cacheLayout, key, path, stage }) {
-  const metadata = await readCanonical(
-    join(path, "entry.json"),
-    MAX_METADATA_BYTES,
-    "artifact entry"
-  );
+async function authenticateGenericArtifact({ cacheLayout, key, metadata, path, stage, validation }) {
+  // The family dispatch already read this metadata. It selects the expected extension only;
+  // the scoped validator below authenticates the current entry and its complete payload.
   if (
     metadata.kind !== "convex-wasm-artifact-cache-entry-v5" ||
     metadata.stage !== stage ||
@@ -1501,7 +1504,8 @@ async function authenticateGenericArtifact({ cacheLayout, key, path, stage }) {
   if (!GENERIC_ARTIFACT_EXTENSIONS.has(expectedExtension)) {
     fail(`artifact entry extension is invalid: ${path}`);
   }
-  const entry = await validateArtifactCacheEntry(
+  const entry = await validateArtifactCacheEntryInValidationScope(
+    validation.artifacts,
     cacheLayout.cacheRoot,
     cacheLayout,
     stage,
@@ -1544,14 +1548,14 @@ async function authenticateRuntimeHeaderSnapshot({ cacheLayout, key, path, stage
   return { entry: snapshot.entry, key, path, stage, type: "artifact" };
 }
 
-async function authenticateArtifactFamily({ cacheLayout, key, metadata, path, stage }) {
+async function authenticateArtifactFamily({ cacheLayout, key, metadata, path, stage, validation }) {
   if (
     metadata.kind === convexWasmRuntimeHeaderSnapshotCacheEntryKind ||
     stage === convexWasmRuntimeHeaderSnapshotCacheStage
   ) {
     return await authenticateRuntimeHeaderSnapshot({ cacheLayout, key, path, stage });
   }
-  return await authenticateGenericArtifact({ cacheLayout, key, path, stage });
+  return await authenticateGenericArtifact({ cacheLayout, key, metadata, path, stage, validation });
 }
 
 async function authenticateCBundle({ cacheLayout, key, path, stage }) {
@@ -1644,7 +1648,7 @@ async function authenticateCBundle({ cacheLayout, key, path, stage }) {
   return { key, path, stage, type: "c-bundle", entry, bundle };
 }
 
-async function listArtifactEntries(cacheLayout) {
+async function listArtifactEntries(cacheLayout, validation) {
   const root = cacheLayout.immutable.artifacts;
   const records = [];
   if (!(await exists(root))) return records;
@@ -1658,11 +1662,10 @@ async function listArtifactEntries(cacheLayout) {
     }
     await requirePrivateCacheDirectory(cacheLayout.cacheRoot, stagePath);
     const stageListing = await readStableDirectoryNames(stagePath, "artifact stage");
-    for (const key of stageListing.names) {
-      // Artifact publishers stage complete entries in private sibling directories. A process
-      // crash can leave one behind; it is not an immutable entry and must not make maintenance
-      // fail closed for otherwise valid cache contents.
-      if (key.startsWith(".publish-")) continue;
+    // Publication scratch is not immutable authority. Keep inventory reads bounded, preserve
+    // listing order and drain admitted reads on failure before the caller releases the cache lock.
+    const keys = stageListing.names.filter((key) => !key.startsWith(".publish-"));
+    const stageRecords = await mapBounded(keys, 4, async (key) => {
       if (!SHA256_PATTERN.test(key)) {
         fail(`artifact stage has an unexpected entry: ${join(stagePath, key)}`);
       }
@@ -1682,8 +1685,8 @@ async function listArtifactEntries(cacheLayout) {
         const authenticated =
           metadata.kind === C_BUNDLE_ENTRY_KIND
             ? await authenticateCBundle({ cacheLayout, key, path, stage })
-            : await authenticateArtifactFamily({ cacheLayout, key, metadata, path, stage });
-        records.push({ ...(await treeStats(path)), ...authenticated, authenticated: true });
+            : await authenticateArtifactFamily({ cacheLayout, key, metadata, path, stage, validation });
+        return { ...(await treeStats(path)), ...authenticated, authenticated: true };
       } catch (error) {
         if (!(error instanceof Error)) throw error;
         // Legacy classification occurs inside cohortCapsuleArtifactClosure only after the generic
@@ -1698,7 +1701,7 @@ async function listArtifactEntries(cacheLayout) {
         } catch {
           // Keep an unsafe or disappearing object in the invalid set without granting authority.
         }
-        records.push({
+        return {
           ...stats,
           path,
           key,
@@ -1706,9 +1709,10 @@ async function listArtifactEntries(cacheLayout) {
           type: "artifact",
           authenticated: false,
           reason: "authentication-failed",
-        });
+        };
       }
-    }
+    });
+    for (const record of stageRecords) records.push(record);
     await verifyStableDirectoryNames(stagePath, stageListing, stageListing.names, "artifact stage");
   }
   await verifyStableDirectoryNames(root, rootListing, rootListing.names, "artifact root");
@@ -2001,6 +2005,7 @@ async function authenticateLegacyV2Package({
   key,
   manifest: initialManifest,
   path,
+  validation,
 }) {
   const first = await readLegacyV2ModuleGraphPackage(cacheLayout, key, path, initialManifest);
   const modules = legacyV2ModuleGraphPackageTriple({ ...first, key });
@@ -2013,7 +2018,8 @@ async function authenticateLegacyV2Package({
   await settleConcurrentWork(
     modules.flatMap(({ aot, aotIdentity, contract, coreWasm, coreWasmIdentity, role }) => [
       (async () => {
-        const entry = await validateArtifactCacheEntry(
+        const entry = await validateArtifactCacheEntryInValidationScope(
+          validation.artifacts,
           cacheLayout.cacheRoot,
           cacheLayout,
           coreWasm.stage,
@@ -2032,7 +2038,8 @@ async function authenticateLegacyV2Package({
         }
       })(),
       (async () => {
-        const entry = await validateArtifactCacheEntry(
+        const entry = await validateArtifactCacheEntryInValidationScope(
+          validation.artifacts,
           cacheLayout.cacheRoot,
           cacheLayout,
           aot.stage,
@@ -2075,7 +2082,7 @@ async function authenticateLegacyV2Package({
   };
 }
 
-async function authenticatePackage(cacheLayout, key, path, packageMaterial, expectedGraphManifest) {
+async function authenticatePackage(cacheLayout, key, path, validation, packageMaterial, expectedGraphManifest) {
   requireSha256(key, "module graph package key");
   // Certificate contracts derive this path from untrusted cache bytes. Validate the complete
   // private package directory before reading its manifest so an already replaced or symlinked
@@ -2097,34 +2104,33 @@ async function authenticatePackage(cacheLayout, key, path, packageMaterial, expe
       key,
       manifest,
       path,
+      validation,
     });
   } else if (
     (manifest.kind === MODULE_GRAPH_MANIFEST_V3_KIND && manifest.schemaVersion === 3) ||
     (manifest.kind === MODULE_GRAPH_MANIFEST_V5_KIND && manifest.schemaVersion === 5)
   ) {
-    verified = await loadAndVerifyConvexWasmModuleGraphPackage({
+    verified = await loadAndVerifyConvexWasmModuleGraphPackageInValidationScope({
       cacheLayout,
       cacheRoot: cacheLayout.cacheRoot,
       ...(packageMaterial === undefined ? {} : { authenticatedPackageMaterial: packageMaterial }),
       ...(expectedGraphManifest === undefined ? {} : { expectedGraphManifest }),
       graphManifestSha256: key,
       packagePath: path,
-    });
+    }, validation.packages, validation.artifacts);
   } else fail("module graph package manifest has an unsupported kind or schema version");
   return {
     key,
     path,
     type: "package",
-    artifactKeys:
-      verified.packageMaterial?.artifactReferences?.flatMap((reference) => [
-        `${reference.aot.artifact.stage}\0${reference.aot.artifact.cacheKey}`,
-        `${reference.coreWasm.artifact.stage}\0${reference.coreWasm.artifact.cacheKey}`,
-      ]) ?? [],
-    graphManifest: verified.graphManifest,
+    artifactKeys: verified.packageMaterial.artifactReferences.flatMap((reference) => [
+      `${reference.aot.artifact.stage}\0${reference.aot.artifact.cacheKey}`,
+      `${reference.coreWasm.artifact.stage}\0${reference.coreWasm.artifact.cacheKey}`,
+    ]),
   };
 }
 
-async function listPackages(cacheLayout) {
+async function listPackages(cacheLayout, validation) {
   const root = cacheLayout.immutable.packages;
   const records = [];
   if (!(await exists(root))) return records;
@@ -2150,7 +2156,7 @@ async function listPackages(cacheLayout) {
     const status = await pathInfo(path);
     if (!status.isDirectory()) fail(`module graph package is not a directory: ${path}`);
     try {
-      const verified = await authenticatePackage(cacheLayout, key, path);
+      const verified = await authenticatePackage(cacheLayout, key, path, validation);
       records.push({ ...(await treeStats(path)), ...verified, authenticated: true });
     } catch (error) {
       if (!(error instanceof Error)) throw error;
@@ -2223,7 +2229,221 @@ function certificatePackageContracts(certificate) {
   return normalized;
 }
 
-async function listCertificates(cacheLayout, packagesByKey, snapshotCertificateSha256s) {
+async function authenticateCertificateRoot(cacheLayout, lookupKey, lookupRoot, validation) {
+  // Validate every lookup root, including an empty legacy root. Otherwise a root containing no
+  // certificate entries could bypass the private owner/mode checks applied to its children.
+  await requirePrivateCacheDirectory(cacheLayout.cacheRoot, lookupRoot);
+  const lookupListing = await readStableCertificateLookupNames(lookupRoot);
+  const lookupNames = lookupListing.names;
+  for (const name of lookupNames) {
+    if (name !== "PREFERRED" && !name.startsWith(".publish-") && !SHA256_PATTERN.test(name)) {
+      fail(`certificate lookup root has an unexpected entry: ${join(lookupRoot, name)}`);
+    }
+  }
+  const names = lookupNames.filter((name) => SHA256_PATTERN.test(name)).sort(compareStrings);
+  if (names.length > MAX_CERTIFICATE_CANDIDATES) {
+    fail(
+      `certificate lookup root has more than ${MAX_CERTIFICATE_CANDIDATES} candidates: ${lookupRoot}`
+    );
+  }
+  // PREFERRED selects ordinary lookup, but exact certificate reads can still open superseded
+  // entries. Authenticate every certificate and preserve its package closure until the entire
+  // lookup root is retired; the pointer cannot make an extant certificate safe to orphan.
+  let preferredSourceAtListing;
+  let preferredFileIdentity;
+  if (lookupNames.includes("PREFERRED")) {
+    const preferredPath = join(lookupRoot, "PREFERRED");
+    await requirePrivateCacheFile(cacheLayout.cacheRoot, preferredPath);
+    preferredFileIdentity = await fs.lstat(preferredPath);
+    preferredSourceAtListing = decodeUtf8(
+      await readPrivateRegularFile(
+        preferredPath,
+        MAX_COMPLETION_MARKER_BYTES,
+        "certificate preferred pointer",
+        preferredFileIdentity
+      ),
+      "certificate preferred pointer"
+    );
+    if (!/^[0-9a-f]{64}\n$/u.test(preferredSourceAtListing)) {
+      fail(`certificate preferred pointer is invalid: ${lookupRoot}`);
+    }
+    const preferred = preferredSourceAtListing.slice(0, -1);
+    if (!names.includes(preferred)) {
+      fail(`certificate preferred pointer does not name a complete certificate: ${lookupRoot}`);
+    }
+  }
+  const certificates = [];
+  const missingPackageKeys = new Set();
+  for (const key of names) {
+    const path = join(lookupRoot, key);
+    // Certificate contents are authority-bearing data. Validate the entry directory before
+    // opening any child so a hash-named symlink cannot redirect reads outside the immutable
+    // cache tree.
+    await requirePrivateCacheDirectory(cacheLayout.cacheRoot, path);
+    const entryListing = await readStableDirectoryNames(path, "certificate entry");
+    const entryNames = entryListing.names;
+    if (canonicalJson(entryNames) !== canonicalJson(["COMPLETE", "certificate.json"])) {
+      fail(`certificate entry has unexpected contents: ${path}`);
+    }
+    const authenticatedFiles = await requirePrivateCacheDirectoryFileIdentities(
+      cacheLayout.cacheRoot,
+      path
+    );
+    if (authenticatedFiles === undefined) {
+      fail(`certificate entry disappeared during authentication: ${path}`);
+    }
+    if (canonicalJson(authenticatedFiles.names) !== canonicalJson(entryNames)) {
+      fail(`certificate entry contents changed while its files were authenticated: ${path}`);
+    }
+    if (
+      decodeUtf8(
+        await readPrivateRegularFile(
+          join(path, "COMPLETE"),
+          MAX_COMPLETION_MARKER_BYTES,
+          "deployment certificate completion marker",
+          authenticatedFiles.fileIdentities.get("COMPLETE")
+        ),
+        "deployment certificate completion marker"
+      ) !== `${key}\n`
+    ) {
+      fail(`certificate completion marker is invalid: ${path}`);
+    }
+    const certificate = await readCanonical(
+      join(path, "certificate.json"),
+      MAX_CERTIFICATE_BYTES,
+      "deployment certificate",
+      undefined,
+      authenticatedFiles.fileIdentities.get("certificate.json")
+    );
+    if (certificate.kind !== CERTIFICATE_KIND || certificate.certificateSha256 !== key)
+      fail(`certificate key is invalid: ${path}`);
+    const { certificateSha256: ignored, ...payload } = certificate;
+    if (
+      fingerprintJson(payload) !== key ||
+      fingerprintJson(certificate.lookupIdentity) !== lookupKey
+    )
+      fail(`certificate authentication failed: ${path}`);
+    const contracts = certificatePackageContracts(certificate);
+    let missingPackageDependency = false;
+    const boundCohorts = certificate.manifest?.moduleGraphBinding?.cohorts;
+    if (
+      !Array.isArray(boundCohorts) ||
+      canonicalJson(
+        boundCohorts.map((cohort) => cohort?.graphManifestSha256).sort(compareStrings)
+      ) !== canonicalJson(contracts.map(({ key }) => key))
+    ) {
+      fail(`certificate package binding is invalid: ${path}`);
+    }
+    for (const contract of contracts) {
+      const packagePath = join(cacheLayout.immutable.packages, contract.key);
+      if (!(await exists(packagePath))) {
+        missingPackageKeys.add(contract.key);
+        missingPackageDependency = true;
+        continue;
+      }
+      const verified = await authenticatePackage(
+        cacheLayout,
+        contract.key,
+        packagePath,
+        validation,
+        contract.packageMaterial,
+        contract.graphManifest
+      );
+      if (verified.key !== contract.key) {
+        fail(`certificate package authentication failed: ${contract.key}`);
+      }
+    }
+    const finalCertificate = await readCanonical(
+      join(path, "certificate.json"),
+      MAX_CERTIFICATE_BYTES,
+      "deployment certificate",
+      undefined,
+      authenticatedFiles.fileIdentities.get("certificate.json")
+    );
+    if (canonicalJson(finalCertificate) !== canonicalJson(certificate)) {
+      fail(`deployment certificate changed while its packages were authenticated: ${path}`);
+    }
+    const finalComplete = decodeUtf8(
+      await readPrivateRegularFile(
+        join(path, "COMPLETE"),
+        MAX_COMPLETION_MARKER_BYTES,
+        "deployment certificate completion marker",
+        authenticatedFiles.fileIdentities.get("COMPLETE")
+      ),
+      "deployment certificate completion marker"
+    );
+    if (finalComplete !== `${key}\n`) {
+      fail(
+        `deployment certificate completion marker changed while its packages were authenticated: ${path}`
+      );
+    }
+    await authenticatedFiles.verify();
+    // Only package keys are needed after authentication. Superseded legacy certificates can
+    // embed large manifests; retaining those payloads would multiply the planner's memory use.
+    certificates.push({
+      authenticated: !missingPackageDependency,
+      key,
+      packageKeys: contracts.map(({ key }) => key),
+      path,
+    });
+    await verifyStableDirectoryNames(path, entryListing, entryNames, "certificate entry");
+  }
+  if (preferredSourceAtListing !== undefined) {
+    const preferredPath = join(lookupRoot, "PREFERRED");
+    await requirePrivateCacheFile(cacheLayout.cacheRoot, preferredPath);
+    const finalPreferredSource = decodeUtf8(
+      await readPrivateRegularFile(
+        preferredPath,
+        MAX_COMPLETION_MARKER_BYTES,
+        "certificate preferred pointer",
+        preferredFileIdentity
+      ),
+      "certificate preferred pointer"
+    );
+    if (finalPreferredSource !== preferredSourceAtListing) {
+      fail(
+        `certificate preferred pointer changed while certificates were authenticated: ${lookupRoot}`
+      );
+    }
+  }
+  await verifyStableDirectoryNames(
+    lookupRoot,
+    lookupListing,
+    lookupListing.names,
+    "certificate lookup root",
+    ".publish-"
+  );
+  const packageKeys = [
+    ...new Set(certificates.flatMap(({ packageKeys }) => packageKeys)),
+  ].sort(compareStrings);
+  if (missingPackageKeys.size !== 0) {
+    // The certificate bytes still authenticate, but an older cleanup removed some package
+    // directories. Keep independently complete siblings available to recent-success retention,
+    // but do not authorize removal of the incomplete lookup root. Invalid present packages fail above.
+    return {
+      ...(await treeStats(lookupRoot)),
+      authenticated: false,
+      certificates,
+      key: lookupKey,
+      missingPackageKeys: [...missingPackageKeys].sort(compareStrings),
+      packageKeys,
+      path: lookupRoot,
+      reason: "missing-package-dependency",
+      type: "certificate-root",
+    };
+  }
+  return {
+    ...(await treeStats(lookupRoot)),
+    path: lookupRoot,
+    key: lookupKey,
+    type: "certificate-root",
+    packageKeys,
+    certificates,
+    authenticated: true,
+  };
+}
+
+async function listCertificates(cacheLayout, validation) {
   const root = join(cacheLayout.immutable.packages, "deployment-results", "v1");
   const records = [];
   if (!(await exists(root))) {
@@ -2248,216 +2468,9 @@ async function listCertificates(cacheLayout, packagesByKey, snapshotCertificateS
     if (!(await pathInfo(lookupRoot)).isDirectory())
       fail(`certificate lookup root is not a directory: ${lookupRoot}`);
     try {
-      // Validate every lookup root, including an empty legacy root. Otherwise a root containing no
-      // certificate entries could bypass the private owner/mode checks applied to its children.
-      await requirePrivateCacheDirectory(cacheLayout.cacheRoot, lookupRoot);
-      const lookupListing = await readStableCertificateLookupNames(lookupRoot);
-      const lookupNames = lookupListing.names;
-      for (const name of lookupNames) {
-        if (name !== "PREFERRED" && !name.startsWith(".publish-") && !SHA256_PATTERN.test(name)) {
-          fail(`certificate lookup root has an unexpected entry: ${join(lookupRoot, name)}`);
-        }
-      }
-      const names = lookupNames.filter((name) => SHA256_PATTERN.test(name)).sort(compareStrings);
-      if (names.length > MAX_CERTIFICATE_CANDIDATES) {
-        fail(
-          `certificate lookup root has more than ${MAX_CERTIFICATE_CANDIDATES} candidates: ${lookupRoot}`
-        );
-      }
-      // Older valid lookup roots contain only immutable certificate directories. Match the
-      // deployment reader's preferred certificate when present, but a recent-success snapshot is
-      // independent retention authority. Schema migration and interrupted pointer publication can
-      // legitimately leave multiple complete certificates in one lookup root, and a successful
-      // legacy hit can record its older SHA after a compact successor becomes preferred.
-      let preferredSourceAtListing;
-      let preferredFileIdentity;
-      if (lookupNames.includes("PREFERRED")) {
-        const preferredPath = join(lookupRoot, "PREFERRED");
-        await requirePrivateCacheFile(cacheLayout.cacheRoot, preferredPath);
-        preferredFileIdentity = await fs.lstat(preferredPath);
-        preferredSourceAtListing = decodeUtf8(
-          await readPrivateRegularFile(
-            preferredPath,
-            MAX_COMPLETION_MARKER_BYTES,
-            "certificate preferred pointer",
-            preferredFileIdentity
-          ),
-          "certificate preferred pointer"
-        );
-        if (!/^[0-9a-f]{64}\n$/u.test(preferredSourceAtListing)) {
-          fail(`certificate preferred pointer is invalid: ${lookupRoot}`);
-        }
-        const preferred = preferredSourceAtListing.slice(0, -1);
-        if (!names.includes(preferred)) {
-          fail(`certificate preferred pointer does not name a complete certificate: ${lookupRoot}`);
-        }
-        const selectedNames = new Set([preferred]);
-        for (const name of names) {
-          if (snapshotCertificateSha256s.has(name)) selectedNames.add(name);
-        }
-        names.splice(0, names.length, ...[...selectedNames].sort(compareStrings));
-      }
-      const certificates = [];
-      const missingPackageKeys = new Set();
-      for (const key of names) {
-        const path = join(lookupRoot, key);
-        // Certificate contents are authority-bearing data. Validate the entry directory before
-        // opening any child so a hash-named symlink cannot redirect reads outside the immutable
-        // cache tree.
-        await requirePrivateCacheDirectory(cacheLayout.cacheRoot, path);
-        const entryListing = await readStableDirectoryNames(path, "certificate entry");
-        const entryNames = entryListing.names;
-        if (canonicalJson(entryNames) !== canonicalJson(["COMPLETE", "certificate.json"])) {
-          fail(`certificate entry has unexpected contents: ${path}`);
-        }
-        const authenticatedFiles = await requirePrivateCacheDirectoryFileIdentities(
-          cacheLayout.cacheRoot,
-          path
-        );
-        if (authenticatedFiles === undefined) {
-          fail(`certificate entry disappeared during authentication: ${path}`);
-        }
-        if (canonicalJson(authenticatedFiles.names) !== canonicalJson(entryNames)) {
-          fail(`certificate entry contents changed while its files were authenticated: ${path}`);
-        }
-        if (
-          decodeUtf8(
-            await readPrivateRegularFile(
-              join(path, "COMPLETE"),
-              MAX_COMPLETION_MARKER_BYTES,
-              "deployment certificate completion marker",
-              authenticatedFiles.fileIdentities.get("COMPLETE")
-            ),
-            "deployment certificate completion marker"
-          ) !== `${key}\n`
-        ) {
-          fail(`certificate completion marker is invalid: ${path}`);
-        }
-        const certificate = await readCanonical(
-          join(path, "certificate.json"),
-          MAX_CERTIFICATE_BYTES,
-          "deployment certificate",
-          undefined,
-          authenticatedFiles.fileIdentities.get("certificate.json")
-        );
-        if (certificate.kind !== CERTIFICATE_KIND || certificate.certificateSha256 !== key)
-          fail(`certificate key is invalid: ${path}`);
-        const { certificateSha256: ignored, ...payload } = certificate;
-        if (
-          fingerprintJson(payload) !== key ||
-          fingerprintJson(certificate.lookupIdentity) !== lookupKey
-        )
-          fail(`certificate authentication failed: ${path}`);
-        const contracts = certificatePackageContracts(certificate);
-        const boundCohorts = certificate.manifest?.moduleGraphBinding?.cohorts;
-        if (
-          !Array.isArray(boundCohorts) ||
-          canonicalJson(
-            boundCohorts.map((cohort) => cohort?.graphManifestSha256).sort(compareStrings)
-          ) !== canonicalJson(contracts.map(({ key }) => key))
-        ) {
-          fail(`certificate package binding is invalid: ${path}`);
-        }
-        for (const contract of contracts) {
-          const packagePath = join(cacheLayout.immutable.packages, contract.key);
-          if (!(await exists(packagePath))) {
-            missingPackageKeys.add(contract.key);
-            continue;
-          }
-          const verified = await authenticatePackage(
-            cacheLayout,
-            contract.key,
-            packagePath,
-            contract.packageMaterial,
-            contract.graphManifest
-          );
-          if (!packagesByKey.has(contract.key) || verified.key !== contract.key) {
-            fail(`certificate package authentication failed: ${contract.key}`);
-          }
-        }
-        const finalCertificate = await readCanonical(
-          join(path, "certificate.json"),
-          MAX_CERTIFICATE_BYTES,
-          "deployment certificate",
-          undefined,
-          authenticatedFiles.fileIdentities.get("certificate.json")
-        );
-        if (canonicalJson(finalCertificate) !== canonicalJson(certificate)) {
-          fail(`deployment certificate changed while its packages were authenticated: ${path}`);
-        }
-        const finalComplete = decodeUtf8(
-          await readPrivateRegularFile(
-            join(path, "COMPLETE"),
-            MAX_COMPLETION_MARKER_BYTES,
-            "deployment certificate completion marker",
-            authenticatedFiles.fileIdentities.get("COMPLETE")
-          ),
-          "deployment certificate completion marker"
-        );
-        if (finalComplete !== `${key}\n`) {
-          fail(
-            `deployment certificate completion marker changed while its packages were authenticated: ${path}`
-          );
-        }
-        await authenticatedFiles.verify();
-        certificates.push({ certificate, contracts, key, path });
-        await verifyStableDirectoryNames(path, entryListing, entryNames, "certificate entry");
-      }
-      if (preferredSourceAtListing !== undefined) {
-        const preferredPath = join(lookupRoot, "PREFERRED");
-        await requirePrivateCacheFile(cacheLayout.cacheRoot, preferredPath);
-        const finalPreferredSource = decodeUtf8(
-          await readPrivateRegularFile(
-            preferredPath,
-            MAX_COMPLETION_MARKER_BYTES,
-            "certificate preferred pointer",
-            preferredFileIdentity
-          ),
-          "certificate preferred pointer"
-        );
-        if (finalPreferredSource !== preferredSourceAtListing) {
-          fail(
-            `certificate preferred pointer changed while certificates were authenticated: ${lookupRoot}`
-          );
-        }
-      }
-      await verifyStableDirectoryNames(
-        lookupRoot,
-        lookupListing,
-        lookupListing.names,
-        "certificate lookup root",
-        ".publish-"
+      records.push(
+        await authenticateCertificateRoot(cacheLayout, lookupKey, lookupRoot, validation)
       );
-      const packageKeys = [
-        ...new Set(certificates.flatMap(({ contracts }) => contracts.map(({ key }) => key))),
-      ].sort(compareStrings);
-      if (missingPackageKeys.size !== 0) {
-        // The certificate bytes still authenticate, but an older cleanup removed some package
-        // directories. Such a root cannot retain a complete deployment and must not make newer
-        // cache entries undeletable. Existing but invalid package directories still fail above.
-        records.push({
-          ...(await treeStats(lookupRoot)),
-          authenticated: false,
-          key: lookupKey,
-          missingPackageKeys: [...missingPackageKeys].sort(compareStrings),
-          path: lookupRoot,
-          reason: "missing-package-dependency",
-          type: "certificate-root",
-        });
-        continue;
-      }
-      for (const key of packageKeys) {
-        if (!packagesByKey.has(key)) fail(`certificate references an unavailable package: ${key}`);
-      }
-      records.push({
-        ...(await treeStats(lookupRoot)),
-        path: lookupRoot,
-        key: lookupKey,
-        type: "certificate-root",
-        packageKeys,
-        certificates,
-        authenticated: true,
-      });
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       let stats = {};
@@ -2615,7 +2628,7 @@ async function exists(path) {
 async function immutableCacheAllocatedBytes(cacheLayout) {
   if (!(await exists(cacheLayout.immutable.root))) return 0;
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, cacheLayout.immutable.root);
-  return (await treeStats(cacheLayout.immutable.root)).allocatedBytes;
+  return (await treeStats(cacheLayout.immutable.root, false)).allocatedBytes;
 }
 
 function immutableSweepTrashRoot(cacheLayout) {
@@ -2667,12 +2680,21 @@ async function syncDirectory(path) {
 }
 
 async function writePrivateDurableFile(cacheRoot, path, contents) {
-  const handle = await fs.open(path, "wx", 0o600);
+  const temporaryPath = join(dirname(path), `.publish-${randomBytes(16).toString("hex")}-${basename(path)}`);
+  const handle = await fs.open(temporaryPath, "wx", 0o600);
   try {
-    await handle.writeFile(contents);
-    await handle.sync();
+    try {
+      await handle.writeFile(contents);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await requirePrivateCacheFile(cacheRoot, temporaryPath);
+    // Install fully synced bytes exclusively. A partial write or process crash must leave only
+    // publication scratch, never a malformed marker that permanently prevents recovery.
+    await fs.link(temporaryPath, path);
   } finally {
-    await handle.close();
+    await fs.rm(temporaryPath, { force: true });
   }
   await requirePrivateCacheFile(cacheRoot, path);
   await syncDirectory(dirname(path));
@@ -2693,9 +2715,18 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
     const verifiedMarkerNames = new Set(
       names.filter((name) => /^[0-9a-f]{64}\.verified\.json$/u.test(name))
     );
-    if (candidateRoots.size + markerNames.length + verifiedMarkerNames.size !== names.length) {
+    const publicationNames = names.filter((name) =>
+      /^\.publish-[0-9a-f]{32}-[0-9a-f]{64}(?:\.verified)?\.json$/u.test(name)
+    );
+    if (candidateRoots.size + markerNames.length + verifiedMarkerNames.size + publicationNames.length !== names.length) {
       fail(`immutable sweep quarantine has an unexpected entry: ${planRoot}`);
     }
+    for (const name of publicationNames) {
+      await requirePrivateCacheFile(cacheLayout.cacheRoot, join(planRoot, name));
+    }
+    // Verify every complete tree before unlinking any payload. Different candidates can share
+    // hardlinks, so removing one changes the inode state used to authenticate another.
+    const pendingRemovals = [];
     for (const markerName of markerNames) {
       const candidateSha256 = markerName.slice(0, -5);
       const markerPath = join(planRoot, markerName);
@@ -2737,7 +2768,7 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
       ) {
         fail(`immutable sweep quarantine record is invalid: ${markerPath}`);
       }
-      const canonicalPath = evictionArtifactPath(cacheLayout, record.candidate);
+      const canonicalPath = evictionCandidatePath(cacheLayout, record.candidate);
       const candidateRoot = join(planRoot, candidateSha256);
       const verifiedMarkerName = `${candidateSha256}.verified.json`;
       const verifiedMarkerPath = join(planRoot, verifiedMarkerName);
@@ -2764,8 +2795,9 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
         }
       }
       let status;
+      let candidatePresent = false;
       if (candidateRoots.has(candidateSha256)) {
-        let candidatePresent = true;
+        candidatePresent = true;
         try {
           await requirePrivateCacheDirectory(cacheLayout.cacheRoot, candidateRoot);
         } catch (error) {
@@ -2778,27 +2810,22 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
         // The canonical cache key was removed by an atomic rename before this tree entered the
         // quarantine. A partial prior removal is safe to finish, but symlinks still fail closed.
         if (candidatePresent && !removalAuthorized) {
-          try {
-            const recoveredStats = await treeStats(candidateRoot);
-            // A marker can be observed after a rename but before (or during) removal. If the
-            // quarantined tree is still complete, require the exact plan-time state before
-            // deleting it; otherwise a concurrent replacement could be mistaken for the planned
-            // candidate and irreversibly removed. Missing children are tolerated below only for
-            // the crash-after-recursive-removal case covered by the durable marker.
-            if (
-              recoveredStats.allocatedBytes !== record.candidate.allocationBytes ||
-              recoveredStats.estimatedReclaimBytes !== record.candidate.estimatedReclaimBytes ||
-              !matchesQuarantineCandidateTree(recoveredStats, record.candidate) ||
-              recoveredStats.mtimeMs !== record.candidate.mtimeMs
-            ) {
-              fail(`quarantined immutable candidate changed before recovery: ${candidateRoot}`);
-            }
-          } catch (error) {
-            // A process can be interrupted after recursive removal deletes one child. Missing
-            // children are therefore expected during recovery; any other authentication failure
-            // (including a symlink) remains fatal.
-            if (!missing(error)) throw error;
+          const recoveredStats = await treeStats(candidateRoot);
+          // No recursive removal can begin without the verified marker. An unverified tree must
+          // still match the complete planned state; missing children cannot authorize deletion.
+          if (
+            recoveredStats.allocatedBytes !== record.candidate.allocationBytes ||
+            recoveredStats.estimatedReclaimBytes !== record.candidate.estimatedReclaimBytes ||
+            !matchesQuarantineCandidateTree(recoveredStats, record.candidate) ||
+            recoveredStats.mtimeMs !== record.candidate.mtimeMs
+          ) {
+            fail(`quarantined immutable candidate changed before recovery: ${candidateRoot}`);
           }
+          // The prior process may have stopped between rename and its source-directory sync.
+          // Persist that side before authorizing removal; publishing the verified marker below
+          // syncs the destination directory and completes the other side of the rename.
+          await requirePrivateCacheDirectory(cacheLayout.cacheRoot, dirname(canonicalPath));
+          await syncDirectory(dirname(canonicalPath));
           // The complete post-rename state has now been authenticated. Persist a separate
           // removal-authorized marker before recursive deletion so a crash during removal can
           // safely finish a partial tree without treating it as a replacement.
@@ -2808,11 +2835,6 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
             `${canonicalJson({ ...record, state: "verified" })}\n`
           );
         }
-        if (candidatePresent) {
-          await fs.rm(candidateRoot, { force: true, maxRetries: 0, recursive: true });
-          // Keep the durable marker until removal of the quarantined tree is itself durable.
-          await syncDirectory(planRoot);
-        }
         candidateRoots.delete(candidateSha256);
         status = "removed-quarantined-root";
       } else {
@@ -2820,13 +2842,7 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
           ? "cleared-pre-rename-marker"
           : "cleared-completed-marker";
       }
-      if (await exists(verifiedMarkerPath)) {
-        await fs.unlink(verifiedMarkerPath);
-        await syncDirectory(planRoot);
-      }
-      await fs.unlink(markerPath);
-      await syncDirectory(planRoot);
-      recovered.push({ candidateSha256, planSha256, status });
+      pendingRemovals.push({ candidatePresent, candidateRoot, candidateSha256, markerPath, status, verifiedMarkerPath });
     }
     if (candidateRoots.size !== 0) {
       fail(`immutable sweep quarantine contains a root without authority: ${planRoot}`);
@@ -2837,6 +2853,23 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
         fail(`immutable sweep verified quarantine marker has no base record: ${planRoot}`);
       }
     }
+    for (const { candidatePresent, candidateRoot, candidateSha256, markerPath, status, verifiedMarkerPath } of pendingRemovals) {
+      if (candidatePresent) {
+        await fs.rm(candidateRoot, { force: true, maxRetries: 0, recursive: true });
+        // Keep the durable marker until removal of the quarantined tree is itself durable.
+        await syncDirectory(planRoot);
+      }
+      if (await exists(verifiedMarkerPath)) {
+        await fs.unlink(verifiedMarkerPath);
+        await syncDirectory(planRoot);
+      }
+      await fs.unlink(markerPath);
+      await syncDirectory(planRoot);
+      recovered.push({ candidateSha256, planSha256, status });
+    }
+    // These incomplete or already published marker writes have no independent removal authority.
+    // Leave them untouched until every complete marker/tree above has passed recovery admission.
+    for (const name of publicationNames) await fs.unlink(join(planRoot, name));
     await fs.rmdir(planRoot);
     await syncDirectory(root);
   }
@@ -2845,21 +2878,31 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
   return recovered;
 }
 
-function evictionArtifactPath(cacheLayout, candidate) {
+function evictionCandidatePath(cacheLayout, candidate) {
   if (
     typeof candidate !== "object" ||
     candidate === null ||
     Array.isArray(candidate) ||
-    (candidate.type !== "artifact" && candidate.type !== "c-bundle") ||
-    typeof candidate.stage !== "string" ||
-    candidate.stage.length === 0 ||
-    candidate.stage.includes("/") ||
-    candidate.stage.includes("\\") ||
     requireSha256(candidate.key, "immutable eviction key") !== candidate.key
   ) {
     fail("immutable eviction candidate is invalid");
   }
-  const path = join(cacheLayout.immutable.artifacts, candidate.stage, candidate.key);
+  let path;
+  if (candidate.type === "artifact" || candidate.type === "c-bundle") {
+    if (
+      typeof candidate.stage !== "string" ||
+      candidate.stage.length === 0 ||
+      candidate.stage === "." ||
+      candidate.stage === ".." ||
+      candidate.stage.includes("/") ||
+      candidate.stage.includes("\\")
+    ) fail("immutable eviction candidate stage is invalid");
+    path = join(cacheLayout.immutable.artifacts, candidate.stage, candidate.key);
+  } else if (candidate.type === "package" && candidate.stage === null) {
+    path = join(cacheLayout.immutable.packages, candidate.key);
+  } else if (candidate.type === "certificate-root" && candidate.stage === null) {
+    path = join(cacheLayout.immutable.packages, "deployment-results", "v1", candidate.key);
+  } else fail("immutable eviction candidate type or stage is invalid");
   if (candidate.path !== path) fail("immutable eviction candidate path is invalid");
   if (
     !Number.isSafeInteger(candidate.allocationBytes) ||
@@ -2881,8 +2924,8 @@ function evictionArtifactPath(cacheLayout, candidate) {
   return path;
 }
 
-async function reauthenticateEvictionCandidate(cacheLayout, candidate) {
-  const path = evictionArtifactPath(cacheLayout, candidate);
+async function reauthenticateEvictionCandidate(cacheLayout, candidate, validation) {
+  const path = evictionCandidatePath(cacheLayout, candidate);
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, path);
   const status = await pathInfo(path);
   if (!status.isDirectory()) fail(`immutable eviction candidate is not a directory: ${path}`);
@@ -2899,14 +2942,20 @@ async function reauthenticateEvictionCandidate(cacheLayout, candidate) {
       metadata,
       path,
       stage: candidate.stage,
+      validation,
     });
-  } else {
+  } else if (candidate.type === "c-bundle") {
     authenticated = await authenticateCBundle({
       cacheLayout,
       key: candidate.key,
       path,
       stage: candidate.stage,
     });
+  } else if (candidate.type === "package") {
+    authenticated = await authenticatePackage(cacheLayout, candidate.key, path, validation);
+  } else {
+    authenticated = await authenticateCertificateRoot(cacheLayout, candidate.key, path, validation);
+    if (!authenticated.authenticated) fail(`immutable eviction certificate is invalid: ${path}`);
   }
   const stats = await treeStats(path);
   if (
@@ -2940,10 +2989,14 @@ export async function planConvexWasmImmutableGc({
   requireLimit(maxRetainedPackages, "maximum retained packages");
   requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
   requireLimit(recentRetentionMilliseconds, "recent retention period", false);
+  // Packages, certificates and the artifact inventory repeatedly reach the same immutable
+  // entries. Reuse the existing physical-state-fenced validators within this one locked plan,
+  // instead of hashing and parsing their complete closures again for each referring root.
+  const validation = { packages: new Map(), artifacts: new Map() };
   const [allSnapshots, packages, artifacts, immutableAllocatedBytes] = await settleConcurrentWork([
     listSnapshots(cacheLayout),
-    listPackages(cacheLayout),
-    listArtifactEntries(cacheLayout),
+    listPackages(cacheLayout, validation),
+    listArtifactEntries(cacheLayout, validation),
     immutableCacheAllocatedBytes(cacheLayout),
   ]);
   const packagesByKey = new Map(
@@ -2963,14 +3016,7 @@ export async function planConvexWasmImmutableGc({
     if (missingKeys.length === 0) snapshots.push(snapshot);
     else staleSnapshots.push({ name: snapshot.name, missingPackageKeys: missingKeys });
   }
-  const snapshotCertificateSha256s = new Set(
-    snapshots.flatMap(({ snapshot }) => snapshot.certificateSha256s)
-  );
-  const certificates = await listCertificates(
-    cacheLayout,
-    packagesByKey,
-    snapshotCertificateSha256s
-  );
+  const certificates = await listCertificates(cacheLayout, validation);
   const artifactsByKey = new Map(
     artifacts
       .filter((record) => record.authenticated)
@@ -2981,8 +3027,9 @@ export async function planConvexWasmImmutableGc({
   );
   const certificatesBySha256 = new Map();
   for (const root of certificates) {
-    if (!root.authenticated) continue;
+    if (root.certificates === undefined) continue;
     for (const certificate of root.certificates) {
+      if (!certificate.authenticated) continue;
       if (certificatesBySha256.has(certificate.key)) {
         fail(`deployment certificate key is duplicated: ${certificate.key}`);
       }
@@ -3013,7 +3060,7 @@ export async function planConvexWasmImmutableGc({
     if (certificate === undefined) fail(`retained deployment certificate is unavailable: ${key}`);
     retainedCertificateSha256s.add(key);
     retainedPaths.add(certificate.root.path);
-    for (const contract of certificate.certificate.contracts) retainPackage(contract.key);
+    for (const packageKey of certificate.certificate.packageKeys) retainPackage(packageKey);
   };
   const retainCompilerOutput = (key) => {
     const compilerOutputKey = `${MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE}\0${key}`;
@@ -3095,9 +3142,19 @@ export async function planConvexWasmImmutableGc({
     authenticateCapsuleTopologyCertificate(certificate, record, recordAuthority);
     retainCompilerOutput(reference.cacheKey);
   }
-  // Artifact-only sweeping must not leave a published immutable root pointing at a missing
-  // dependency. Package and certificate removal is still planning-only, so every package that is
-  // physically present pins its artifact closure even when it is not a retained recent root.
+  // A lookup root is removed as a whole, including PREFERRED and superseded certificates. Pin
+  // every package its reader can select for this pass, even if the root itself is removable.
+  // Budget limits and interrupted removal then cannot leave an extant certificate without its
+  // package. Unknown corrupt roots cannot authorize deletion of any potentially referenced package.
+  for (const certificateRoot of certificates) {
+    const keys = certificateRoot.packageKeys ?? packagesByKey.keys();
+    for (const key of keys) {
+      const packageRecord = packagesByKey.get(key);
+      if (packageRecord !== undefined) retainedPaths.add(packageRecord.path);
+    }
+  }
+  // Preserve each physical package's artifact closure for this pass. Retiring the package makes
+  // that closure eligible on a later pass, after no surviving authority can still open it.
   for (const packageRecord of packages) {
     if (!packageRecord.authenticated) continue;
     for (const artifactKey of packageRecord.artifactKeys) retainArtifact(artifactKey);
@@ -3191,11 +3248,11 @@ export async function planConvexWasmImmutableGc({
     }
   }
   for (const record of certificates) {
-    if (record.authenticated && record.mtimeMs >= recentCutoffMs) {
+    if (record.certificates !== undefined && record.mtimeMs >= recentCutoffMs) {
       retainedPaths.add(record.path);
-      for (const certificate of record.certificates)
-        retainedCertificateSha256s.add(certificate.key);
-      for (const key of record.packageKeys) retainPackage(key);
+      for (const certificate of record.certificates) {
+        if (certificate.authenticated) retainCertificate(certificate.key);
+      }
     }
   }
   for (const record of packages) {
@@ -3245,17 +3302,14 @@ export async function planConvexWasmImmutableGc({
       type: record.type,
     });
   }
-  // Large expired objects reclaim useful space within the bounded per-run eviction count.
+  // Retire roots before spending the bounded eviction count on independent artifacts. Their
+  // dependencies stay pinned for this pass; later passes can reclaim the newly unreachable data.
+  const removalPriority = { "certificate-root": 0, package: 1, artifact: 2, "c-bundle": 2 };
   candidates.sort(
     (left, right) =>
+      removalPriority[left.type] - removalPriority[right.type] ||
       right.estimatedReclaimBytes - left.estimatedReclaimBytes ||
       compareStrings(left.path, right.path)
-  );
-  const sweepableCandidates = candidates.filter(
-    ({ type }) => type === "artifact" || type === "c-bundle"
-  );
-  const planningOnlyCandidates = candidates.filter(
-    ({ type }) => type !== "artifact" && type !== "c-bundle"
   );
   const evictions = [];
   let estimatedReclaimBytes = 0;
@@ -3265,7 +3319,7 @@ export async function planConvexWasmImmutableGc({
     : 0;
   let incomplete = diskPressure && reclaimToHighWatermarkBytes > maxEstimatedReclaimBytes;
   if (diskPressure) {
-    for (const candidate of sweepableCandidates) {
+    for (const candidate of candidates) {
       if (evictions.length >= maxPlannedEvictions) break;
       // A large entry may not fit in the remaining per-pass budget, while
       // smaller entries later in this list still do.
@@ -3331,18 +3385,15 @@ export async function planConvexWasmImmutableGc({
         count: candidates.length,
       },
       planningOnlyCandidates: {
-        allocatedBytes: planningOnlyCandidates.reduce(
-          (total, candidate) => total + candidate.allocationBytes,
-          0
-        ),
-        count: planningOnlyCandidates.length,
+        allocatedBytes: 0,
+        count: 0,
       },
       sweepableCandidates: {
-        allocatedBytes: sweepableCandidates.reduce(
+        allocatedBytes: candidates.reduce(
           (total, candidate) => total + candidate.allocationBytes,
           0
         ),
-        count: sweepableCandidates.length,
+        count: candidates.length,
       },
     },
     createdAtMs: nowMs,
@@ -3408,11 +3459,14 @@ export async function sweepConvexWasmImmutableGc({
       await createPrivateDirectory(cacheLayout.cacheRoot, directory);
     }
   }
+  // Deletion starts a fresh scope, independent of planning. Selected roots still reopen and
+  // check their current physical state; unchanged shared dependencies need not be rehashed for
+  // every root. Quarantine and verify the whole bounded batch before unlinking any file:
+  // deleting a shared payload link changes nlink/ctime in otherwise unchanged later candidates.
+  const validation = { packages: new Map(), artifacts: new Map() };
+  const quarantined = [];
   for (const candidate of plan.evictions) {
-    // Package and certificate roots remain planning-only until their separate authority lifecycle
-    // is reviewed. Artifacts account for the dominant cache footprint and have one-entry paths.
-    if (candidate.type !== "artifact" && candidate.type !== "c-bundle") continue;
-    const { path, stats } = await reauthenticateEvictionCandidate(cacheLayout, candidate);
+    const { path, stats } = await reauthenticateEvictionCandidate(cacheLayout, candidate, validation);
     const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
     const markerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.json`);
     const verifiedMarkerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.verified.json`);
@@ -3446,12 +3500,17 @@ export async function sweepConvexWasmImmutableGc({
       verifiedMarkerPath,
       `${canonicalJson({ ...quarantineRecord, state: "verified" })}\n`
     );
+    quarantined.push({ candidate, markerPath, verifiedMarkerPath, trashPath });
+  }
+  for (const { candidate, markerPath, verifiedMarkerPath, trashPath } of quarantined) {
     await fs.rm(trashPath, { maxRetries: 0, recursive: true });
     // Do not clear the authority record until deletion of the quarantined tree is durable.
     await syncDirectory(trashRoot);
-    await fs.unlink(markerPath);
-    await syncDirectory(trashRoot);
+    // Clear the verified marker first: recovery always needs the base record, even after the
+    // tree is gone. A crash between these unlinks must leave a recoverable completed marker.
     await fs.unlink(verifiedMarkerPath);
+    await syncDirectory(trashRoot);
+    await fs.unlink(markerPath);
     await syncDirectory(trashRoot);
     removed.push(candidate);
   }

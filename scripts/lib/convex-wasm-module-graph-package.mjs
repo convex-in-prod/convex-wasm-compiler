@@ -4401,16 +4401,29 @@ async function loadAndVerifyConvexWasmModuleGraphPackageUncached(
   ) {
     fail(`module graph package changed while its artifacts were verified: ${expectedPath}`);
   }
+  const packageMaterial = moduleGraphPackageMaterial({
+    ...first,
+    artifactReferences: artifactReferences.sort((left, right) =>
+      compareStrings(left.role, right.role)
+    ),
+  });
+  if (expectedMaterial !== undefined) {
+    // Legacy receipts lack artifact references and therefore need full graph verification, but
+    // their file digests still bind the package selected by the certificate.
+    for (const field of ["complete", "graphManifest", "packageEntry", "provenance"]) {
+      if (
+        packageMaterial[field].sha256 !== expectedMaterial[field].sha256 ||
+        packageMaterial[field].size !== expectedMaterial[field].size
+      ) {
+        fail(`module graph package material changed: ${expectedPath} (${field})`);
+      }
+    }
+  }
   return authenticateModuleGraphPackageVerification({
     graphManifest: manifest,
     package: { cacheKey: expectedKey, path: expectedPath },
     packageEntry,
-    packageMaterial: moduleGraphPackageMaterial({
-      ...first,
-      artifactReferences: artifactReferences.sort((left, right) =>
-        compareStrings(left.role, right.role)
-      ),
-    }),
+    packageMaterial,
     provenance,
   });
 }

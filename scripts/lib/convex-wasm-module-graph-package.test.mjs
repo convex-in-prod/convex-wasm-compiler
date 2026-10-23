@@ -15,6 +15,7 @@ import {
 import {
   createConvexWasmModuleGraphPackageValidationScope,
   loadAndVerifyConvexWasmModuleGraphPackage,
+  loadAndVerifyConvexWasmModuleGraphPackageInValidationScope,
   normalizeModuleGraphToolchain,
 } from "./convex-wasm-module-graph-package.mjs";
 import {
@@ -145,6 +146,33 @@ test("authenticates a complete synthetic module-graph package from an isolated c
     }),
     /digest|size|changed/u
   );
+});
+
+test("package verification binds legacy material receipts in fresh and shared scopes", async (context) => {
+  const { cacheLayout, cacheRoot, graph, packagePath } = await materializeFixture(context);
+  const options = { cacheLayout, cacheRoot, graphManifestSha256: graph.graphManifestSha256, packagePath };
+  const verified = await loadAndVerifyConvexWasmModuleGraphPackage(options);
+  const { artifactReferences: _references, ...material } = verified.packageMaterial;
+  const legacyMaterial = { ...material, schemaVersion: 1 };
+  const packageScope = new Map();
+  const artifactScope = new Map();
+  for (const load of [
+    loadAndVerifyConvexWasmModuleGraphPackage,
+    (options) => loadAndVerifyConvexWasmModuleGraphPackageInValidationScope(options, packageScope, artifactScope),
+  ]) {
+    const boundOptions = {
+      ...options, authenticatedPackageMaterial: legacyMaterial, expectedGraphManifest: verified.graphManifest,
+    };
+    await load(boundOptions);
+    for (const field of ["graphManifest", "packageEntry", "provenance"]) {
+      await assert.rejects(load({
+        ...boundOptions,
+        authenticatedPackageMaterial: {
+          ...legacyMaterial, [field]: { ...legacyMaterial[field], sha256: "f".repeat(64) },
+        },
+      }), /material changed/u);
+    }
+  }
 });
 
 test("module-graph artifacts reuse material while separating compiler packages", async (context) => {

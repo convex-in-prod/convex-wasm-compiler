@@ -80,6 +80,15 @@ function requireAuthenticatedFileIdentity(identity, description) {
   return identity;
 }
 
+async function settleMaterialStateReads(reads) {
+  // Callers may release their cache lock on rejection. Both sides of a physical-state fence
+  // must finish first, including when one stat fails before its sibling completes.
+  const results = await Promise.allSettled(reads);
+  const failure = results.find(({ status }) => status === "rejected");
+  if (failure !== undefined) throw failure.reason;
+  return results.map(({ value }) => value);
+}
+
 async function requirePrivateDirectory(path, description) {
   let status;
   try {
@@ -124,6 +133,10 @@ async function readPrivateRegularFile(path, maximumBytes, description, authentic
     ) {
       fail(`${description} changed before it could be read: ${path}`);
     }
+    // The path stat preceded open. Bound the opened extent too before allocating or reading it.
+    if (before.size > maximumBytes) {
+      throw new ConvexWasmArtifactByteLimitError(`${description} has`, before.size, maximumBytes);
+    }
     // Read only the authenticated pre-read extent. An EOF-driven read could consume unbounded
     // appended data before the post-read state check rejects the changed external file.
     const contents = Buffer.allocUnsafe(before.size);
@@ -138,7 +151,7 @@ async function readPrivateRegularFile(path, maximumBytes, description, authentic
       }
       size += bytesRead;
     }
-    const [after, afterPath] = await Promise.all([handle.stat(), fs.lstat(path)]);
+    const [after, afterPath] = await settleMaterialStateReads([handle.stat(), fs.lstat(path)]);
     if (
       size !== before.size ||
       !sameFileContentState(before, after) ||
@@ -221,7 +234,7 @@ async function readAndHashMaterialFile(label, inputPath, maximumBytes, descripti
     description,
     targetStatus
   );
-  const [afterLinkStatus, afterTargetPath] = await Promise.all([fs.lstat(path), fs.realpath(path)]);
+  const [afterLinkStatus, afterTargetPath] = await settleMaterialStateReads([fs.lstat(path), fs.realpath(path)]);
   if (
     !afterLinkStatus.isSymbolicLink() ||
     !sameFileContentState(status, afterLinkStatus) ||
@@ -261,6 +274,10 @@ async function hashPrivateRegularFile(path, maximumBytes, description, authentic
     ) {
       fail(`${description} changed before it could be read: ${path}`);
     }
+    // A file can grow between the path stat and open; the hash must obey the same byte bound.
+    if (before.size > maximumBytes) {
+      throw new ConvexWasmArtifactByteLimitError(`${description} has`, before.size, maximumBytes);
+    }
     const hash = createHash("sha256");
     const buffer = Buffer.allocUnsafe(
       Math.max(1, Math.min(immutableCacheHashBufferBytes, before.size))
@@ -279,7 +296,7 @@ async function hashPrivateRegularFile(path, maximumBytes, description, authentic
       hash.update(buffer.subarray(0, bytesRead));
       size += bytesRead;
     }
-    const [after, afterPath] = await Promise.all([handle.stat(), fs.lstat(path)]);
+    const [after, afterPath] = await settleMaterialStateReads([handle.stat(), fs.lstat(path)]);
     if (
       size !== before.size ||
       !sameFileContentState(before, after) ||

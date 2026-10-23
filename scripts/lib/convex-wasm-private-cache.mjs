@@ -2,6 +2,7 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 const PRIVATE_CACHE_FILE_IDENTITY_CONCURRENCY = 4;
+const pendingPrivateDirectoryChecks = new Map();
 
 function fail(message) {
   throw new Error(`Convex Wasm private cache: ${message}`);
@@ -103,7 +104,24 @@ function requireEntry(status, path, type, mode, uid) {
   }
 }
 
-async function requireStablePrivateEntry(path, type, mode, uid) {
+function requireStablePrivateEntry(path, type, mode, uid) {
+  if (type !== "directory") return checkStablePrivateEntry(path, type, mode, uid);
+  const key = `${uid}\0${mode}\0${path}`;
+  let pending = pendingPrivateDirectoryChecks.get(key);
+  if (pending === undefined) {
+    // Parallel artifact readers walk the same ancestors. Share only an in-flight directory
+    // check, never a completed result: subsequent before/after fences must reopen the path.
+    pending = Promise.resolve().then(() => checkStablePrivateEntry(path, type, mode, uid));
+    pendingPrivateDirectoryChecks.set(key, pending);
+    const clear = () => {
+      if (pendingPrivateDirectoryChecks.get(key) === pending) pendingPrivateDirectoryChecks.delete(key);
+    };
+    void pending.then(clear, clear);
+  }
+  return pending;
+}
+
+async function checkStablePrivateEntry(path, type, mode, uid) {
   const beforePath = await fs.lstat(path);
   requireEntry(beforePath, path, type, mode, uid);
   if (fsConstants.O_NOFOLLOW === undefined || fsConstants.O_DIRECTORY === undefined) {
@@ -215,7 +233,9 @@ export async function requirePrivateCacheDirectoryFileIdentities(cacheRoot, dire
   });
   const fileIdentities = new Map(identityPairs);
   const verify = async () => {
-    const [currentDirectory] = await Promise.all([
+    // A failed directory read must not let a caller release the cache lock while admitted
+    // member checks are still reading that tree.
+    const checks = await Promise.allSettled([
       fs.lstat(directory),
       mapPrivateCacheFiles(names, async (name) => {
         const path = join(directory, name);
@@ -226,6 +246,9 @@ export async function requirePrivateCacheDirectoryFileIdentities(cacheRoot, dire
         }
       }),
     ]);
+    const failure = checks.find(({ status }) => status === "rejected");
+    if (failure !== undefined) throw failure.reason;
+    const currentDirectory = checks[0].value;
     requireEntry(currentDirectory, directory, "directory", 0o700, uid);
     if (!samePrivateDirectory(authenticatedDirectory, currentDirectory)) {
       fail(`${directory} changed during file authentication`);

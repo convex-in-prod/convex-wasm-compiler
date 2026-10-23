@@ -116,6 +116,14 @@ async function ageGenericArtifact(cacheLayout, { key, stage }) {
   await fs.utimes(root, new Date(0), new Date(0));
 }
 
+async function ageTree(path) {
+  const status = await fs.lstat(path);
+  if (status.isDirectory()) {
+    for (const name of await fs.readdir(path)) await ageTree(join(path, name));
+  }
+  await fs.utimes(path, new Date(0), new Date(0));
+}
+
 function packageFileMaterial(value) {
   const bytes = Buffer.from(`${canonicalJson(value)}\n`);
   return {
@@ -726,8 +734,8 @@ async function writeLegacyDeploymentResultCertificate({
   packageMaterial,
   schemaVersion = 3,
 }) {
-  assert.ok(schemaVersion === 1 || schemaVersion === 3 || schemaVersion === 4);
-  if (schemaVersion === 1) assert.notEqual(graphManifest, undefined);
+  assert.ok([1, 2, 3, 4].includes(schemaVersion));
+  if (schemaVersion <= 2) assert.notEqual(graphManifest, undefined);
   const lookupIdentity = { fixture: "cache-retention-legacy-certificate" };
   const payload = {
     kind: "convex-wasm-deployment-result-certificate-v2",
@@ -735,7 +743,13 @@ async function writeLegacyDeploymentResultCertificate({
     manifest,
     ...(schemaVersion === 3 || schemaVersion === 4
       ? { packageReferences: [{ graphManifestSha256, packageMaterial }] }
-      : { packageGraphs: [{ graphManifest, graphManifestSha256 }] }),
+      : {
+          packageGraphs: [{
+            graphManifest,
+            graphManifestSha256,
+            ...(schemaVersion === 2 ? { packageMaterial } : {}),
+          }],
+        }),
     schemaVersion,
   };
   const certificate = { ...payload, certificateSha256: fingerprintJson(payload) };
@@ -1136,7 +1150,7 @@ test("successful-cache snapshot publication rejects a redirected state ancestor"
   await assert.rejects(fs.lstat(join(outsideState, "v1")), { code: "ENOENT" });
 });
 
-test("immutable GC retains a coherent legacy module graph v2 package triple", async (t) => {
+test("immutable GC authenticates and retires a coherent legacy module graph v2 package triple", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("legacy-v2-package");
   const legacy = await writeLegacyV2ModuleGraphPackage(cacheLayout);
@@ -1159,6 +1173,20 @@ test("immutable GC retains a coherent legacy module graph v2 package triple", as
       `${legacy.coreWasm.stage}\0${legacy.coreWasm.key}`,
     ].sort()
   );
+  const sweep = await withHeavyLock(value.environment, () =>
+    sweepConvexWasmImmutableGc({
+      cacheLayout,
+      environment: value.environment,
+      highWatermarkAllocatedBytes: 1,
+      nowMs: Date.now() + 1_000,
+      recentRetentionMilliseconds: 0,
+    })
+  );
+  assert.deepEqual(sweep.removed.map(({ key, type }) => ({ key, type })), [
+    { key: legacy.key, type: "package" },
+  ]);
+  await assert.rejects(fs.lstat(legacy.root), { code: "ENOENT" });
+  await fs.lstat(join(cacheLayout.immutable.artifacts, legacy.aot.stage, legacy.aot.key));
 });
 
 test("immutable GC rejects a legacy v2 package whose provenance identity does not match its artifact", async (t) => {
@@ -1747,10 +1775,19 @@ test("schema-5 compiler-output compact authority corruption cannot retain depend
   }
 });
 
-test("artifact-only sweep keeps every planning-only package loadable", async (t) => {
+test("immutable sweep retires an old package before its artifacts and preserves published hardlinks", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, graphManifestSha256, packageMaterial } =
     await materializeModuleGraphPackageFixture(value);
+  const packagePath = join(cacheLayout.immutable.packages, graphManifestSha256);
+  const publishedManifest = join(value.root, "published-graph-manifest.json");
+  const manifestBytes = await fs.readFile(join(packagePath, "graph-manifest.json"));
+  await fs.link(join(packagePath, "graph-manifest.json"), publishedManifest);
+  const aot = packageMaterial.artifactReferences[0].aot.artifact;
+  const aotPath = join(cacheLayout.immutable.artifacts, aot.stage, aot.cacheKey, "artifact.cwasm");
+  const publishedAot = join(value.root, "published-module.cwasm");
+  const aotBytes = await fs.readFile(aotPath);
+  await fs.link(aotPath, publishedAot);
 
   const report = await maintainConvexWasmCache(
     maintenanceOptions(value, {
@@ -1762,10 +1799,12 @@ test("artifact-only sweep keeps every planning-only package loadable", async (t)
   );
 
   assert.deepEqual(report.immutable.plan.retained.packages, []);
-  assert.deepEqual(report.immutable.sweep.removed, []);
+  assert.deepEqual(report.immutable.sweep.removed.map(({ key, type }) => ({ key, type })), [
+    { key: graphManifestSha256, type: "package" },
+  ]);
   assert.equal(report.immutable.plan.incomplete, true);
-  assert.equal(report.immutable.plan.categories.planningOnlyCandidates.count, 1);
-  assert.equal(report.immutable.plan.categories.sweepableCandidates.count, 0);
+  assert.equal(report.immutable.plan.categories.planningOnlyCandidates.count, 0);
+  assert.equal(report.immutable.plan.categories.sweepableCandidates.count, 1);
   assert.deepEqual(
     report.immutable.plan.retained.artifacts,
     packageMaterial.artifactReferences
@@ -1775,12 +1814,206 @@ test("artifact-only sweep keeps every planning-only package loadable", async (t)
       ])
       .sort()
   );
-  await loadAndVerifyConvexWasmModuleGraphPackage({
+  await assert.rejects(fs.lstat(packagePath), { code: "ENOENT" });
+  await fs.lstat(aotPath);
+  const next = await maintainConvexWasmCache(
+    maintenanceOptions(value, {
+      apply: true,
+      immutableHighWatermarkAllocatedBytes: 1,
+      immutableSweep: true,
+      nowMs: report.nowMs + 1_000,
+    })
+  );
+  assert.equal(next.immutable.plan.authenticated.invalid, 0);
+  assert.equal(next.immutable.sweep.removed.length, report.immutable.plan.retained.artifacts.length);
+  const aotRemoval = next.immutable.sweep.removed.find(({ key }) => key === aot.cacheKey);
+  const survivingAllocation = (await fs.lstat(publishedAot)).blocks * 512;
+  assert.equal(aotRemoval.estimatedReclaimBytes, aotRemoval.allocationBytes - survivingAllocation);
+  await assert.rejects(fs.lstat(aotPath), { code: "ENOENT" });
+  assert.deepEqual(await fs.readFile(publishedAot), aotBytes);
+  assert.deepEqual(await fs.readFile(publishedManifest), manifestBytes);
+});
+
+test("bounded immutable sweeps retire certificate roots, packages, then artifacts across certificate schemas", async (t) => {
+  for (const schemaVersion of [1, 2, 3, 4]) {
+    await t.test(`certificate schema ${String(schemaVersion)}`, async (t) => {
+      const value = await fixture(t);
+      const material = await materializeModuleGraphPackageFixture(value);
+      const { cacheLayout, graphManifestSha256 } = material;
+      const certificate = await writeLegacyDeploymentResultCertificate({ ...material, schemaVersion });
+      const certificateRoot = join(cacheLayout.immutable.packages, "deployment-results", "v1",
+        fingerprintJson(certificate.lookupIdentity));
+      if (schemaVersion >= 3) {
+        await writeLegacyDeploymentResultCertificate({ ...material, schemaVersion: 1 });
+        await fs.writeFile(join(certificateRoot, "PREFERRED"), `${certificate.certificateSha256}\n`, {
+          mode: 0o600,
+        });
+      }
+      const unrelated = await writeGenericArtifact({
+        cacheLayout,
+        extension: "wasm",
+        metadata: { fixture: "independent-large-artifact" },
+        payload: Buffer.alloc(1024 * 1024),
+        stage: "independent-large-artifact",
+      });
+      const options = {
+        cacheLayout,
+        environment: value.environment,
+        highWatermarkAllocatedBytes: 1,
+        maxPlannedEvictions: 1,
+        nowMs: Date.now() + 1_000,
+        recentRetentionMilliseconds: 0,
+      };
+      const noBudget = await withHeavyLock(value.environment, () =>
+        sweepConvexWasmImmutableGc({ ...options, maxEstimatedReclaimBytes: 1 })
+      );
+      assert.deepEqual(noBudget.removed, []);
+      const first = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+      assert.deepEqual(first.removed.map(({ type }) => type), ["certificate-root"]);
+      await assert.rejects(fs.lstat(certificateRoot), { code: "ENOENT" });
+      await loadAndVerifyConvexWasmModuleGraphPackage({
+        cacheLayout,
+        cacheRoot: value.cacheRoot,
+        graphManifestSha256,
+        packagePath: join(cacheLayout.immutable.packages, graphManifestSha256),
+      });
+      const second = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+      assert.equal(second.plan.authenticated.invalid, 0);
+      assert.deepEqual(second.removed.map(({ type }) => type), ["package"]);
+      await fs.lstat(join(cacheLayout.immutable.artifacts, unrelated.stage, unrelated.key));
+      for (const reference of material.packageMaterial.artifactReferences) {
+        for (const { artifact } of [reference.aot, reference.coreWasm]) {
+          await fs.lstat(join(cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey));
+        }
+      }
+      const third = await withHeavyLock(value.environment, () =>
+        sweepConvexWasmImmutableGc({ ...options, maxPlannedEvictions: 100 })
+      );
+      assert.equal(third.plan.authenticated.invalid, 0);
+      assert.equal(third.removed.length, second.plan.retained.artifacts.length + 1);
+      assert.ok(third.removed.every(({ type }) => type === "artifact"));
+    });
+  }
+});
+
+test("retiring an old certificate preserves a recently reused package", async (t) => {
+  const value = await fixture(t);
+  const material = await materializeModuleGraphPackageFixture(value);
+  const { cacheLayout, graphManifestSha256 } = material;
+  const certificate = await writeLegacyDeploymentResultCertificate(material);
+  await ageTree(join(cacheLayout.immutable.packages, "deployment-results"));
+  const options = {
     cacheLayout,
-    cacheRoot: value.cacheRoot,
-    graphManifestSha256,
-    packagePath: join(cacheLayout.immutable.packages, graphManifestSha256),
-  });
+    environment: value.environment,
+    highWatermarkAllocatedBytes: 1,
+    nowMs: Date.now() + 1_000,
+  };
+  const first = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+  assert.deepEqual(first.removed.map(({ key }) => key), [fingerprintJson(certificate.lookupIdentity)]);
+  const second = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+  assert.deepEqual(second.removed, []);
+  assert.deepEqual(second.plan.retained.packages, [graphManifestSha256]);
+});
+
+test("immutable planning reads a shared payload once per plan across certificates and packages", async (t) => {
+  const value = await fixture(t);
+  const material = await materializeModuleGraphPackageFixture(value);
+  const { cacheLayout, packageMaterial } = material;
+  await writeLegacyDeploymentResultCertificate({ ...material, schemaVersion: 3 });
+  await writeLegacyDeploymentResultCertificate({ ...material, schemaVersion: 4 });
+  const artifact = packageMaterial.artifactReferences[0].aot.artifact;
+  const payloadPath = join(cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey, "artifact.cwasm");
+  let payloadBytesRead = 0;
+  const open = fs.open;
+  fs.open = async function (path, ...args) {
+    const handle = await open.call(this, path, ...args);
+    if (path === payloadPath) {
+      const read = handle.read;
+      handle.read = async function (...args) {
+        const result = await read.apply(this, args);
+        payloadBytesRead += result.bytesRead;
+        return result;
+      };
+    }
+    return handle;
+  };
+  try {
+    for (let pass = 1; pass <= 2; pass += 1) {
+      await withHeavyLock(value.environment, () => planConvexWasmImmutableGc({
+        cacheLayout,
+        environment: value.environment,
+        highWatermarkAllocatedBytes: 1,
+      }));
+      assert.equal(payloadBytesRead, artifact.size * pass);
+    }
+  } finally {
+    fs.open = open;
+  }
+});
+
+test("retained certificate roots preserve both preferred and superseded package closures", async (t) => {
+  for (const selected of ["preferred", "superseded", "preferred-with-missing-sibling-package"]) {
+    await t.test(`${selected} success snapshot`, async (t) => {
+      const value = await fixture(t);
+      const material = await materializeModuleGraphPackageFixture(value);
+      const { cacheLayout } = material;
+      const preferred = await writeLegacyDeploymentResultCertificate(material);
+      const supersededPackage = await writeLegacyV2ModuleGraphPackage(cacheLayout);
+      const manifestPayload = {
+        moduleGraphBinding: { cohorts: [{ graphManifestSha256: supersededPackage.key }] },
+      };
+      const supersededManifest = {
+        ...manifestPayload,
+        deploymentSha256: fingerprintJson(manifestPayload),
+      };
+      const superseded = await writeLegacyDeploymentResultCertificate({
+        cacheLayout,
+        graphManifest: supersededPackage.manifest,
+        graphManifestSha256: supersededPackage.key,
+        manifest: supersededManifest,
+        schemaVersion: 1,
+      });
+      const lookupRoot = join(cacheLayout.immutable.packages, "deployment-results", "v1",
+        fingerprintJson(preferred.lookupIdentity));
+      await fs.writeFile(join(lookupRoot, "PREFERRED"), `${preferred.certificateSha256}\n`, { mode: 0o600 });
+      const missingSiblingPackage = selected === "preferred-with-missing-sibling-package";
+      if (missingSiblingPackage) await fs.rm(supersededPackage.root, { recursive: true });
+      const selectedCertificate = selected === "superseded" ? superseded : preferred;
+      await withHeavyLock(value.environment, async () => {
+        await recordConvexWasmSuccessfulCacheUse({
+          buildId: `${selected}-certificate-success`,
+          cacheLayout,
+          deployment: {
+            buildReport: { cache: { certificateSha256: selectedCertificate.certificateSha256 } },
+            manifest: selectedCertificate.manifest,
+          },
+          environment: value.environment,
+        });
+        const result = await sweepConvexWasmImmutableGc({
+          cacheLayout,
+          environment: value.environment,
+          highWatermarkAllocatedBytes: 1,
+          nowMs: Date.now() + 1_000,
+          recentRetentionMilliseconds: 0,
+        });
+        assert.deepEqual(
+          result.removed.map(({ key }) => key).sort(),
+          missingSiblingPackage ? [supersededPackage.aot.key, supersededPackage.coreWasm.key].sort() : []
+        );
+        assert.equal(result.plan.authenticated.invalid, missingSiblingPackage ? 1 : 0);
+        assert.equal(result.plan.authenticated.retainedSnapshots, 1);
+        assert.deepEqual(result.plan.retained.certificates, [selectedCertificate.certificateSha256]);
+      });
+      if (!missingSiblingPackage) await fs.lstat(supersededPackage.root);
+      await fs.lstat(lookupRoot);
+      await loadAndVerifyConvexWasmModuleGraphPackage({
+        cacheLayout,
+        cacheRoot: value.cacheRoot,
+        graphManifestSha256: material.graphManifestSha256,
+        packagePath: join(cacheLayout.immutable.packages, material.graphManifestSha256),
+      });
+    });
+  }
 });
 
 test("artifact-only sweep removes a compiler-output root before its strict dependencies", async (t) => {
@@ -2974,11 +3207,12 @@ test("immutable GC ignores stale package publication scratch", async (t) => {
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
-  assert.deepEqual(plan.evictions, []);
+  assert.equal(plan.evictions.length, 1);
+  assert.equal(plan.evictions[0].type, "package");
   assert.deepEqual(plan.retained.packages, []);
-  assert.equal(plan.categories.planningOnlyCandidates.count, 1);
-  assert.ok(plan.categories.planningOnlyCandidates.allocatedBytes > 0);
-  assert.equal(plan.categories.sweepableCandidates.count, 0);
+  assert.equal(plan.categories.planningOnlyCandidates.count, 0);
+  assert.ok(plan.categories.sweepableCandidates.allocatedBytes > 0);
+  assert.equal(plan.categories.sweepableCandidates.count, 1);
   assert.ok(plan.retained.artifacts.length > 0);
 });
 
@@ -3286,6 +3520,42 @@ test("automatic maintenance sweeps old immutable artifacts above its high waterm
   await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
 });
 
+test("automatic maintenance recovers quarantined entries below its high watermark", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("automatic-quarantine-recovery");
+  const artifact = await writeGenericArtifact({
+    cacheLayout, extension: "wasm", metadata: {}, payload: Buffer.alloc(1024 * 1024),
+    stage: "automatic-quarantine-recovery",
+  });
+  await ageGenericArtifact(cacheLayout, artifact);
+  const options = maintenanceOptions(value, {
+    apply: true,
+    automaticImmutableSweep: true,
+    immutableHighWatermarkAllocatedBytes: 512 * 1024,
+  });
+  const originalRm = fs.rm;
+  fs.rm = async (path, options) => {
+    if (path.includes("immutable-sweep-trash") && options?.recursive) {
+      throw new Error("synthetic automatic sweep interruption");
+    }
+    return await originalRm(path, options);
+  };
+  try {
+    await assert.rejects(maintainConvexWasmCache(options), /synthetic automatic sweep interruption/u);
+  } finally {
+    fs.rm = originalRm;
+  }
+  const recovered = await maintainConvexWasmCache(options);
+  assert.ok(recovered.immutable.automaticSweep.occupancy.uniqueAllocatedBytes < options.immutableHighWatermarkAllocatedBytes);
+  assert.equal(recovered.immutable.automaticSweep.triggered, true);
+  assert.equal(recovered.immutable.sweep.recovered.length, 1);
+  assert.deepEqual(recovered.immutable.sweep.removed, []);
+  assert.equal(recovered.immutable.sweep.trigger, "interrupted-sweep");
+  await assert.rejects(fs.lstat(join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")), {
+    code: "ENOENT",
+  });
+});
+
 test("automatic maintenance shares its interval across calls while explicit sweeps remain immediate", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("automatic-interval");
@@ -3324,6 +3594,44 @@ test("automatic maintenance shares its interval across calls while explicit swee
     immutableSweep: true,
   });
   await assert.rejects(fs.lstat(third), { code: "ENOENT" });
+});
+
+test("maintenance keeps its lock until both occupancy reads drain after failure", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("occupancy-failure");
+  await fs.mkdir(cacheLayout.immutable.root, { mode: 0o700, recursive: true });
+  let held = false;
+  const cacheLock = {
+    acquire() { held = true; return () => { held = false; }; },
+    inheritedAuthorityEnvironment() { return {}; },
+    requireAuthority() { assert.equal(held, true); },
+  };
+  const readdir = fs.readdir;
+  const pendingRead = Promise.withResolvers();
+  const readStarted = Promise.withResolvers();
+  const failure = new Error("synthetic occupancy read failure");
+  fs.readdir = async (path, ...args) => {
+    if (path === value.cacheRoot) throw failure;
+    if (path === cacheLayout.immutable.root) {
+      readStarted.resolve();
+      await pendingRead.promise;
+    }
+    return await readdir(path, ...args);
+  };
+  const result = maintainConvexWasmCache(maintenanceOptions(value, {
+    apply: true, automaticImmutableSweep: true, cacheLock,
+    immutableHighWatermarkAllocatedBytes: 1, includeImmutableOccupancy: true,
+  })).then(() => undefined, (error) => error);
+  try {
+    await readStarted.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(held, true);
+  } finally {
+    pendingRead.resolve();
+    assert.equal(await result, failure);
+    fs.readdir = readdir;
+  }
+  assert.equal(held, false);
 });
 
 test("host lock ownership covers leases, immutable planning and sweeping", async (t) => {
@@ -3418,6 +3726,148 @@ test("immutable sweep uses remaining byte budget after an oversized candidate", 
   });
 });
 
+test("immutable sweep handles shared payloads before unlinking or recovering a batch", async (t) => {
+  for (const interruption of ["none", "after-rename", "partial-removal"]) {
+    await t.test(interruption, async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("immutable-shared-payload");
+      const artifacts = [];
+      for (const stage of ["shared-first", "shared-second"]) {
+        artifacts.push(await writeGenericArtifact({
+          cacheLayout, extension: "wasm", metadata: {}, payload: "shared payload", stage,
+        }));
+      }
+      const paths = artifacts.map(({ stage, key }) => join(cacheLayout.immutable.artifacts, stage, key));
+      await fs.unlink(join(paths[1], "artifact.wasm"));
+      await fs.link(join(paths[0], "artifact.wasm"), join(paths[1], "artifact.wasm"));
+      const options = {
+        cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+        nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+      };
+      const original = { open: fs.open, rm: fs.rm };
+      let verifiedWrites = 0;
+      fs.open = async (path, ...args) => {
+        if (typeof path === "string" && path.endsWith(".verified.json") && args[0] === "wx" &&
+            interruption === "after-rename" && ++verifiedWrites === 2) {
+          throw new Error("synthetic shared payload interruption");
+        }
+        return await original.open(path, ...args);
+      };
+      fs.rm = async (path, options) => {
+        if (interruption === "partial-removal" && path.includes("immutable-sweep-trash") && options?.recursive) {
+          await original.rm(join(path, "artifact.wasm"));
+          throw new Error("synthetic shared payload interruption");
+        }
+        return await original.rm(path, options);
+      };
+      let result;
+      try {
+        const run = () => withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+        if (interruption === "none") result = await run();
+        else await assert.rejects(run, /synthetic shared payload interruption/u);
+      } finally {
+        Object.assign(fs, original);
+      }
+      if (interruption === "none") assert.equal(result.removed.length, 2);
+      else {
+        const retry = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+        assert.equal(retry.recovered.length, 2);
+        assert.deepEqual(retry.removed, []);
+      }
+      for (const path of paths) await assert.rejects(fs.lstat(path), { code: "ENOENT" });
+    });
+  }
+});
+
+test("immutable recovery completes an interrupted source-directory sync before removal", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("interrupted-rename-sync");
+  const artifact = await writeGenericArtifact({
+    cacheLayout, extension: "wasm", metadata: {}, payload: "interrupted rename sync",
+    stage: "interrupted-rename-sync",
+  });
+  const candidatePath = join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key);
+  const sourceParent = dirname(candidatePath);
+  const options = {
+    cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+    nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+  };
+  const open = fs.open;
+  fs.open = async (path, ...args) => {
+    const handle = await open(path, ...args);
+    if (path === sourceParent && args[0] === "r") {
+      handle.sync = async () => {
+        throw Object.assign(new Error("synthetic source-directory sync failure"), { code: "EIO" });
+      };
+    }
+    return handle;
+  };
+  try {
+    // The initial rename succeeds, but neither its source sync nor a verified marker completes.
+    // Recovery must preserve that quarantine while the same durability fence still fails.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(
+        withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options)),
+        /synthetic source-directory sync failure/u
+      );
+    }
+  } finally {
+    fs.open = open;
+  }
+  await assert.rejects(fs.lstat(candidatePath), { code: "ENOENT" });
+  const recovered = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+  assert.equal(recovered.recovered.length, 1);
+  assert.deepEqual(recovered.removed, []);
+});
+
+test("immutable sweep recovers incomplete marker writes without treating them as authority", async (t) => {
+  for (const verified of [false, true]) {
+    await t.test(verified ? "verified marker" : "base marker", async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("incomplete-marker");
+      const artifact = await writeGenericArtifact({
+        cacheLayout, extension: "wasm", metadata: {}, payload: "incomplete-marker", stage: "incomplete-marker",
+      });
+      const options = {
+        cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+        nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+      };
+      const open = fs.open;
+      let interruptedPath;
+      fs.open = async (path, ...args) => {
+        const handle = await open(path, ...args);
+        if (args[0] === "wx" && path.includes("immutable-sweep-trash") &&
+            path.endsWith(".verified.json") === verified) {
+          interruptedPath = path;
+          const writeFile = handle.writeFile;
+          handle.writeFile = async function (contents) {
+            await writeFile.call(this, contents.slice(0, 16));
+            throw Object.assign(new Error("synthetic incomplete marker write"), { code: "ENOSPC" });
+          };
+        }
+        return handle;
+      };
+      try {
+        await assert.rejects(
+          withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options)),
+          /synthetic incomplete marker write/u
+        );
+      } finally {
+        fs.open = open;
+      }
+      // A killed process cannot run its temporary-file cleanup. Leave the same partial write
+      // behind to exercise recovery of crash residue as well as an ordinary failed write.
+      await fs.writeFile(interruptedPath, "{", { mode: 0o600 });
+      const retry = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
+      assert.equal(retry.recovered.length, verified ? 1 : 0);
+      assert.equal(retry.removed.length, verified ? 0 : 1);
+      await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key)), {
+        code: "ENOENT",
+      });
+    });
+  }
+});
+
 test("immutable sweep quarantines a selected root before fallible recursive removal", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("immutable-sweep-removal-failure");
@@ -3432,7 +3882,7 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
   const originalRm = fs.rm;
   let removalAttempted = false;
   fs.rm = async (path, options) => {
-    if (path.includes("immutable-sweep-trash")) {
+    if (path.includes("immutable-sweep-trash") && options?.recursive) {
       removalAttempted = true;
       throw Object.assign(new Error("synthetic immutable trash removal failure"), {
         code: "EIO",
@@ -3488,6 +3938,135 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
   assert.equal(retry.recovered[0].status, "removed-quarantined-root");
   assert.deepEqual(retry.removed, []);
   await assert.rejects(fs.lstat(trashRoot), { code: "ENOENT" });
+});
+
+test("immutable sweep recovers interrupted package and certificate retirement", async (t) => {
+  for (const type of ["package", "certificate-root"]) {
+    for (const interruption of ["before-rename", "after-rename", "partial-removal", "marker-cleanup"]) {
+      await t.test(`${type}: ${interruption}`, async (t) => {
+        const value = await fixture(t);
+        const material = await materializeModuleGraphPackageFixture(value);
+        const { cacheLayout, graphManifestSha256 } = material;
+        let candidatePath = join(cacheLayout.immutable.packages, graphManifestSha256);
+        if (type === "certificate-root") {
+          const certificate = await writeLegacyDeploymentResultCertificate(material);
+          candidatePath = join(cacheLayout.immutable.packages, "deployment-results", "v1",
+            fingerprintJson(certificate.lookupIdentity));
+        }
+        const options = {
+          cacheLayout,
+          environment: value.environment,
+          highWatermarkAllocatedBytes: 1,
+          maxPlannedEvictions: 1,
+          nowMs: Date.now() + 1_000,
+          recentRetentionMilliseconds: 0,
+        };
+        const original = { open: fs.open, rename: fs.rename, rm: fs.rm, unlink: fs.unlink };
+        const interrupt = () => {
+          throw Object.assign(new Error("synthetic root retirement interruption"), { code: "EIO" });
+        };
+        fs.rename = async (from, to) => {
+          if (from === candidatePath && interruption === "before-rename") interrupt();
+          return await original.rename(from, to);
+        };
+        fs.open = async (path, ...args) => {
+          if (interruption === "after-rename" && path.endsWith(".verified.json")) interrupt();
+          return await original.open(path, ...args);
+        };
+        fs.rm = async (path, options) => {
+          if (interruption === "partial-removal" && path.includes("immutable-sweep-trash") && options?.recursive) {
+            const name = (await fs.readdir(path))[0];
+            await original.rm(join(path, name), { recursive: true });
+            interrupt();
+          }
+          return await original.rm(path, options);
+        };
+        fs.unlink = async (path) => {
+          if (interruption === "marker-cleanup" && path.includes("immutable-sweep-trash") &&
+              path.endsWith(".json") && !path.endsWith(".verified.json")) interrupt();
+          return await original.unlink(path);
+        };
+        try {
+          await assert.rejects(
+            withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options)),
+            /synthetic root retirement interruption/u
+          );
+        } finally {
+          Object.assign(fs, original);
+        }
+        if (interruption === "before-rename") await fs.lstat(candidatePath);
+        else await assert.rejects(fs.lstat(candidatePath), { code: "ENOENT" });
+        const recovered = await withHeavyLock(value.environment, () =>
+          sweepConvexWasmImmutableGc(options)
+        );
+        assert.equal(recovered.recovered.length, 1);
+        assert.equal(recovered.recovered[0].status,
+          interruption === "before-rename" ? "cleared-pre-rename-marker" :
+            interruption === "marker-cleanup" ? "cleared-completed-marker" : "removed-quarantined-root");
+        assert.equal(recovered.plan.authenticated.invalid, 0);
+        await assert.rejects(fs.lstat(candidatePath), { code: "ENOENT" });
+        await assert.rejects(fs.lstat(join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")), {
+          code: "ENOENT",
+        });
+      });
+    }
+  }
+});
+
+test("immutable sweep rejects changed or redirected package and certificate quarantine trees", async (t) => {
+  for (const type of ["package", "certificate-root"]) {
+    for (const replacement of ["changed", "symlink"]) {
+      await t.test(`${type}: ${replacement}`, async (t) => {
+        const value = await fixture(t);
+        const material = await materializeModuleGraphPackageFixture(value);
+        const { cacheLayout, graphManifestSha256 } = material;
+        let candidatePath = join(cacheLayout.immutable.packages, graphManifestSha256);
+        let memberPath = join(candidatePath, "COMPLETE");
+        if (type === "certificate-root") {
+          const certificate = await writeLegacyDeploymentResultCertificate(material);
+          candidatePath = join(cacheLayout.immutable.packages, "deployment-results", "v1",
+            fingerprintJson(certificate.lookupIdentity));
+          memberPath = join(candidatePath, certificate.certificateSha256, "COMPLETE");
+        }
+        const outside = join(value.root, "outside-authority");
+        await fs.writeFile(outside, "surviving outside material", { mode: 0o600 });
+        const options = {
+          cacheLayout,
+          environment: value.environment,
+          highWatermarkAllocatedBytes: 1,
+          nowMs: Date.now() + 1_000,
+          recentRetentionMilliseconds: 0,
+        };
+        const originalRename = fs.rename;
+        let quarantinedPath;
+        fs.rename = async (from, to) => {
+          if (from === candidatePath) {
+            if (replacement === "changed") await fs.writeFile(memberPath, "changed marker\n");
+            else {
+              await fs.unlink(memberPath);
+              await fs.symlink(outside, memberPath);
+            }
+            quarantinedPath = to;
+          }
+          return await originalRename(from, to);
+        };
+        try {
+          await assert.rejects(
+            withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options)),
+            /changed while it was quarantined|symbolic link/u
+          );
+        } finally {
+          fs.rename = originalRename;
+        }
+        await assert.rejects(
+          withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options)),
+          /changed before recovery|symbolic link/u
+        );
+        await fs.lstat(quarantinedPath);
+        assert.equal(await fs.readFile(outside, "utf8"), "surviving outside material");
+      });
+    }
+  }
 });
 
 test("immutable sweep does not delete a candidate mutated after reauthentication", async (t) => {

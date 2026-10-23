@@ -82,6 +82,72 @@ test("bounds a retained file read to its authenticated pre-read size", async (t)
   }
 });
 
+test("private file readers enforce their byte bound after opening a growing file", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-material-open-growth-"));
+  t.after(() => fs.rm(root, { force: true, recursive: true }));
+  const path = join(root, "artifact.bin");
+  for (const read of [readPrivateRegularFile, hashPrivateRegularFile]) {
+    await fs.writeFile(path, "small", { mode: 0o600 });
+    const open = fs.open;
+    fs.open = async (openedPath, ...args) => {
+      if (openedPath === path) await fs.appendFile(path, " exceeds the byte bound");
+      return await open(openedPath, ...args);
+    };
+    try {
+      await assert.rejects(read(path, 8, "growing file"), /above the 8-byte limit/u);
+    } finally {
+      fs.open = open;
+    }
+  }
+});
+
+test("private file readers drain both final state reads before reporting failure", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-material-read-drain-"));
+  t.after(() => fs.rm(root, { force: true, recursive: true }));
+  const path = join(root, "artifact.bin");
+  await fs.writeFile(path, "material", { mode: 0o600 });
+  for (const read of [readPrivateRegularFile, hashPrivateRegularFile]) {
+    const original = { open: fs.open, lstat: fs.lstat };
+    const pendingRead = deferred();
+    const readStarted = deferred();
+    const failure = new Error("synthetic final file state failure");
+    let settled = false;
+    let pathReads = 0;
+    fs.lstat = async (name, ...args) => {
+      if (name === path && ++pathReads === 2) {
+        readStarted.resolve();
+        await pendingRead.promise;
+      }
+      return await original.lstat(name, ...args);
+    };
+    fs.open = async (...args) => {
+      const handle = await original.open(...args);
+      const stat = handle.stat;
+      let handleReads = 0;
+      handle.stat = async function (...args) {
+        if (++handleReads === 2) throw failure;
+        return await stat.apply(this, args);
+      };
+      return handle;
+    };
+    const result = read(path, 1024, "material drain test").then(
+      () => { settled = true; },
+      (error) => { settled = true; return error; }
+    );
+    try {
+      await readStarted.promise;
+      // Closing the file handle is asynchronous too. Leave the sibling stat blocked while a
+      // premature failure has enough time to finish that cleanup and reach the caller.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(settled, false);
+    } finally {
+      pendingRead.resolve();
+      assert.equal(await result, failure);
+      Object.assign(fs, original);
+    }
+  }
+});
+
 test("rejects a symbolic link as private regular-file material", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-artifact-symlink-"));
   t.after(async () => await fs.rm(root, { force: true, recursive: true }));

@@ -668,11 +668,34 @@ package from an official SDK query through the public graph and artifact
 builders using those synthetic tools. Publication and backend execution are
 still separate steps.
 Cache maintenance defaults to a dry run. It authenticates recent-success
-snapshots and referenced packages before planning immutable eviction. An
-explicit sweep currently removes eligible artifact and C-bundle entries; it
-leaves package and certificate roots in place. Use the same cache root for
-builds and maintenance. A caller assembling a build from the exported modules
-must acquire `acquireConvexWasmCacheLock`, create a work lease with
+snapshots and referenced packages before planning immutable eviction. Above
+the caller's high watermark, explicit and automatic sweeps remove old,
+unretained certificate lookup roots, packages, artifacts, and C-bundle entries.
+Certificate lookup roots are retired together with their preferred pointers
+and superseded certificates. Each pass preserves the dependencies of every
+physical authority root: certificates pin their packages, and packages pin
+their artifacts. Newly unreachable dependencies become eligible on later
+passes, so a certificate, package, and artifact chain normally needs three
+passes; other immutable records can extend that chain. Per-pass count and byte
+bounds can require further passes. Roots take priority within the eviction
+count, and maintenance stops selecting entries at the high watermark. Maintenance
+preserves eight recent successful snapshots and a 24-hour reuse grace, including
+their complete closure. Each sweep selects at most 4,096 entries and an estimated
+8 GiB of reclaimable data by default.
+Unknown invalid certificate roots conservatively prevent package retirement.
+Removal uses authenticated durable quarantine and resumes after interruption.
+Automatic maintenance also resumes pending quarantine below the high watermark.
+Each bounded batch is quarantined and verified before any payload is unlinked,
+including during recovery, so shared hardlinks do not invalidate later candidates.
+Planning shares package and artifact validation within one locked pass. Reuse
+checks the current physical state, and deletion starts a fresh validation scope;
+no authentication result survives into the next maintenance pass.
+Artifact inventory reads use four concurrent workers. Overlapping checks of the
+same private ancestor share only pending work; later checks reopen the directory.
+Reclaim estimates exclude file blocks with surviving hardlinks outside each
+candidate; category allocation totals can include those shared blocks.
+Use the same cache root for builds and maintenance. A caller assembling a build
+from the exported modules must acquire `acquireConvexWasmCacheLock`, create a work lease with
 `createConvexWasmBuildWorkLease`, and hold the lock through the build and the
 lease's `complete` or `fail` transition. The library builders do not acquire
 the lock for the caller. `verify:source-to-aot` acquires it around its own build.
@@ -689,8 +712,8 @@ npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler"
 npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler" --apply --immutable-sweep --immutable-high-watermark-bytes "$CACHE_HIGH_WATERMARK_BYTES"
 ```
 
-`--automatic --apply` runs immutable sweeping only above an explicitly configured
-high watermark. Supply `--immutable-high-watermark-bytes` or
+`--automatic --apply` selects new immutable evictions only above an explicitly
+configured high watermark; it also finishes pending quarantine recovery. Supply `--immutable-high-watermark-bytes` or
 `CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES` for either sweep mode; choose the value
 for the adopting host. The command uses the default cache root when `--cache-root`
 is omitted. Successful automatic maintenance records its policy and start time
