@@ -9,6 +9,19 @@ import { parseProjectConfig } from "./convex-wasm-project-build-inputs.mjs";
 
 const configPath = "/project/config/wasm.json";
 
+test("bundled project configuration owns tool and matrix selection", () => {
+  const config = projectConfig();
+  for (const key of ["gateRoot", "matrixReports", "nativePackageCacheRoot", "nativeReleaseSelection"]) delete config[key];
+  config.toolchain = "../installation";
+  const parsed = parseProjectConfig(config, configPath);
+  assert.equal(parsed.toolchainRoot, "/project/installation");
+  assert.equal(parsed.gateRoot, "/project/installation/gate");
+  assert.throws(() => parseProjectConfig({ ...config, gateRoot: "../gate" }, configPath), /exactly one/);
+  for (const key of ["compilerPackage", "precompilerPackage", "nativeReleaseSelection", "matrixReports", "matrixTools"]) {
+    assert.throws(() => parseProjectConfig({ ...config, [key]: "override" }, configPath), /overrides are unsupported/);
+  }
+});
+
 function projectConfig() {
   return {
     gatePolicy: "./gate-policy.json",

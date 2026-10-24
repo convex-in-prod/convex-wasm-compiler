@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import { verifyToolchainPackage } from "./convex-wasm-toolchain-package.mjs";
 
 import {
   acquireNativeReleaseFromSelectionFile,
@@ -77,6 +79,7 @@ export function parseProjectConfig(value, configPath) {
       "projectRoot",
       "workRoot",
       "gateRoot",
+      "toolchain",
       "gatePolicy",
       "artifactCacheRoot",
       "deployedRuntimeAuthority",
@@ -100,7 +103,6 @@ export function parseProjectConfig(value, configPath) {
       "schemaVersion",
       "projectRoot",
       "workRoot",
-      "gateRoot",
       "gatePolicy",
       "selectedExports",
       "sourcePathspecs",
@@ -121,7 +123,14 @@ export function parseProjectConfig(value, configPath) {
     }
     return route;
   });
-  if ((config.matrixReports === undefined) === (config.matrixTools === undefined)) {
+  if ((config.gateRoot === undefined) === (config.toolchain === undefined)) {
+    throw new Error("configure exactly one of toolchain or gateRoot");
+  }
+  if (config.toolchain !== undefined && ["compilerPackage", "precompilerPackage", "nativeReleaseSelection",
+    "nativePackageCacheRoot", "matrixReports", "matrixTools"].some(key => config[key] !== undefined)) {
+    throw new Error("toolchain supplies native packages and matrix reports; individual overrides are unsupported");
+  }
+  if (config.toolchain === undefined && (config.matrixReports === undefined) === (config.matrixTools === undefined)) {
     throw new Error("configure exactly one of matrixReports or matrixTools");
   }
   if (
@@ -183,11 +192,13 @@ export function parseProjectConfig(value, configPath) {
   if (!Number.isSafeInteger(memoryMaxMiB * 1024 * 1024)) {
     throw new Error("memoryMaxMiB exceeds the supported byte limit");
   }
-  const gateRoot = path(config.gateRoot, "gateRoot");
+  const toolchainRoot = config.toolchain === undefined ? undefined : path(config.toolchain, "toolchain");
+  const gateRoot = toolchainRoot === undefined ? path(config.gateRoot, "gateRoot") : join(toolchainRoot, "gate");
   return {
     projectRoot: path(config.projectRoot, "projectRoot"),
     workRoot: path(config.workRoot, "workRoot"),
     gateRoot,
+    toolchainRoot,
     gatePolicyPath: path(config.gatePolicy, "gatePolicy"),
     artifactCacheRoot:
       config.artifactCacheRoot === undefined
@@ -336,6 +347,15 @@ async function createMatrixReports(config, buildDirectory, artifactConfig) {
 }
 
 export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {}) {
+  if (config.toolchainRoot !== undefined) {
+    const bundle = await verifyToolchainPackage(config.toolchainRoot);
+    config = { ...config,
+      compilerPackage: join(config.toolchainRoot, bundle.nativePackages.compiler),
+      precompilerPackage: join(config.toolchainRoot, bundle.nativePackages.precompiler),
+      matrixReports: { codec: join(config.toolchainRoot, "evidence/codec.json"),
+        request: join(config.toolchainRoot, "evidence/request.json") },
+    };
+  }
   const buildDirectory = await createPrivateBuildDirectory(config.workRoot);
   const cacheRoot = config.artifactCacheRoot ?? defaultConvexWasmCacheRoot();
   const cacheLayout = deriveConvexWasmCacheLayout({
@@ -356,9 +376,18 @@ export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {
   const artifactConfigPath = join(buildDirectory, "artifact-config.json");
   const platformLimitsPath = join(buildDirectory, "platform-limits.json");
   const contextReuseAnalysisPath = join(buildDirectory, "context-reuse-analysis.json");
-  const gatePolicy = normalizeGatePolicy(
-    JSON.parse(await fs.readFile(config.gatePolicyPath, "utf8"))
-  );
+  const policy = JSON.parse(await fs.readFile(config.gatePolicyPath, "utf8"));
+  if (config.toolchainRoot !== undefined) {
+    requireKeys(policy.command, ["maxOutputBytes", "phaseTimeoutMs"], ["maxOutputBytes", "phaseTimeoutMs"], "bundled command policy");
+    // The release owns executable selection. Projects still own limits and
+    // diagnostic policy, but cannot mix tools from another installation.
+    policy.command = { ...policy.command,
+      environment: { HOME: homedir(), PATH: [join(config.toolchainRoot, "runtime/node/bin"),
+        join(config.toolchainRoot, "runtime/python/bin"), "/usr/bin", "/bin"].join(":") },
+      timeExecutable: join(config.toolchainRoot, "runtime/bin/time"),
+    };
+  }
+  const gatePolicy = normalizeGatePolicy(policy);
   const gitSourceSnapshot = await captureConvexWasmGitSourceSnapshot({
     pathspecs: config.sourcePathspecs,
     repoRoot: config.projectRoot,
@@ -368,6 +397,7 @@ export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {
   const [gateConfig, contextReuseAnalysis, producerIdentity] = await Promise.all([
     createStaticHermesGateConfigArtifacts({
       artifactConfigOutputPath: artifactConfigPath,
+      cacheRoot,
       fuelEpochPollInterval: config.fuelEpochPollInterval,
       gateRoot: config.gateRoot,
       platformLimitsOutputPath: platformLimitsPath,

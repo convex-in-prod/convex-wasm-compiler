@@ -2,6 +2,7 @@ name: Native release binaries
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -17,6 +18,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_BUILD_JOBS: "2"
@@ -26,6 +29,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build g++
+          else
+            brew install cmake ninja
+          fi
+          npm ci
       - name: Install compiler toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Build and verify native release
@@ -34,9 +47,55 @@ jobs:
           --output artifact
           --target "${{ matrix.target }}"
           --jobs 2
+      - name: Build bundled toolchain and verify relocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/setup-gate.mjs --gate-root "$RUNNER_TEMP/gate" --jobs 2
+          compiler_package=$(node -p 'require("./artifact/index.json").compiler.path')
+          precompiler_package=$(node -p 'require("./artifact/index.json").precompiler.path')
+          node scripts/build-toolchain-release.mjs \
+            --gate-root "$RUNNER_TEMP/gate" \
+            --compiler-package "$PWD/artifact/$compiler_package" \
+            --precompiler-package "$PWD/artifact/$precompiler_package" \
+            --output "$PWD/artifact/toolchain" --cxx "$(command -v c++)" --jobs 2
+          node scripts/smoke-toolchain-release.mjs artifact/toolchain/*.tar.gz \
+            >artifact/toolchain/smoke.json
+      - name: Package Windows WSL2 launcher
+        if: runner.os == 'Linux'
+        run: node scripts/package-wsl-toolchain.mjs artifact/toolchain/*.tar.gz "$PWD/artifact/wsl2"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: convex-wasm-native-${{ matrix.target }}
           path: artifact
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
+          compression-level: 0
+
+  windows:
+    name: Windows x64 WSL2 installation
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: convex-wasm-native-x86_64-unknown-linux-gnu
+          path: artifact
+      - name: Install and verify WSL2 package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 installation failed' }
+          wsl.exe --set-version Ubuntu-24.04 2
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 conversion failed' }
+          $archive = Get-Item artifact/wsl2/*.zip
+          $expected = (Get-Content "$($archive.FullName).sha256").Split(' ')[0]
+          if ((Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'WSL2 archive checksum differs'
+          }
+          Expand-Archive $archive.FullName -DestinationPath 'relocated toolchain'
+          & './relocated toolchain/convex-wasm.ps1' -Distribution Ubuntu-24.04 verify
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 installation verification failed' }
+          & './relocated toolchain/convex-wasm.ps1' -Distribution Ubuntu-24.04 smoke --cache-root /root/.cache/convex-wasm-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 source-to-AOT smoke failed' }

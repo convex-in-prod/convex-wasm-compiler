@@ -1192,6 +1192,8 @@ async function moduleGraphMaterialSessionInputFixture(fixture, entryPath, udfKin
 test("public artifact pipeline constructs and reuses a complete package", async (t) => {
   const fixture = await createFixture(t);
   fixture.options.command.environment.EM_BINARYEN_ROOT = "/toolchain/original-binaryen";
+  fixture.options.command.environment.EM_CACHE = "/cache/original-emscripten";
+  fixture.options.command.environment.EMSDK_PYTHON = "/toolchain/original-python";
   const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 1 };
   let launchedStaticHermesWithNode = false;
   fixture.options.resourceGuard = {
@@ -1200,6 +1202,8 @@ test("public artifact pipeline constructs and reuses a complete package", async 
     released: false,
     runCommand: async (options) => {
       assert.equal(options.environment.EM_BINARYEN_ROOT, "/toolchain/original-binaryen");
+      assert.equal(options.environment.EM_CACHE, "/cache/original-emscripten");
+      assert.equal(options.environment.EMSDK_PYTHON, "/toolchain/original-python");
       const launcher = options.arguments.find((argument) =>
         argument.endsWith("/run-convex-wasm-static-hermes-precompiler.mjs")
       );
@@ -1236,6 +1240,8 @@ test("public artifact pipeline constructs and reuses a complete package", async 
   const initialCommandCount = (await fs.readFile(fixture.toolLog, "utf8")).trim().split("\n").length;
   // Tool bytes are authenticated as material; their physical directory is not semantic.
   fixture.options.command.environment.EM_BINARYEN_ROOT = "/toolchain/relocated-binaryen";
+  fixture.options.command.environment.EM_CACHE = "/cache/relocated-emscripten";
+  fixture.options.command.environment.EMSDK_PYTHON = "/toolchain/relocated-python";
   const second = await compileConvexWasmArtifact(fixture.options);
   assert.equal(first.buildReport.package.cache, "miss");
   assert.equal(second.buildReport.package.cache, "hit");

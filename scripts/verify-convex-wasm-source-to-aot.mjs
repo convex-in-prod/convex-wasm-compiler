@@ -21,7 +21,6 @@ import {
 } from "./lib/convex-wasm-static-hermes-c-bundle.mjs";
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
-const TARGET = { cpu: "baseline", triple: "x86_64-unknown-linux-gnu" };
 const ENGINE_CONFIG = {
   consumeFuel: true,
   epochInterruption: true,
@@ -110,6 +109,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
     fingerprintMaterialPaths(runtimePaths, "runtime verification headers"),
     loadAndVerifyPrecompilerPackage(config.precompilerPackage),
   ]);
+  const target = { cpu: "baseline", triple: precompiler.manifest.platform.targetTriple };
   const verifyStaticHermes = async () => {
     const current = await fingerprintMaterialPaths(shPaths, "Static Hermes verification material");
     if (current.sha256 !== staticHermes.sha256) throw new Error("Static Hermes verification material changed");
@@ -129,6 +129,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
       EMSDK: config.emsdkRoot,
       HOME: process.env.HOME,
       PATH: process.env.PATH,
+      ...config.environment,
     },
     maxOutputBytes: 16 * 1024 * 1024,
     timeoutMs: 15 * 60 * 1000,
@@ -242,7 +243,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
           "--engine-identity", "engine-identity.json",
           "--consume-fuel", "true", "--epoch-interruption", "true",
           "--wasm-exceptions", "true", "--profiling-strategy", "perf-map",
-          "--target-triple", TARGET.triple, "--target-cpu", TARGET.cpu,
+          "--target-triple", target.triple, "--target-cpu", target.cpu,
           "--parallel-compilation-workers", String(config.aotWorkers),
         ],
       },
@@ -264,7 +265,7 @@ async function verifyConvexWasmSourceToAotUnderLease(config, cacheLayout) {
       ...archiveInputs,
     ],
     runCommand,
-    target: TARGET,
+    target,
     verifyMaterials: async (stage) => {
       if (stage === "link") {
         await verifyEmscripten();

@@ -1019,7 +1019,9 @@ const MODULE_GRAPH_PRODUCTION_HOST_FUNCTIONS = Object.freeze([
 ]);
 const SEMANTIC_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "SOURCE_DATE_EPOCH", "TZ"];
 
-const MATERIAL_LOCATION_ENVIRONMENT_KEYS = ["EM_BINARYEN_ROOT", "EM_CONFIG", "EMSDK", "HOME", "PATH"];
+// Bundled Emscripten uses its own Python and an external writable cache. Their
+// locations are operational; authenticated tool and runtime bytes own identity.
+const MATERIAL_LOCATION_ENVIRONMENT_KEYS = ["EM_BINARYEN_ROOT", "EM_CACHE", "EM_CONFIG", "EMSDK", "EMSDK_PYTHON", "HOME", "PATH"];
 const COMMAND_ENVIRONMENT_KEYS = new Set([
   ...MATERIAL_LOCATION_ENVIRONMENT_KEYS,
   ...SEMANTIC_ENVIRONMENT_KEYS,

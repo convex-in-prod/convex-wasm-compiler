@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { emscriptenVersion, gateRevisions, wasmtimeRepository } from "./lib/convex-wasm-gate-pins.mjs";
 import { staticHermesHostArchives } from "./lib/convex-wasm-static-hermes-host-archives.mjs";
 import { fingerprintMaterialPaths } from "./lib/convex-wasm-artifact-material.mjs";
+import { installHermesSource, verifyHermesSource } from "./lib/convex-wasm-hermes-source.mjs";
+import { packagedGate } from "./lib/convex-wasm-toolchain-package.mjs";
 import binaryenSource from "./vendor/binaryen/source.json" with { type: "json" };
 
 const sources = Object.freeze({
@@ -19,10 +21,6 @@ const sources = Object.freeze({
   emsdk: {
     revision: gateRevisions.emsdk,
     url: "https://github.com/emscripten-core/emsdk.git",
-  },
-  hermes: {
-    revision: gateRevisions.hermes,
-    url: "https://github.com/convex-in-prod/hermes.git",
   },
 });
 
@@ -595,6 +593,7 @@ export async function verifyStaticHermesHostCompilerImport(wasmBuild, hostBuild)
 }
 
 async function checkGate(root) {
+  await verifyHermesSource(join(root, "hermes"));
   for (const name of Object.keys(sources)) {
     const actual = await run("git", ["-C", join(root, name), "rev-parse", "HEAD"], {
       cwd: root,
@@ -619,6 +618,9 @@ async function checkGate(root) {
     requireFile(path, "Static Hermes host archive")
   ));
   for (const build of ["build-host", "build-wasm"]) {
+    const configuredSource = await cmakeCacheValue(join(root, build, "CMakeCache.txt"), "CMAKE_HOME_DIRECTORY");
+    if (configuredSource === null) throw new Error(`Static Hermes ${build} has no configured source checkout`);
+    await verifyHermesSource(configuredSource);
     if (!(await nativeIntlConfigured(join(root, build)))) {
       throw new Error(`Static Hermes ${build} build is stale: native Intl configuration is required`);
     }
@@ -683,12 +685,16 @@ async function checkGate(root) {
 }
 
 export async function setupGate({ gateRoot, jobs, checkOnly }) {
+  // An installed release has no Git/CMake build directories and is already
+  // complete. Never turn a verification request into a local source rebuild.
+  if (await packagedGate(gateRoot) !== null) return gateRoot;
   if (checkOnly) {
     await checkGate(gateRoot);
     return gateRoot;
   }
   await fs.mkdir(gateRoot, { recursive: true });
   for (const name of Object.keys(sources)) await checkout(gateRoot, name);
+  await installHermesSource(join(gateRoot, "hermes"));
 
   // Emscripten includes its configured LLVM path in the sysroot cache identity.
   // A gate symlink must not make setup and application compilation clear it in turn.

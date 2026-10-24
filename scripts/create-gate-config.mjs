@@ -13,7 +13,9 @@ import {
 } from "./lib/convex-wasm-artifact-pipeline.mjs";
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
 import { normalizeEngineConfig, validatePrecompilerEngineRequest } from "./lib/convex-wasm-engine-config.mjs";
-import { gateRevisions } from "./lib/convex-wasm-gate-pins.mjs";
+import { gateRevisions, hermesSource } from "./lib/convex-wasm-gate-pins.mjs";
+import { verifyHermesSource } from "./lib/convex-wasm-hermes-source.mjs";
+import { packagedGate, toolchainEnvironment } from "./lib/convex-wasm-toolchain-package.mjs";
 import { binaryenHelperNames, verifyAllocatorGate, verifyBinaryenGate } from "./setup-gate.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -53,6 +55,7 @@ function usage() {
     "       --artifact-config-output ARTIFACT_CONFIG.json",
     "       --platform-limits-output PLATFORM_LIMITS.json",
     "       [--fuel-epoch-poll-interval POSITIVE_SAFE_INTEGER]",
+    "       [--cache-root PATH (required for an installed toolchain)]",
   ].join("\n");
 }
 
@@ -83,6 +86,7 @@ export function parseArguments(argumentsList) {
     "--policy",
     "--precompiler-package",
     "--fuel-epoch-poll-interval",
+    "--cache-root",
   ]);
   for (let index = 0; index < argumentsList.length; index += 2) {
     const option = argumentsList[index];
@@ -119,6 +123,7 @@ export function parseArguments(argumentsList) {
   }
   return {
     artifactConfigOutputPath,
+    ...(values.has("--cache-root") ? { cacheRoot: resolve(values.get("--cache-root")) } : {}),
     ...(values.has("--fuel-epoch-poll-interval")
       ? { fuelEpochPollInterval: Number(values.get("--fuel-epoch-poll-interval")) }
       : {}),
@@ -470,7 +475,9 @@ export function createStaticHermesGateArtifactConfig({
           "-fasync-generator-results",
         ],
         materialInputs: [],
-        revision: gateRevisions.hermes,
+        // Source identity follows the tree: replaying the pinned patch recipe
+        // changes commit provenance without changing compiler/runtime inputs.
+        revision: hermesSource.tree,
       },
       wasmtime: {
         engineConfig: normalizeEngineConfig({
@@ -489,24 +496,24 @@ export function createStaticHermesGateArtifactConfig({
   };
 }
 
-async function verifyGate({ fuelEpochPollInterval, gateRoot, policy, precompilerPackageDirectory }) {
+async function verifyGate({ cacheRoot, fuelEpochPollInterval, gateRoot, policy, precompilerPackageDirectory }) {
   const normalizedPolicy = normalizeGatePolicy(policy);
-  await verifyBinaryenGate(gateRoot);
-  await verifyAllocatorGate(gateRoot);
-  const [hermesRevision, emsdkRevision, precompilerPackage] =
-    await Promise.all([
-      gitRevision(resolve(gateRoot, "hermes"), "Static Hermes checkout"),
-      gitRevision(resolve(gateRoot, "emsdk"), "emsdk checkout"),
-      loadAndVerifyPrecompilerPackage(precompilerPackageDirectory),
-    ]);
-  for (const [component, actual] of Object.entries({
-    emsdk: emsdkRevision,
-    hermes: hermesRevision,
-  })) {
-    if (actual !== gateRevisions[component]) {
-      throw new Error(
-        `${component} revision ${actual} does not match the maintained Static Hermes gate revision ${gateRevisions[component]}`,
-      );
+  const bundle = await packagedGate(gateRoot);
+  const precompilerPackage = await loadAndVerifyPrecompilerPackage(precompilerPackageDirectory);
+  if (bundle === null) {
+    await Promise.all([verifyBinaryenGate(gateRoot), verifyAllocatorGate(gateRoot),
+      verifyHermesSource(resolve(gateRoot, "hermes"))]);
+    if (await gitRevision(resolve(gateRoot, "emsdk"), "emsdk checkout") !== gateRevisions.emsdk) {
+      throw new Error("emsdk checkout differs from the maintained gate revision");
+    }
+  } else {
+    // Release sealing already checked the source and build directories. Consumers
+    // authenticate the shipped bytes; requiring CMake/Git here defeats packaging.
+    if (resolve(precompilerPackageDirectory) !== resolve(bundle.root, bundle.manifest.nativePackages.precompiler)) {
+      throw new Error("Packaged gate requires its bundled precompiler");
+    }
+    if (typeof cacheRoot !== "string" || !isAbsolute(cacheRoot)) {
+      throw new Error("Packaged gate requires an absolute writable cacheRoot");
     }
   }
   const packagedWasmtimeRevision =
@@ -526,6 +533,11 @@ async function verifyGate({ fuelEpochPollInterval, gateRoot, policy, precompiler
     precompilerPackageDirectory,
     wasmtimeRevision: packagedWasmtimeRevision,
   });
+  if (bundle !== null) {
+    Object.assign(config.command.environment, await toolchainEnvironment(bundle.root, bundle.manifest, cacheRoot));
+    config.command.environment.PATH = `${resolve(bundle.root, "runtime/node/bin")}:${resolve(bundle.root, "runtime/python/bin")}:${config.command.environment.PATH}`;
+    config.command.timeExecutable = resolve(bundle.root, "runtime/bin/time");
+  }
   validatePrecompilerEngineRequest(
     config.toolchain.wasmtime.engineConfig,
     precompilerPackage.manifest.engineContract,

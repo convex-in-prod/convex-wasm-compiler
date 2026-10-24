@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.46",
+  "version": "0.2.47",
   "private": true,
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
     "convex-wasm-transfer-registry": "scripts/transfer-registry.sh"
   },
   "files": [
+    "docs/toolchain-releases.md",
     "docs/guest-memory-maintenance.md",
     "docs/memory-reclamation.md",
     "docs/module-grouping.md",
@@ -40,7 +41,9 @@
     "!scripts/check-javascript.mjs",
     "!scripts/build-native-release.mjs",
     "!scripts/create-native-*.mjs",
-    "!scripts/package-convex-wasm-*.mjs"
+    "!scripts/package-convex-wasm-*.mjs",
+    "!scripts/build-toolchain-release.mjs",
+    "!scripts/package-wsl-toolchain.mjs"
   ],
   "engines": {
     "node": ">=24"
@@ -80,7 +83,7 @@
     "smoke:compiler": "node scripts/smoke-packaged-convex-wasm-compiler.mjs",
     "smoke:precompiler": "node scripts/smoke-packaged-convex-wasm-precompiler.mjs",
     "verify:source-to-aot": "node scripts/verify-convex-wasm-source-to-aot.mjs",
-    "test": "npm run test:compiler && npm run test:precompiler && npm run test:invariants && npm run test:runtime-support && npm run test:native-url && npm run test:replay && npm run test:runtime-policy && npm run test:artifact-material && npm run test:module-graph && npm run test:native-build && npm run test:native-scheduling && npm run test:native-package-acquisition && npm run test:lowering && npm run test:matrices && npm run test:source-preparation && npm run test:source-authority && npm run test:cache-layout && npm run test:cache-retention && npm run test:producer-identity",
+    "test": "npm run test:compiler && npm run test:precompiler && npm run test:invariants && npm run test:runtime-support && npm run test:native-url && npm run test:replay && npm run test:runtime-policy && npm run test:artifact-material && npm run test:module-graph && npm run test:native-build && npm run test:native-scheduling && npm run test:native-package-acquisition && npm run test:lowering && npm run test:matrices && npm run test:source-preparation && npm run test:source-authority && npm run test:cache-layout && npm run test:cache-retention && npm run test:producer-identity && npm run test:toolchain",
     "test:source-authority": "node --test scripts/convex-wasm-source-parity-identity.test.mjs scripts/lib/convex-frozen-deployment-request.test.mjs scripts/lib/source-authority-cache.test.mjs scripts/lib/source-producer-conformance.test.mjs",
     "test:matrices": "node --test scripts/lib/convex-wasm-committed-value-codec-matrix.test.mjs scripts/lib/convex-wasm-committed-value-codec-report.test.mjs scripts/lib/convex-wasm-request-envelope-matrix.test.mjs scripts/lib/convex-wasm-request-envelope-matrix-shermes.test.mjs scripts/lib/convex-wasm-request-envelope-report.test.mjs",
     "test:replay": "node --test scripts/lib/convex-wasm-syscall-replay.test.mjs",
@@ -100,7 +103,10 @@
     "test:compiler": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/Cargo.toml",
     "test:invariants": "cargo test --locked --manifest-path scripts/convex-wasm-compiler/invariant-validation/Cargo.toml",
     "test:precompiler": "cargo test --locked --manifest-path scripts/convex-wasm-precompiler/Cargo.toml",
-    "test:native-url": "node --test scripts/lib/convex-wasm-native-url.test.mjs"
+    "test:native-url": "node --test scripts/lib/convex-wasm-native-url.test.mjs",
+    "release:toolchain": "node scripts/build-toolchain-release.mjs",
+    "smoke:toolchain": "node scripts/smoke-toolchain-release.mjs",
+    "test:toolchain": "node --test scripts/lib/convex-wasm-hermes-source.test.mjs scripts/lib/convex-wasm-toolchain-package.test.mjs"
   },
   "devDependencies": {
     "convex": "https://convex-in-prod.github.io/packages/convex/4db6c17b89a8215d9cb3b07336967a0d460cc16f/convex.tgz"

@@ -190,11 +190,21 @@ limits remain with the caller.
 
 ## Project artifact build
 
+The [bundled toolchain](docs/toolchain-releases.md) is the installation path for
+releases that include `convex-wasm-toolchain-*.tar.gz`. It contains the compiler,
+Static Hermes, runtime archives, Emscripten/LLVM, Binaryen, Node, Python and the
+validation reports. Extract it and run `convex-wasm build --config PROJECT.json`;
+there is no consumer-side gate build. The project still supplies its own SDK,
+source selection, runtime policy and deployment authority.
+
+The npm/source-build path below remains available for compiler development and
+callers that explicitly manage their own tool inputs.
+
 Install the JavaScript package from the matching tagged release into a project
-that already depends on a compatible Convex SDK. For the published `v0.2.2` release:
+that already depends on a compatible Convex SDK. For `v0.2.47`:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.2/convex-wasm-compiler-0.2.2.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.47/convex-wasm-compiler-0.2.47.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed
@@ -206,7 +216,8 @@ Before the first build, install the pinned Static Hermes and Emscripten gate:
 npx convex-wasm-setup-gate --gate-root .local/convex-wasm-gate --jobs 2
 ```
 
-This command checks out pinned Hermes, Binaryen, and Emscripten SDK sources, installs
+This command reconstructs Hermes from a pinned append-only `patch-history`
+snapshot and verifies its result tree, checks out Binaryen and Emscripten SDK sources, installs
 Emscripten 6.0.5, and builds the patched Binaryen optimizer, host Static Hermes compiler,
 the Wasm runtime archives, and the Wasmtime runner used by the codec and request
 matrices.
@@ -743,11 +754,14 @@ cargo test --locked \
   --manifest-path scripts/convex-wasm-compiler/invariant-validation/Cargo.toml
 ```
 
-Release binaries are native executables. Build and test macOS binaries on an
-Apple Silicon host; build and test Linux binaries on an x86-64 Linux host.
+Release binaries are native executables. Build and test on the matching
+operating system and architecture: Linux x86-64, macOS Apple Silicon, or macOS
+Intel. Cross-compilation alone does not establish release support.
 
 Tagged releases publish the installable JavaScript package and authenticated
-compiler and precompiler packages for Linux x86-64 and macOS Apple Silicon. The release
+compiler and precompiler packages for those hosts, plus complete toolchain
+archives. Each archive must pass a source-to-AOT smoke test after extraction
+into a different path. The release
 workflow installs and imports the packed JavaScript commands before publication.
 It keeps the native control manifests, package IDs, binaries, and host selection
 together as release assets. A downstream tool can select a release by tag and
