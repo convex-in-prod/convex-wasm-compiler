@@ -43,6 +43,8 @@ or matrix overrides. Source-build configs keep their existing explicit fields.
 
 The installation is relocatable. Emscripten's writable system-library cache is
 seeded under the selected cache root and separated by toolchain package ID.
+The seed receipt lives outside the SDK cache because Emscripten clears that
+cache when its sanity identity changes, including after installation relocation.
 Compilation does not fetch or reconstruct Hermes, and does not write into the
 installation. Moving the installation can cause existing path-sensitive artifact
 caches to miss; it does not require rebuilding the compiler itself.
@@ -107,8 +109,8 @@ Release jobs build on the matching Linux x64, macOS ARM64 or macOS Intel runner.
 They generate the codec and request-envelope evidence using those release
 inputs, then extract the archive into a new path and compile a generic source
 fixture through C, Core Wasm and AOT with the bundled compiler tools and host
-Node/Python runtimes. This also checks cache reuse and verifies that the
-installation remains unchanged. A target is only
+Node/Python runtimes. This also checks cache reuse across separate launcher
+invocations and verifies that the installation remains unchanged. A target is only
 publishable if its own smoke test passes.
 
 Tag pushes build and validate every platform before publishing. To publish an

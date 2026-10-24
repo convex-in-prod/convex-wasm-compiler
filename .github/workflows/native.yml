@@ -116,3 +116,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 installation verification failed' }
           & './relocated toolchain/convex-wasm.ps1' -Distribution Ubuntu-24.04 smoke --cache-root /root/.cache/convex-wasm-smoke
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 source-to-AOT smoke failed' }
+          & './relocated toolchain/convex-wasm.ps1' -Distribution Ubuntu-24.04 smoke --cache-root /root/.cache/convex-wasm-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 repeated source-to-AOT smoke failed' }

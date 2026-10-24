@@ -58,7 +58,12 @@ export async function smokeToolchainRelease(archive) {
     for (const name of ["generatedLinkInput", "runtimeObject", "coreWasm", "aot"]) {
       if (smoke[name][1] !== "hit") throw new Error(`Relocated toolchain did not reuse ${name}`);
     }
-    return { ...verified, smoke };
+    // The in-process probe cannot catch setup failures on the next CLI invocation.
+    const repeated = JSON.parse(await run(executable, ["smoke", "--cache-root", join(root, "cache")]));
+    for (const name of ["generatedLinkInput", "runtimeObject", "coreWasm", "aot"]) {
+      if (!repeated[name].every(status => status === "hit")) throw new Error(`Repeated toolchain invocation did not reuse ${name}`);
+    }
+    return { ...verified, smoke, repeated };
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

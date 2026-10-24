@@ -135,21 +135,25 @@ export async function packagedGate(gateRoot) {
 }
 
 export async function toolchainEnvironment(root, manifest, cacheRoot) {
-  const parent = join(cacheRoot, "toolchains", manifest.packageId);
+  const toolchains = join(cacheRoot, "toolchains");
+  const parent = join(toolchains, manifest.packageId);
   const cache = join(parent, "emscripten");
-  await ensureCreatedPrivateDirectoryPath(parent);
-  await requirePrivateCacheDirectory(cacheRoot, parent);
+  // Emscripten clears everything inside EM_CACHE when its sanity check changes.
+  // Publish the seed receipt beside that directory so a later invocation can reuse it.
+  const receipt = join(parent, ".toolchain-seed");
+  await ensureCreatedPrivateDirectoryPath(toolchains);
+  await requirePrivateCacheDirectory(cacheRoot, toolchains);
   try {
-    await fs.access(join(cache, ".toolchain-seed"));
+    await fs.lstat(parent);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    const stage = await fs.mkdtemp(join(parent, ".emscripten-"));
+    const stage = await fs.mkdtemp(join(toolchains, ".emscripten-"));
     try {
-      await fs.cp(join(root, "gate/emsdk/upstream/emscripten/cache"), stage, { recursive: true });
-      await fs.chmod(stage, 0o700);
+      await fs.cp(join(root, "gate/emsdk/upstream/emscripten/cache"), join(stage, "emscripten"), { recursive: true });
+      await fs.chmod(join(stage, "emscripten"), 0o700);
       await fs.writeFile(join(stage, ".toolchain-seed"), manifest.packageId, { mode: 0o600 });
       try {
-        await fs.rename(stage, cache);
+        await fs.rename(stage, parent);
       } catch (error) {
         if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
       }
@@ -157,8 +161,9 @@ export async function toolchainEnvironment(root, manifest, cacheRoot) {
       await fs.rm(stage, { recursive: true, force: true });
     }
   }
-  await requirePrivateCacheFile(cacheRoot, join(cache, ".toolchain-seed"));
-  if (await fs.readFile(join(cache, ".toolchain-seed"), "utf8") !== manifest.packageId) {
+  await requirePrivateCacheDirectory(cacheRoot, cache);
+  await requirePrivateCacheFile(cacheRoot, receipt);
+  if (await fs.readFile(receipt, "utf8") !== manifest.packageId) {
     throw new Error("Emscripten cache belongs to a different toolchain package");
   }
   // Emscripten generates system libraries on demand. Keep that writable state
