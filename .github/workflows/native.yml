@@ -86,10 +86,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Converting an already-WSL2 distro can return an error. Select WSL2
+          # before installation; the packaged launcher verifies the running kernel.
+          wsl.exe --set-default-version 2
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 default selection failed' }
           wsl.exe --install --distribution Ubuntu-24.04 --no-launch
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 installation failed' }
-          wsl.exe --set-version Ubuntu-24.04 2
-          if ($LASTEXITCODE -ne 0) { throw 'WSL2 conversion failed' }
           # Prepare the consumer prerequisites in this disposable test distro.
           # The release package itself does not install Node, npm or Python.
           $prerequisites = @'

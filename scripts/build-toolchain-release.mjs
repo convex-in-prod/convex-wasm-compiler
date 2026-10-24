@@ -20,7 +20,8 @@ async function downloadPinnedArchive(url, sha256, destination, signal) {
   const handle = await fs.open(destination, "wx", 0o600);
   await handle.close();
   await promisify(execFile)("curl", ["--fail", "--location", "--silent", "--show-error",
-    "--proto", "=https", "--proto-redir", "=https", "--max-time", "600", "--max-filesize", "1073741824",
+    "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "30", "--retry", "3",
+    "--max-time", "600", "--max-filesize", "1073741824",
     "--output", destination, url], {
     signal: signal === undefined ? AbortSignal.timeout(10 * 60_000)
       : AbortSignal.any([signal, AbortSignal.timeout(10 * 60_000)]),
