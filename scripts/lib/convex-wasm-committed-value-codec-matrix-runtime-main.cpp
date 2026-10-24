@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
+#include <memory>
 #include <string>
 
 extern "C" SHUnit *CONVEX_WASM_COMMITTED_VALUE_CODEC_MATRIX_EXPORTED_UNIT(void);
@@ -224,23 +225,24 @@ extern "C" int convex_has_developer_error(void) { return 0; }
 extern "C" void convex_profile_mark(int) {}
 
 extern "C" int convex_wasm_committed_value_codec_matrix_run(void) {
-  SHRuntime *runtime = initialize_runtime();
-  if (runtime == nullptr) return 1;
+  // JSI values and exceptions release handles through the runtime on destruction.
+  // Keep it alive until those objects leave scope, including early failure returns.
+  const std::unique_ptr<SHRuntime, decltype(&_sh_done)> runtime(
+      initialize_runtime(), &_sh_done);
+  if (!runtime) return 1;
   reset_guest_value_state();
   auto &js = *reinterpret_cast<facebook::jsi::Runtime *>(
-      _sh_get_hermes_runtime(runtime));
+      _sh_get_hermes_runtime(runtime.get()));
   try {
     if (!_sh_initialize_units(
-            runtime,
+            runtime.get(),
             1,
             CONVEX_WASM_COMMITTED_VALUE_CODEC_MATRIX_EXPORTED_UNIT)) {
-      _sh_done(runtime);
       return 2;
     }
     auto report = js.global().getProperty(
         js, "__convexWasmCommittedValueCodecMatrixReport");
     if (!report.isObject()) {
-      _sh_done(runtime);
       return 4;
     }
     const std::string output = stringify(js, report);
@@ -260,7 +262,6 @@ extern "C" int convex_wasm_committed_value_codec_matrix_run(void) {
       std::fwrite(output.data(), 1, output.size(), stdout);
       std::fputc('\n', stdout);
       std::fflush(stdout);
-      _sh_done(runtime);
       return 3;
     }
     std::fwrite(output.data(), 1, output.size(), stdout);
@@ -271,14 +272,11 @@ extern "C" int convex_wasm_committed_value_codec_matrix_run(void) {
         stderr,
         "Committed-value codec matrix JSI error: %.2048s\n",
         error.getMessage().c_str());
-    _sh_done(runtime);
     return 5;
   } catch (...) {
     std::fputs("Committed-value codec matrix failed\n", stderr);
-    _sh_done(runtime);
     return 6;
   }
-  _sh_done(runtime);
   return 0;
 }
 

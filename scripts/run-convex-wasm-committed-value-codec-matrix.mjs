@@ -141,7 +141,7 @@ function observeExpectedIntegerRejection(executable, argumentsList, expectedExit
   }
   if (result.status !== expectedExitStatus) {
     throw new Error(
-      `${basename(executable)} did not fail at the guest-value boundary: ${String(result.status)}`
+      `${basename(executable)} did not fail at the guest-value boundary: ${String(result.status ?? result.signal)}: ${result.stderr.toString("utf8").trim()}`
     );
   }
   const report = JSON.parse(result.stdout.toString("utf8"));
