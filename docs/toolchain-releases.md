@@ -111,6 +111,14 @@ Node/Python runtimes. This also checks cache reuse and verifies that the
 installation remains unchanged. A target is only
 publishable if its own smoke test passes.
 
+Tag pushes build and validate every platform before publishing. To publish an
+already successful `Native release binaries` run from `main`, use
+`gh workflow run release.yml -f native_run_id=RUN_ID`. This path requires the
+whole run, including Windows WSL2, to have passed. It packages the JavaScript
+release from that run's source commit and publishes its existing native and
+toolchain artifacts. The version comes from the tested `package.json`; an
+existing version tag must point to the same commit.
+
 ## Building a release locally
 
 Run `npm ci`, build a source gate with `npm run setup:gate`, and create native

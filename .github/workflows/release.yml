@@ -3,22 +3,68 @@ name: Publish native release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: Successful Native release binaries run to publish
+        required: true
+        type: string
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/native.yml
 
   publish:
     name: Publish release assets
     needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     steps:
+      - name: Select validated build
+        id: validated
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$NATIVE_RUN_ID" =~ ^[0-9]+$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" > "$RUNNER_TEMP/native-run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/native-jobs.json"
+            node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const run = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/native-run.json`, 'utf8'));
+          // Publish the exact source and artifacts that passed every platform,
+          // including WSL2. A newer main commit must not change that provenance.
+          if (run.status !== 'completed' || run.conclusion !== 'success' ||
+              run.path !== '.github/workflows/native.yml' || run.event !== 'workflow_dispatch' ||
+              run.head_branch !== 'main' || run.head_repository.full_name !== process.env.GITHUB_REPOSITORY ||
+              !/^[0-9a-f]{40}$/.test(run.head_sha)) {
+            throw new Error('Release requires a successful main-branch native workflow run');
+          }
+          // Older successful runs may predate a required platform check.
+          const jobs = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/native-jobs.json`, 'utf8'));
+          const platforms = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin',
+            'x86_64-apple-darwin', 'Windows x64 WSL2 installation'];
+          if (jobs.total_count !== platforms.length || jobs.jobs.length !== platforms.length ||
+              !platforms.every(name => jobs.jobs.some(job => job.name === name && job.conclusion === 'success'))) {
+            throw new Error('Release requires successful Linux, both macOS, and Windows WSL2 jobs');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `revision=${run.head_sha}\nrun_id=${run.id}\n`);
+          JS
+          else
+            echo "revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ steps.validated.outputs.revision }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
@@ -26,6 +72,24 @@ jobs:
         with:
           pattern: convex-wasm-native-*
           merge-multiple: false
+          run-id: ${{ steps.validated.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Select release tag
+        env:
+          RELEASE_REVISION: ${{ steps.validated.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$GITHUB_REF_NAME" = "$release_tag"
+          fi
+          git ls-remote --tags origin "refs/tags/$release_tag" "refs/tags/$release_tag^{}" > "$RUNNER_TEMP/release-tag"
+          if [ -s "$RUNNER_TEMP/release-tag" ]; then
+            # ls-remote emits an annotated tag's peeled commit after its tag object.
+            test "$(tail -1 "$RUNNER_TEMP/release-tag" | cut -f1)" = "$RELEASE_REVISION"
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
       - name: Prepare release assets
         shell: bash
         run: |
@@ -53,13 +117,13 @@ jobs:
             --assets-root release-assets \
             --output release-assets/native-package-selection.json \
             --repository "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME"
+            --tag "$RELEASE_TAG"
       - name: Package installable JavaScript toolchain
         shell: bash
         run: |
           set -euo pipefail
           package_version=$(node -p "require('./package.json').version")
-          test "$GITHUB_REF_NAME" = "v$package_version"
+          test "$RELEASE_TAG" = "v$package_version"
           cp release-assets/native-package-selection.json scripts/native-package-selection.json
           npm pack --pack-destination release-assets --quiet
           package_filename="convex-wasm-compiler-$package_version.tgz"
@@ -95,4 +159,10 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes release-assets/*
+          RELEASE_REVISION: ${{ steps.validated.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          options=(--target "$RELEASE_REVISION")
+          if [ "$GITHUB_EVENT_NAME" = push ]; then options+=(--verify-tag); fi
+          gh release create "$RELEASE_TAG" "${options[@]}" --generate-notes release-assets/*
