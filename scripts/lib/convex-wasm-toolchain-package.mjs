@@ -163,7 +163,7 @@ export async function toolchainEnvironment(root, manifest, cacheRoot) {
   }
   // Emscripten generates system libraries on demand. Keep that writable state
   // outside the authenticated installation so relocation and reuse stay valid.
-  const python = join(root, "runtime/python/bin/convex-python");
+  const python = join(root, "runtime/bin/convex-python");
   return {
     EM_CACHE: cache,
     EM_CONFIG: join(root, "gate/emsdk/.emscripten"),

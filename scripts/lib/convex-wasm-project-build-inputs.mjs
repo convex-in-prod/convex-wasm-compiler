@@ -379,11 +379,10 @@ export async function prepareConvexWasmProjectBuildInputs(config, { signal } = {
   const policy = JSON.parse(await fs.readFile(config.gatePolicyPath, "utf8"));
   if (config.toolchainRoot !== undefined) {
     requireKeys(policy.command, ["maxOutputBytes", "phaseTimeoutMs"], ["maxOutputBytes", "phaseTimeoutMs"], "bundled command policy");
-    // The release owns executable selection. Projects still own limits and
-    // diagnostic policy, but cannot mix tools from another installation.
+    // The release owns compiler selection. Node and Python use the caller's
+    // PATH; projects still own limits and diagnostic policy.
     policy.command = { ...policy.command,
-      environment: { HOME: homedir(), PATH: [join(config.toolchainRoot, "runtime/node/bin"),
-        join(config.toolchainRoot, "runtime/python/bin"), "/usr/bin", "/bin"].join(":") },
+      environment: { HOME: homedir(), PATH: requireString(process.env.PATH, "process PATH") },
       timeExecutable: join(config.toolchainRoot, "runtime/bin/time"),
     };
   }

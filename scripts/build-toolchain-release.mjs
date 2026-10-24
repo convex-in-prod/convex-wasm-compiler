@@ -1,19 +1,34 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { setupGate } from "./setup-gate.mjs";
 import { loadAndVerifyCompilerPackage } from "./lib/convex-wasm-compiler-package.mjs";
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
-import { downloadPinnedArchive, installBundledRuntimes } from "./lib/convex-wasm-bundled-runtimes.mjs";
 import { sealToolchainPackage } from "./lib/convex-wasm-toolchain-package.mjs";
 import { verifyHermesSource } from "./lib/convex-wasm-hermes-source.mjs";
 import { describeNativeCommandTermination, runBoundedNativeCommand } from "./lib/bounded-native-command.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+async function downloadPinnedArchive(url, sha256, destination, signal) {
+  const handle = await fs.open(destination, "wx", 0o600);
+  await handle.close();
+  await promisify(execFile)("curl", ["--fail", "--location", "--silent", "--show-error",
+    "--proto", "=https", "--proto-redir", "=https", "--max-time", "600", "--max-filesize", "1073741824",
+    "--output", destination, url], {
+    signal: signal === undefined ? AbortSignal.timeout(10 * 60_000)
+      : AbortSignal.any([signal, AbortSignal.timeout(10 * 60_000)]),
+  });
+  const hash = createHash("sha256");
+  for await (const bytes of createReadStream(destination)) hash.update(bytes);
+  if (hash.digest("hex") !== sha256) throw new Error("GNU time archive differs from its pinned SHA-256");
+}
 
 export async function buildToolchainRelease({ gateRoot, compilerPackage, precompilerPackage, output, cxx, jobs = 2, signal }) {
   const run = async (command, args, options = {}) => {
@@ -43,7 +58,6 @@ export async function buildToolchainRelease({ gateRoot, compilerPackage, precomp
       filter: path => !["__pycache__", ".git"].includes(basename(path)) });
   };
   try {
-    const runtimes = await installBundledRuntimes(root, stage, run, signal);
     for (const path of [
       "build-host/bin/shermes", "build-host/bin/hermesc",
       "build-wasm/lib/libhermesvm_a.a", "build-wasm/jsi/libjsi.a",
@@ -65,13 +79,14 @@ export async function buildToolchainRelease({ gateRoot, compilerPackage, precomp
       "LLVM_ROOT = '$CFGDIR/upstream/bin'",
       "BINARYEN_ROOT = '$CFGDIR/../binaryen-tools'",
       "EMSCRIPTEN_ROOT = '$CFGDIR/upstream/emscripten'",
-      "NODE_JS = '$CFGDIR/../../runtime/node/bin/node'",
+      "NODE_JS = 'node'",
       "",
     ].join("\n"));
     // Avoid Python bytecode writes inside the authenticated installation, including
     // when emcc clears ambient Python environment variables with its -E option.
-    const pythonWrapper = join(root, "runtime/python/bin/convex-python");
-    await fs.writeFile(pythonWrapper, '#!/bin/sh\nexec "$(dirname "$0")/python3" -B -E "$@"\n', { mode: 0o755 });
+    const pythonWrapper = join(root, "runtime/bin/convex-python");
+    await fs.mkdir(dirname(pythonWrapper), { recursive: true });
+    await fs.writeFile(pythonWrapper, '#!/bin/sh\nexec python3 -B -E "$@"\n', { mode: 0o755 });
     const emscriptenConfig = join(root, "gate/emsdk/upstream/emscripten/tools/config.py");
     const originalConfig = await fs.readFile(emscriptenConfig, "utf8");
     const interpreterReset = "os.environ['EMSDK_PYTHON'] = sys.executable";
@@ -96,7 +111,7 @@ export async function buildToolchainRelease({ gateRoot, compilerPackage, precomp
     await copy(join(timeSource, "time"), join(root, "runtime/bin/time"));
     await copy(join(timeSource, "COPYING"), join(root, "licenses/gnu-time.txt"));
     await copy(timeArchive, join(root, "licenses/time-1.9-source.tar.gz"));
-    await fs.writeFile(join(root, "runtime/provenance.json"), `${JSON.stringify({ ...runtimes,
+    await fs.writeFile(join(root, "runtime/provenance.json"), `${JSON.stringify({
       hermes: hermesProvenance,
       time: { version: "1.9", sha256: timeSha256 },
       emscriptenPythonWrapper: { sourceSha256: createHash("sha256").update(originalConfig).digest("hex"),
@@ -129,8 +144,9 @@ export async function buildToolchainRelease({ gateRoot, compilerPackage, precomp
       "--output", join(root, "evidence/request.json")], { env });
     await fs.writeFile(join(root, "convex-wasm"), ["#!/bin/sh", "set -eu",
       'root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)',
-      'export PATH="$root/runtime/node/bin:$root/runtime/python/bin:/usr/bin:/bin"',
-      'exec "$root/runtime/node/bin/node" "$root/lib/compiler/scripts/toolchain.mjs" "$@"', ""].join("\n"), { mode: 0o755 });
+      'node -e \'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("Node.js 24 or later is required"); process.exit(1); }\'',
+      'python3 -B -E -c \'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "Python 3.10 or later is required")\'',
+      'exec node "$root/lib/compiler/scripts/toolchain.mjs" "$@"', ""].join("\n"), { mode: 0o755 });
     await fs.copyFile(join(repositoryRoot, "docs/toolchain-releases.md"), join(root, "README.md"));
     const manifest = await sealToolchainPackage(root, { version: metadata.version, nativePackages });
     const archiveName = `convex-wasm-toolchain-${metadata.version}-${process.platform}-${process.arch}.tar.gz`;

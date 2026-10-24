@@ -34,10 +34,11 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update
-            sudo apt-get install -y cmake ninja-build g++
+            sudo apt-get install -y cmake ninja-build g++ python3
           else
             brew install cmake ninja
           fi
+          python3 -c 'import sys; assert sys.version_info >= (3, 10)'
           npm ci
       - name: Install compiler toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
@@ -89,6 +90,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 installation failed' }
           wsl.exe --set-version Ubuntu-24.04 2
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 conversion failed' }
+          # Prepare the consumer prerequisites in this disposable test distro.
+          # The release package itself does not install Node, npm or Python.
+          $prerequisites = @'
+          set -eu
+          apt-get update
+          apt-get install -y ca-certificates curl python3
+          curl --fail --location --max-time 300 --output /tmp/node.tar.gz https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.gz
+          echo 'eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c  /tmp/node.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1
+          rm /tmp/node.tar.gz
+          '@
+          $prerequisites.Replace("`r", "") | wsl.exe --distribution Ubuntu-24.04 --user root --exec bash -se
+          if ($LASTEXITCODE -ne 0) { throw 'WSL2 prerequisite installation failed' }
           $archive = Get-Item artifact/wsl2/*.zip
           $expected = (Get-Content "$($archive.FullName).sha256").Split(' ')[0]
           if ((Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {

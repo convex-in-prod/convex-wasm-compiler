@@ -535,7 +535,6 @@ async function verifyGate({ cacheRoot, fuelEpochPollInterval, gateRoot, policy, 
   });
   if (bundle !== null) {
     Object.assign(config.command.environment, await toolchainEnvironment(bundle.root, bundle.manifest, cacheRoot));
-    config.command.environment.PATH = `${resolve(bundle.root, "runtime/node/bin")}:${resolve(bundle.root, "runtime/python/bin")}:${config.command.environment.PATH}`;
     config.command.timeExecutable = resolve(bundle.root, "runtime/bin/time");
   }
   validatePrecompilerEngineRequest(

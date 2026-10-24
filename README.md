@@ -192,10 +192,11 @@ limits remain with the caller.
 
 The [bundled toolchain](docs/toolchain-releases.md) is the installation path for
 releases that include `convex-wasm-toolchain-*.tar.gz`. It contains the compiler,
-Static Hermes, runtime archives, Emscripten/LLVM, Binaryen, Node, Python and the
-validation reports. Extract it and run `convex-wasm build --config PROJECT.json`;
-there is no consumer-side gate build. The project still supplies its own SDK,
-source selection, runtime policy and deployment authority.
+Static Hermes, runtime archives, Emscripten/LLVM, Binaryen and the validation
+reports. With Node.js 24+ and Python 3.10+ on PATH, extract it and run
+`convex-wasm build --config PROJECT.json`; there is no consumer-side gate build.
+The project still supplies its own SDK, source selection, runtime policy and
+deployment authority.
 
 The npm/source-build path below remains available for compiler development and
 callers that explicitly manage their own tool inputs.

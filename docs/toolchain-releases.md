@@ -3,10 +3,13 @@
 The toolchain archive contains one `convex-wasm` launcher, the JavaScript
 orchestrator and its locked dependencies, the native compiler and Wasmtime
 precompiler, Static Hermes, Wasm runtime archives and headers, Emscripten/LLVM,
-patched Binaryen, Node, Python and GNU time. Installation does not build Hermes
-or require Rust, CMake, a host C++ compiler, Node or Python on PATH.
+patched Binaryen and GNU time. Installation does not build Hermes or require
+Rust, CMake or a host C++ compiler.
 
-The application still needs its own installed dependencies and Git checkout.
+Install Node.js 24+ and Python 3.10+ on PATH (`node` and `python3`). These general
+purpose runtimes and npm are not bundled. Python runs the Emscripten driver;
+Node runs the JavaScript orchestrator. The application still needs its own
+installed dependencies and Git checkout.
 Deployment authority and backend connection settings remain application inputs.
 The bundle does not install or configure a backend.
 
@@ -63,9 +66,12 @@ glibc at least as recent as the release build host.
 
 Install and initialize WSL2 separately if it is not already available:
 `wsl --install -d Ubuntu-24.04`. The compiler launcher does not change Windows
-features, install a distribution, or request administrator privileges. If the
-PowerShell execution policy blocks the downloaded script, inspect it and use
-the normal local policy for scripts you trust.
+features, install a distribution, or request administrator privileges. Install
+Node.js 24+ and Python 3.10+ inside the selected WSL distribution, with `node` and
+`python3` available on its PATH. Windows installations of these tools do not
+satisfy that requirement. If the PowerShell execution policy blocks the
+downloaded script, inspect it and use the normal local policy for scripts you
+trust.
 
 CLI paths are Linux paths. Keep the project, its installed dependencies and
 private work/cache directories in the Linux filesystem, not `/mnt/c`; the
@@ -100,8 +106,9 @@ drift in the pinned adaptation and records both source and packaged file hashes.
 Release jobs build on the matching Linux x64, macOS ARM64 or macOS Intel runner.
 They generate the codec and request-envelope evidence using those release
 inputs, then extract the archive into a new path and compile a generic source
-fixture through C, Core Wasm and AOT with bundled tools. This also checks cache
-reuse and verifies that the installation remains unchanged. A target is only
+fixture through C, Core Wasm and AOT with the bundled compiler tools and host
+Node/Python runtimes. This also checks cache reuse and verifies that the
+installation remains unchanged. A target is only
 publishable if its own smoke test passes.
 
 ## Building a release locally
@@ -118,7 +125,6 @@ node scripts/build-toolchain-release.mjs \
   --cxx /absolute/path/to/c++ --jobs 2
 ```
 
-The builder downloads checksum-pinned Node and Python distributions and GNU time
-source. Native library dependencies still establish the minimum supported host
-OS; the archive is not a virtual machine. Bundling changes installation, not the
+The builder downloads checksum-pinned GNU time source. Native library
+dependencies still establish the minimum supported host OS; the archive is not a virtual machine. Bundling changes installation, not the
 existing restrictions on supported application code or receiving Wasmtime ABI.

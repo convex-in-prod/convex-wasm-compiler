@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -16,8 +16,12 @@ export async function smokeToolchainRelease(archive) {
     throw new Error("Toolchain archive checksum differs");
   }
   const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "convex-wasm-relocation-")));
+  const python = (await exec("python3", ["-B", "-E", "-c", "import os, sys; print(os.path.realpath(sys.executable))"], {
+    signal: AbortSignal.timeout(30_000),
+  })).stdout.trim();
+  const runtimePath = [dirname(process.execPath), dirname(python), "/usr/bin", "/bin"].join(":");
   const run = async (command, args) => (await exec(command, args, { cwd: root,
-    env: { HOME: root, PATH: "/usr/bin:/bin", TMPDIR: root },
+    env: { HOME: root, PATH: runtimePath, TMPDIR: root },
     signal: AbortSignal.timeout(30 * 60_000), maxBuffer: 16 * 1024 * 1024 })).stdout;
   try {
     await run("tar", ["-xzf", archive, "-C", root]);
@@ -27,7 +31,7 @@ export async function smokeToolchainRelease(archive) {
     const verified = JSON.parse(await run(executable, ["verify"]));
     // Exercise the ordinary packaged-gate configuration and shipped evidence as
     // well as the lower-level compiler probe, with no source/build checkout.
-    await run(join(relocated, "runtime/node/bin/node"), ["--input-type=module", "-e", `
+    await run(process.execPath, ["--input-type=module", "-e", `
       import { promises as fs } from "node:fs";
       import { join } from "node:path";
       import { pathToFileURL } from "node:url";
@@ -41,6 +45,7 @@ export async function smokeToolchainRelease(archive) {
       const manifest = JSON.parse(await fs.readFile(join(installation, "toolchain.json"), "utf8"));
       const policy = JSON.parse(await fs.readFile(join(library, "examples/items/convex-wasm-gate-policy.json"), "utf8"));
       policy.command.environment.HOME = work;
+      policy.command.environment.PATH = process.env.PATH;
       await createStaticHermesGateConfigArtifacts({ gateRoot: join(installation, "gate"), policy,
         cacheRoot: join(work, "cache"), precompilerPackageDirectory: join(installation, manifest.nativePackages.precompiler),
         artifactConfigOutputPath: join(work, "artifact-config.json"), platformLimitsOutputPath: join(work, "limits.json") });
