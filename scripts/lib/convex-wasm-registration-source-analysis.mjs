@@ -167,7 +167,7 @@ export function createConvexWasmRegistrationSourceAnalyzer(ts) {
         }
         continue;
       }
-      if (!ts.isExportDeclaration(statement)) continue;
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
       const target =
         statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)
           ? resolvedImports.get(statement.moduleSpecifier.text)

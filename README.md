@@ -166,9 +166,41 @@ application `repoRoot`, an authenticated `compilerPackage`, optional
 `inventoryOptions.configPath` for additional registration builders, and
 `sourceRoots` for first-party directories outside the configured functions
 directory. The graph passes that functions directory to the native compiler, so
-generated-server registrations are recognized at the configured path. A native
-compiler package built before this source change does not support that graph
-field; use a matching compiler build until a new package is released.
+generated-server registrations are recognized at the configured path. Use the
+native compiler package and JavaScript orchestrator from the same release so
+their graph protocols match.
+
+Ordinary V8 actions remain fresh unless selected through
+`bundler.experimentalContextReuse.actions.entries` in `convex.json`. Selected
+entries use the action-aware graph protocol and must reconcile every action
+registration with source, including named re-exports and export lists that rename
+a directly registered value. Every runtime value export must resolve to a supported
+registration; aliases through another variable, default-export declarations,
+destructured exports, wildcard or namespace re-exports, and unresolved named
+re-exports are unsupported. Keep exported helpers in dependency modules; explicit type-only
+exports do not require registration reconciliation. Duplicate inventory routes are invalid,
+including conflicting database/action classifications of the same export. Older
+native packages reject the action-aware protocol rather than supplying action
+permission.
+
+Action admission checks the complete runtime dependency graph and cannot use the
+database-only unresolved-mutator admission exception. A source-specific
+`unresolved-mutator-application` suppression requires review of invocation-local
+allocation and escape behavior; other retained-state findings still block that
+site. A newly allocated typed array or `DataView` can share retained backing storage;
+review the buffer's ownership as well as the view's lifetime. Awaited values need
+their own ownership review because a fresh thenable can resolve to retained storage.
+Known property writers invalidate member-allocation proofs, including through local
+aliases and direct helper parameters; the containing object can still be local.
+Assignments, destructuring, loop writes, and deletion also invalidate those proofs,
+even when the replacement is newly allocated. Binding a known mutator preserves
+the captured receiver or target's ownership checks, and conditional mutator aliases
+must satisfy every possible invocation convention.
+Target-first mutator bindings without a statically captured target are unsupported.
+Action grouping uses
+the existing equivalent-output mechanism and can be disabled with
+`actions.grouping: false`. Actions remain separate from database
+Wasm compilation selection.
 
 The corresponding self-hosted Convex runtime patch is maintained separately.
 Downstream applications remain responsible for selecting eligible modules,
@@ -560,8 +592,15 @@ without checkout paths, so identical installed inputs retain the same identity
 across checkouts.
 `loadConvexGeneratedApiInventory` now runs the bundled route flattener against
 the application's `convex.json` functions directory. The application supplies
-TypeScript and native TypeScript in its installed package set. An optional
-project-owned flattener config lists additional registration builders, exact
+TypeScript for syntax analysis and `tsrs` for semantic analysis in its installed
+package set (the example pins `tsrs` to `0.18.0-ts7.1.0-dev.20260929`). Compiler
+identity includes the installed tsrs API, platform binaries, and libraries;
+`TSRS_BINARY` overrides are rejected, including when reusing cached results.
+The pinned tsrs release provides Linux x64/arm64 (GNU and musl) and macOS arm64
+binaries. It has no macOS x64 binary, so bundled API generation on Intel macOS
+requires an installed tsrs release with that platform package before the complete
+source-to-artifact path is supported there. Windows uses Linux through WSL2.
+An optional project-owned flattener config lists additional registration builders, exact
 generated-registry exports, additional `sourceRoots`, and `inputFiles` such as
 the application's lockfile or base TypeScript configuration. `patchFiles`
 lists application files that affect source analysis. The functions directory

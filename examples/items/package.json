@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/b84ea0f70be09575fbf4f6136b285d5681387ccf/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/be3d48eee74ed48a533e56e108fff7611e65ef5f/convex.tgz"
   },
   "devDependencies": {
     "esbuild": "0.27.0",
     "typescript": "6.0.3",
-    "typescript-native": "npm:typescript@7.0.2",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "zod": "4.4.3"
   }
 }

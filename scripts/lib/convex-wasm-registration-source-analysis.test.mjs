@@ -63,3 +63,26 @@ test("requires an injected TypeScript runtime", () => {
     /requires a TypeScript runtime/u
   );
 });
+
+test("type-only exports do not acquire runtime authority from another import's edge", () => {
+  const result = analyzeSource(`
+import { queryGeneric as query } from "convex/server";
+const hidden = query({ handler: () => 42 });
+export type { hidden };
+export { type hidden as Hidden };
+export type { queryGeneric as TypeQuery } from "convex/server";
+export type * from "convex/server";
+export type * as server from "convex/server";
+export { queryGeneric as runtimeQuery } from "convex/server";
+`);
+  assert.deepEqual(result.exports, [
+    [
+      "runtimeQuery",
+      {
+        importedName: "queryGeneric",
+        target: "node_modules/convex/dist/esm/server/index.js",
+      },
+    ],
+  ]);
+  assert.deepEqual(result.starExports, []);
+});

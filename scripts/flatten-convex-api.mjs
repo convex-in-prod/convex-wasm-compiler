@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -54,6 +55,11 @@ import {
 import { buildConvexWasmProducerIdentity } from "./lib/convex-wasm-producer-identity.mjs";
 
 export async function main(argumentsList = process.argv.slice(2)) {
+if (process.env.TSRS_BINARY !== undefined) {
+  throw new Error(
+    "Convex API generation requires the installed tsrs binary for compiler identity; unset TSRS_BINARY."
+  );
+}
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const sourceChangedExitCode = 75;
 const [mode, ...modeArguments] = argumentsList;
@@ -1739,12 +1745,6 @@ function publishSharedInventoryCache(output, metadata) {
 if (await useFastReuseIfPresent()) {
   process.exit(0);
 }
-if (await useSharedCacheIfPresent()) {
-  process.exit(0);
-}
-if (await useFastReuseIfPresent()) {
-  process.exit(0);
-}
 const {
   API: NativeTypeScriptAPI,
   ModifierFlags: NativeModifierFlags,
@@ -1752,7 +1752,8 @@ const {
   SignatureKind: NativeSignatureKind,
   SymbolFlags: NativeSymbolFlags,
   TypeFlags: NativeTypeFlags,
-} = await import(projectRequire.resolve("typescript-native/unstable/sync"));
+} = await import(projectRequire.resolve("tsrs/unstable/sync"));
+const { serverFS } = await import(projectRequire.resolve("tsrs/unstable/fs"));
 if (convexTypeScriptInputPaths.includes(componentConfigPath)) {
   const retainedComponentConfigSource = authenticatedRepositorySource(componentConfigPath);
   if (retainedComponentConfigSource === undefined) {
@@ -1975,23 +1976,34 @@ const nativeApi = new NativeTypeScriptAPI({
   collectTiming: profileGeneration,
   cwd: rootDir,
   fs: {
+    fileExists: serverFS.useOS,
+    directoryExists: serverFS.useOS,
+    getAccessibleEntries: serverFS.useOS,
+    realpath: serverFS.useOS,
+    stat: serverFS.useOS,
+    writeFile: serverFS.error,
+    removeFile: serverFS.error,
     readFile(fileName) {
       // A full semantic miss must infer from the same authenticated repository bytes captured
-      // above; a transient worktree edit cannot be allowed to reach native TypeScript and then be
+      // above; a transient worktree edit cannot be allowed to reach tsrs and then be
       // hidden by restoring the file before final publication verification.
+      // tsrs treats undefined as missing; installed dependencies explicitly delegate to disk.
       return pathsEqualForHost(resolve(rootDir, fileName), apiPath)
         ? analysisApi
-        : authenticatedRepositorySource(fileName);
+        : (authenticatedRepositorySource(fileName) ?? serverFS.useOS);
     },
   },
 });
-const snapshot = nativeApi.updateSnapshot({ openProject: configPath });
-const project = snapshot.getProject(configPath);
+const snapshot = nativeApi.createSnapshot({ openProjects: [configPath] });
+const project = snapshot.getConfiguredProject(configPath);
 if (project === undefined) {
   nativeApi.close();
   throw new Error(`Native TypeScript did not load ${toPosixPath(relative(rootDir, configPath))}.`);
 }
-const normalizedNodeModulesRoot = normalizePathForHostComparison(resolve(rootDir, "node_modules"));
+const normalizedNodeModulesRoots = [
+  resolve(rootDir, "node_modules"),
+  realpathSync(resolve(rootDir, "node_modules")),
+].map(normalizePathForHostComparison);
 const programSourceFileNames = project.program
   .getSourceFileNames()
   .map((path) => resolve(rootDir, path));
@@ -2000,7 +2012,9 @@ const unexpectedRepositoryProgramPaths = programSourceFileNames
     const normalizedPath = normalizePathForHostComparison(path);
     return (
       !pathsEqualForHost(path, apiPath) &&
-      !normalizedPath.startsWith(`${normalizedNodeModulesRoot}${sep}`) &&
+      !normalizedNodeModulesRoots.some((nodeModulesRoot) =>
+        normalizedPath.startsWith(`${nodeModulesRoot}${sep}`)
+      ) &&
       !declaredRepositoryInputPaths.has(normalizedPath)
     );
   })

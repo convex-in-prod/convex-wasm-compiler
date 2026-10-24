@@ -3508,8 +3508,7 @@ fn summarize_module(
     let context_reuse = context_reuse::summarize_context_module(
         source,
         &ast,
-        &imports,
-        &units,
+        &parsed.program.comments,
         &resolved_binding_facts,
         &exports,
         source_type.is_commonjs(),

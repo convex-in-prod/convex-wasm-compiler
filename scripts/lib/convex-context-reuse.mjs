@@ -1,3 +1,4 @@
+import { contextReuseActionPolicy } from "./convex-context-reuse-action-policy.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -182,7 +183,20 @@ function readEntryPolicyConfig(repoRoot, functionsDirectory) {
     }
     exclusions[toPosix(relative(repoRoot, absoluteEntry))] = reason;
   }
-  return { defaultEnabled: true, exclusions };
+  const actions = contextReuseActionPolicy(policy.actions);
+  const selectedActionEntries = (actions?.entries ?? []).map((entry) =>
+    toPosix(relative(repoRoot, resolve(functionsDirectory, entry)))
+  );
+  for (const entry of selectedActionEntries) {
+    if (Object.hasOwn(exclusions, entry)) {
+      throw new Error(`Selected action entry is excluded from context reuse: ${entry}`);
+    }
+  }
+  return {
+    defaultEnabled: true,
+    exclusions,
+    ...(selectedActionEntries.length === 0 ? {} : { selectedActionEntries }),
+  };
 }
 
 async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, options = {}) {
@@ -210,7 +224,9 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
         additionalRoots.some((other) => other !== root && other.startsWith(`${root}/`))
     )
   ) {
-    throw new Error("Context-reuse source roots must be unique normalized application directories.");
+    throw new Error(
+      "Context-reuse source roots must be unique normalized application directories."
+    );
   }
   const roots = [functionsRoot, ...additionalRoots].sort();
   const policy = readEntryPolicyConfig(normalizedRoot, functionsDirectory);
@@ -232,9 +248,29 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
   // source-module path for downstream routing, but that field is not part of
   // the authenticated context-reuse input contract.
   const databaseFunctions = generatedInventory.inventory.functions.map(
-    ({ entryPath, exportName, udfKind }) => ({ entryPath, exportName, udfKind })
+    ({ entryPath, exportName, udfKind }) => ({
+      entryPath,
+      exportName,
+      udfKind,
+    })
   );
-  const entryCandidatePaths = [...new Set(databaseFunctions.map((func) => func.entryPath))].sort();
+  const selectedActionEntries = policy.selectedActionEntries ?? [];
+  const actionFunctions = (generatedInventory.inventory.actions ?? [])
+    .filter(({ entryPath }) => selectedActionEntries.includes(entryPath))
+    .map(({ entryPath, exportName, udfKind }) => ({
+      entryPath,
+      exportName,
+      udfKind,
+    }));
+  for (const entry of selectedActionEntries) {
+    if (!actionFunctions.some(({ entryPath }) => entryPath === entry)) {
+      throw new Error(`Selected action entry has no generated action registration: ${entry}`);
+    }
+  }
+  const databaseEntryPaths = new Set(databaseFunctions.map(({ entryPath }) => entryPath));
+  const entryCandidatePaths = [
+    ...new Set([...databaseEntryPaths, ...selectedActionEntries]),
+  ].sort();
   const graphInventory = {
     authority: {
       sourceRoot: functionsRoot,
@@ -272,10 +308,12 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
     repoRoot: normalizedRoot,
   });
   const deploymentGraphBasis = captureConvexWasmContextReuseAnalysisInputGraphBasis(session);
-  const databaseEntryPaths = new Set(databaseFunctions.map(({ entryPath }) => entryPath));
   const expectedContextReuseSelectionPayload = {
     entries: deploymentGraphBasis.bundleEntryPaths
-      .filter((entryPath) => databaseEntryPaths.has(entryPath))
+      .filter(
+        (entryPath) =>
+          databaseEntryPaths.has(entryPath) || selectedActionEntries.includes(entryPath)
+      )
       .map((entryPath) => ({
         enabled: policy.defaultEnabled && !Object.hasOwn(policy.exclusions, entryPath),
         entryPath,
@@ -297,18 +335,19 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
   const { externalDependencies, externalDependencyManifestPaths, externalDependencyResolutions } =
     captureContextReuseExternalDependencyIdentities(normalizedRoot, session.graphTemplate.metafile);
   const graph = {
-    kind: INPUT_KIND,
+    kind: selectedActionEntries.length === 0 ? INPUT_KIND : "convex-context-reuse-action-graph",
     repoRoot: normalizedRoot,
     functionsRoot,
     roots,
     entryCandidates: entryCandidatePaths,
     databaseFunctions,
+    ...(actionFunctions.length === 0 ? {} : { actionFunctions }),
     ...policy,
     virtualInputs: Object.entries(deploymentGraphBasis.inputMaterials)
       .filter(([, material]) => material.virtual === true)
       .map(([path]) => path)
       .sort(),
-    defaultDatabaseEntries: entryCandidatePaths,
+    defaultDatabaseEntries: [...databaseEntryPaths].sort(),
     generatedInventorySnapshot: structuredClone(generatedInventory.inventory.snapshot),
     metafile: session.graphTemplate.metafile,
     registrationAdapter: deploymentGraphBasis.registrationAdapter,
@@ -330,28 +369,25 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
           }),
         }),
   };
-  // The private basis is immutable, but native execution also consumes these top-level graph
-  // fields. Freeze their containers so callers cannot change the protocol input after its basis
-  // was authenticated (the acceptance harness may still attach its own non-authority metadata).
-  for (const field of [
-    "roots",
-    "entryCandidates",
-    "databaseFunctions",
-    "defaultDatabaseEntries",
-    "exclusions",
-    "virtualInputs",
-    "generatedInventorySnapshot",
-    "metafile",
-    "registrationAdapter",
-    "resultCacheInputPaths",
-    "thirdPartyPolicyPath",
-    "externalDependencies",
-    "externalDependencyResolutions",
-    "phaseTimingsUs",
+  // Keep native inputs bound to the immutable identity below. Freezing a container alone
+  // does not prevent replacing it (or downgrading the protocol kind) before serialization.
+  // Additional non-authority metadata can still be attached by the acceptance harness.
+  for (const field of new Set([
+    ...Object.keys(graph),
+    "actionFunctions",
+    "selectedActionEntries",
     "sourceTexts",
-  ]) {
-    freezeGraphBasis(graph[field]);
+  ])) {
+    Object.defineProperty(graph, field, {
+      configurable: false,
+      enumerable: true,
+      value: freezeGraphBasis(graph[field]),
+      writable: false,
+    });
   }
+  // JSON.stringify consults toJSON before reading the protected fields. Reserve that name
+  // so metadata or a replacement prototype cannot substitute a different native request.
+  Object.defineProperty(graph, "toJSON", { value: undefined });
   // This private projection is deliberately non-enumerable: the complete graph identity belongs
   // to the JavaScript deployment wrapper, not the native context-reuse input protocol. Keeping it
   // out of JSON also prevents wrapper-only authority fields from being mistaken for compiler
@@ -362,6 +398,7 @@ async function buildContextReuseGraphAndSession(repoRoot, generatedInventory, op
     value: freezeGraphBasis({
       ...deploymentGraphBasis,
       databaseFunctions,
+      ...(actionFunctions.length === 0 ? {} : { actionFunctions }),
       // Package names and versions for external runtime imports are not encoded in the esbuild
       // metafile. Keep them in the wrapper-owned basis so a package-manifest/version change cannot
       // leave the same analysis-input digest attached to a different diagnostic identity.
@@ -805,7 +842,10 @@ export function createConvexContextReuseCohortAnalysisIdentity({
       "Convex context-reuse cohort third-party material fingerprints"
     ),
   };
-  return freezeGraphBasis({ ...payload, resultSha256: fingerprintJson(payload) });
+  return freezeGraphBasis({
+    ...payload,
+    resultSha256: fingerprintJson(payload),
+  });
 }
 
 function validCompilerCacheIdentity(value) {

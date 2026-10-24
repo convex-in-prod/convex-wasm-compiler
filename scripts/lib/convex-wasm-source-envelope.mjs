@@ -276,16 +276,10 @@ export function selectConvexWasmContextReuseExports({ graphSession, inventory })
   if (!(graphSession?.contextReuseEnabledByEntry instanceof Map)) {
     fail("graph session has no context-reuse selection mapping");
   }
-  // Context-reuse analyzes database UDF entries only. The isolate graph can still carry
-  // action entries in its policy/topology, so do not include an enabled action-only entry when
-  // authenticating the analyzer identity (the cached-session path applies the same narrowing).
-  const databaseEntries = new Set(
-    inventory.functions.map((route, index) =>
-      requireString(route.entryPath, `inventory route ${index} entry path`)
-    )
-  );
+  // Analysis authority covers selected actions too. Only route selection below is restricted
+  // to database functions; narrowing the identity would reject an action-aware deployment.
   const enabledEntries = [...graphSession.contextReuseEnabledByEntry]
-    .filter(([entryPath, enabled]) => enabled && databaseEntries.has(entryPath))
+    .filter(([, enabled]) => enabled)
     .map(([entryPath]) => entryPath)
     .sort(compareStrings);
   authenticateConvexContextReuseResultIdentity(graphSession.contextReuseAnalysisIdentity, {
@@ -521,15 +515,9 @@ export function createConvexWasmSourceEnvelope({ graphSession, inventory, select
   if (!Array.isArray(inventory?.functions) || inventory.functions.length === 0) {
     fail("inventory must contain query or mutation routes");
   }
-  // Context-reuse authenticates database UDF entries only. Action entries may still be
-  // present in the graph policy map, but they are outside the analyzer result's entry identity.
-  const databaseEntries = new Set(
-    inventory.functions.map((route, index) =>
-      requireString(route.entryPath, `inventory route ${index} entry path`)
-    )
-  );
+  // Keep the complete analysis identity even though this envelope compiles only database routes.
   const enabledEntries = [...graphSession.contextReuseEnabledByEntry]
-    .filter(([entryPath, enabled]) => enabled && databaseEntries.has(entryPath))
+    .filter(([, enabled]) => enabled)
     .map(([entryPath]) => entryPath)
     .sort(compareStrings);
   const contextReuseAnalysis = authenticateConvexContextReuseResultIdentity(
@@ -778,13 +766,12 @@ export function verifyCurrentConvexWasmSourceEnvelope({
   if (!(graphSession.contextReuseEnabledByEntry instanceof Map)) {
     fail("current installed Convex graph has no context-reuse selection mapping");
   }
-  const databaseEntries = new Set(currentRoutes.map(({ entryPath }) => entryPath));
   if (
     canonicalJson(envelope.contextReuseAnalysis) !==
     canonicalJson(
       authenticateConvexContextReuseResultIdentity(graphSession.contextReuseAnalysisIdentity, {
         expectedEntries: [...graphSession.contextReuseEnabledByEntry]
-          .filter(([entryPath, enabled]) => enabled && databaseEntries.has(entryPath))
+          .filter(([, enabled]) => enabled)
           .map(([entryPath]) => entryPath)
           .sort(compareStrings),
       })

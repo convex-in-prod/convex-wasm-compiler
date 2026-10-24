@@ -406,7 +406,15 @@ function normalizedExternalDependencies(value) {
 }
 
 function normalizedPolicy(value) {
-  const policy = requireExactKeys(value, ["defaultEnabled", "exclusions"], "context-reuse policy");
+  const policy = requireExactKeys(
+    value,
+    [
+      "defaultEnabled",
+      "exclusions",
+      ...(value?.selectedActionEntries === undefined ? [] : ["selectedActionEntries"]),
+    ],
+    "context-reuse policy"
+  );
   if (typeof policy.defaultEnabled !== "boolean") {
     fail("context-reuse policy defaultEnabled must be boolean");
   }
@@ -423,6 +431,14 @@ function normalizedPolicy(value) {
   return {
     defaultEnabled: policy.defaultEnabled,
     exclusions: normalizedExclusions,
+    ...(policy.selectedActionEntries === undefined
+      ? {}
+      : {
+          selectedActionEntries: normalizedEntryPaths(
+            policy.selectedActionEntries,
+            "selected action entries"
+          ),
+        }),
   };
 }
 
@@ -644,7 +660,9 @@ function normalizePackageReviewMaterials(value) {
   }
   return {
     ...(Object.hasOwn(packageReview, "lock")
-      ? { lock: normalizedPackageReviewFileMaterial(packageReview.lock, "package-lock.json") }
+      ? {
+          lock: normalizedPackageReviewFileMaterial(packageReview.lock, "package-lock.json"),
+        }
       : {}),
     packages,
   };
@@ -661,6 +679,7 @@ function normalizedGraphBasis(graph) {
       "bundlerMaterials",
       "contextReusePolicy",
       "databaseFunctions",
+      ...(source.actionFunctions === undefined ? [] : ["actionFunctions"]),
       "dependencyAdapter",
       "externalDependencies",
       "generatedInventoryInputSha256",
@@ -683,6 +702,11 @@ function normalizedGraphBasis(graph) {
     bundlerMaterials: requireObject(source.bundlerMaterials, "bundler materials"),
     contextReusePolicy: normalizedContextReuseGraphPolicy(source.contextReusePolicy),
     databaseFunctions: normalizedDatabaseFunctions(source.databaseFunctions),
+    ...(source.actionFunctions === undefined
+      ? {}
+      : {
+          actionFunctions: normalizedDatabaseFunctions(source.actionFunctions),
+        }),
     dependencyAdapter: requireObject(source.dependencyAdapter, "dependency adapter"),
     externalDependencies: normalizedExternalDependencies(source.externalDependencies),
     generatedInventoryInputSha256: requireSha256(
@@ -708,6 +732,7 @@ function normalizedGraphPayload(graph) {
     bundlerMaterials: basis.bundlerMaterials,
     contextReusePolicy: basis.contextReusePolicy,
     databaseFunctions: basis.databaseFunctions,
+    ...(basis.actionFunctions === undefined ? {} : { actionFunctions: basis.actionFunctions }),
     dependencyAdapter: basis.dependencyAdapter,
     externalDependencies: basis.externalDependencies,
     generatedInventoryInputSha256: basis.generatedInventoryInputSha256,
@@ -746,7 +771,10 @@ export function createConvexContextReuseAnalysisInput({
   };
   return deepFreeze({
     ...payload,
-    analysisInputSha256: fingerprintJson({ kind: ANALYSIS_INPUT_KIND, ...payload }),
+    analysisInputSha256: fingerprintJson({
+      kind: ANALYSIS_INPUT_KIND,
+      ...payload,
+    }),
   });
 }
 

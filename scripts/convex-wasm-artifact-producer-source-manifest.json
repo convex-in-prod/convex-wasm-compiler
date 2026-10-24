@@ -105,6 +105,7 @@
     "scripts/lib/convex-api-flattener-material.mjs",
     "scripts/lib/convex-api-flattener-reuse.mjs",
     "scripts/lib/convex-authenticated-origin.mjs",
+    "scripts/lib/convex-context-reuse-action-policy.mjs",
     "scripts/lib/convex-context-reuse-analysis-input.mjs",
     "scripts/lib/convex-context-reuse-application-admission.mjs",
     "scripts/lib/convex-context-reuse-cohort-identity.mjs",

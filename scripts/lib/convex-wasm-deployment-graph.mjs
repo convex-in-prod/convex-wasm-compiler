@@ -1,24 +1,58 @@
+import { contextReuseActionPolicy } from "./convex-context-reuse-action-policy.mjs";
 import { createConvexContextReuseAnalysisInputGraphSha256 } from "./convex-context-reuse-analysis-input.mjs";
-import { authenticateConvexContextReuseApplicationAdmission, captureContextReuseExternalDependencyIdentities, loadConvexContextReuseApplicationAdmissionPolicy } from "./convex-context-reuse-application-admission.mjs";
+import {
+  authenticateConvexContextReuseApplicationAdmission,
+  captureContextReuseExternalDependencyIdentities,
+  loadConvexContextReuseApplicationAdmissionPolicy,
+} from "./convex-context-reuse-application-admission.mjs";
 import { authenticateConvexContextReuseResultIdentity } from "./convex-context-reuse-result-identity.mjs";
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { convexWasmGuestPromiseEffectExecutionMode } from "./convex-wasm-compiler-contract.mjs";
-import { hydrateConvexWasmDependencyAdapterMaterial, loadConvexWasmDependencyAdapterMaterial, projectConvexWasmActiveDependencyAdapterIdentity, selectConvexWasmDependencyAdapters } from "./convex-wasm-dependency-adapters.mjs";
+import {
+  hydrateConvexWasmDependencyAdapterMaterial,
+  loadConvexWasmDependencyAdapterMaterial,
+  projectConvexWasmActiveDependencyAdapterIdentity,
+  selectConvexWasmDependencyAdapters,
+} from "./convex-wasm-dependency-adapters.mjs";
 import { convexWasmDeploymentGraphAssumptions } from "./convex-wasm-source-graph.mjs";
 import { resolveConvexWasmApplicationBundlerPackageSet } from "./convex-wasm-application-package-set.mjs";
 import { readConvexWasmGitBlobMaterials } from "./convex-wasm-git-blob-material.mjs";
-import { detachConvexWasmGitSourceSnapshot, validateConvexWasmGitSourceSnapshot, verifyConvexWasmGitSourceSnapshot } from "./convex-wasm-git-source-snapshot.mjs";
+import {
+  detachConvexWasmGitSourceSnapshot,
+  validateConvexWasmGitSourceSnapshot,
+  verifyConvexWasmGitSourceSnapshot,
+} from "./convex-wasm-git-source-snapshot.mjs";
 import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
 import { loadConvexWasmRegistrationAdapterMaterial } from "./convex-wasm-registration-adapters.mjs";
 import { isOrdinaryJsonData } from "./convex-wasm-source-envelope.mjs";
-import { convexWasmSourceGraphSnapshotCachePath, loadConvexWasmSourceGraphSnapshotForLookup, publishConvexWasmSourceGraphSnapshot } from "./convex-wasm-source-graph-snapshot-cache.mjs";
-import { createConvexWasmSourceGraphSnapshot, createConvexWasmSourceGraphSnapshotLookupIdentity } from "./convex-wasm-source-graph-snapshot.mjs";
-import { convexWasmDefaultEffectExecutionMode, normalizeConvexWasmEffectExecutionMode } from "./convex-wasm-source-graph.mjs";
+import {
+  convexWasmSourceGraphSnapshotCachePath,
+  loadConvexWasmSourceGraphSnapshotForLookup,
+  publishConvexWasmSourceGraphSnapshot,
+} from "./convex-wasm-source-graph-snapshot-cache.mjs";
+import {
+  createConvexWasmSourceGraphSnapshot,
+  createConvexWasmSourceGraphSnapshotLookupIdentity,
+} from "./convex-wasm-source-graph-snapshot.mjs";
+import {
+  convexWasmDefaultEffectExecutionMode,
+  normalizeConvexWasmEffectExecutionMode,
+} from "./convex-wasm-source-graph.mjs";
 import { parse as parseBabelAst } from "@babel/parser";
 import { createHash } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import { isProxy } from "node:util/types";
@@ -114,7 +148,10 @@ function createSourceMaterialBuildState() {
   };
 }
 
-function setSourceMaterialGitSnapshot(state, { generatedSourcePrefix, gitSourceSnapshot, repoRoot }) {
+function setSourceMaterialGitSnapshot(
+  state,
+  { generatedSourcePrefix, gitSourceSnapshot, repoRoot }
+) {
   state.currentGitIdentitiesByPath = new Map();
   if (gitSourceSnapshot === undefined && repoRoot === undefined) {
     state.repoRoot = undefined;
@@ -370,7 +407,10 @@ async function loadGraphToolchain(repoRoot) {
     () => packageVersion(convexPackageJson),
     () => packageVersion(esbuildPackageJson),
   ]);
-  if (convexVersion !== packageSet.convex.version || esbuildVersion !== packageSet.esbuild.version) {
+  if (
+    convexVersion !== packageSet.convex.version ||
+    esbuildVersion !== packageSet.esbuild.version
+  ) {
     fail("graph toolchain disagrees with the application package set");
   }
   const esbuild = requireFromConvex("esbuild");
@@ -379,15 +419,19 @@ async function loadGraphToolchain(repoRoot) {
   }
   const bundlerDirectory = resolve(dirname(convexPackageJson), "dist", "esm", "bundler");
   const cliDirectory = resolve(dirname(convexPackageJson), "dist", "esm", "cli", "lib");
-  const bundlerMaterialPaths = await convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory });
+  const bundlerMaterialPaths = await convexBundlerMaterialPaths({
+    bundlerDirectory,
+    cliDirectory,
+  });
   const groupingPath = bundlerMaterialPaths.get("contextReuseGroups.js");
   const [{ serverOnlyPlugin }, { wasmPlugin }, { contextReuseGroups }] =
     await settleParallelVerification([
       () => import(pathToFileURL(join(bundlerDirectory, "serverOnly.js")).href),
       () => import(pathToFileURL(join(bundlerDirectory, "wasm.js")).href),
-      () => groupingPath === undefined
-        ? { contextReuseGroups: undefined }
-        : import(pathToFileURL(groupingPath).href),
+      () =>
+        groupingPath === undefined
+          ? { contextReuseGroups: undefined }
+          : import(pathToFileURL(groupingPath).href),
     ]);
   return {
     bundlerDirectory,
@@ -409,12 +453,14 @@ async function loadGraphToolchain(repoRoot) {
 }
 
 async function convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }) {
-  const materials = new Map(CONVEX_BUNDLER_MATERIALS.map((name) => [
-    name,
-    name.startsWith("cli/")
-      ? join(dirname(cliDirectory), name.slice("cli/".length))
-      : join(bundlerDirectory, name),
-  ]));
+  const materials = new Map(
+    CONVEX_BUNDLER_MATERIALS.map((name) => [
+      name,
+      name.startsWith("cli/")
+        ? join(dirname(cliDirectory), name.slice("cli/".length))
+        : join(bundlerDirectory, name),
+    ])
+  );
   const groupingPath = join(bundlerDirectory, "contextReuseGroups.js");
   try {
     await fs.access(groupingPath);
@@ -428,7 +474,10 @@ async function convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }) {
 }
 
 async function authenticateConvexBundlerMaterials({ bundlerDirectory, cliDirectory }) {
-  const materialPaths = await convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory });
+  const materialPaths = await convexBundlerMaterialPaths({
+    bundlerDirectory,
+    cliDirectory,
+  });
   return Object.fromEntries(
     await settleParallelVerification(
       [...materialPaths].map(([name, materialPath]) => async () => {
@@ -916,7 +965,7 @@ function parsePinnedProjectConfig(source) {
     requireObject(rawContextReuse, "convex.json bundler.experimentalContextReuse");
     if (
       Object.keys(rawContextReuse).some(
-        (key) => !["default", "exclusions", "httpActions"].includes(key)
+        (key) => !["default", "exclusions", "httpActions", "actions"].includes(key)
       )
     ) {
       fail("convex.json bundler.experimentalContextReuse has unexpected fields");
@@ -954,7 +1003,17 @@ function parsePinnedProjectConfig(source) {
         fail(`context-reuse exclusion ${entry} must have a review reason`);
       }
     }
-    experimentalContextReuse = { exclusions, httpActions };
+    const actions = contextReuseActionPolicy(rawContextReuse.actions);
+    for (const entry of actions?.entries ?? []) {
+      if (Object.hasOwn(exclusions, entry)) {
+        fail(`selected action entry is excluded from context reuse: ${entry}`);
+      }
+    }
+    experimentalContextReuse = {
+      exclusions,
+      httpActions,
+      ...(actions === undefined ? {} : { actions }),
+    };
   }
   const rawWasmCompilation = rawBundler?.wasmCompilation;
   let wasmCompilation;
@@ -1009,16 +1068,30 @@ function parsePinnedProjectConfig(source) {
 
 function contextReusePolicyIdentity({
   databaseEntryPaths,
+  actionEntryPaths = [],
   entryPoints,
   functionsDirectory,
   normalizedRoot,
   projectConfig,
 }) {
-  // This selection is the database-UDF analyzer contract. HTTP-action eligibility is reviewed
-  // separately and is authenticated by the exact emitted module bytes in bundleModuleIdentity.
+  // Ordinary action selection participates in analysis authority. HTTP routes
+  // retain their separately reviewed policy in the exact emitted module bytes.
   const configured = projectConfig.bundler.experimentalContextReuse;
   const exclusions = configured?.exclusions ?? {};
-  const databaseEntries = new Set(databaseEntryPaths);
+  const selectedActionEntries = new Set(
+    (configured?.actions?.entries ?? []).map((entry) =>
+      toPosix(relative(normalizedRoot, resolve(functionsDirectory, entry)))
+    )
+  );
+  const isolateEntries = new Set(
+    entryPoints.map((entry) => toPosix(relative(normalizedRoot, entry)))
+  );
+  for (const entry of selectedActionEntries) {
+    if (!actionEntryPaths.includes(entry) || !isolateEntries.has(entry)) {
+      fail(`selected action entry must have an isolate action registration: ${entry}`);
+    }
+  }
+  const selectedEntries = new Set([...databaseEntryPaths, ...selectedActionEntries]);
   const entries = entryPoints
     .map((absolutePath) => {
       const configEntryPath = toPosix(relative(functionsDirectory, absolutePath));
@@ -1027,7 +1100,7 @@ function contextReusePolicyIdentity({
         entryPath: toPosix(relative(normalizedRoot, absolutePath)),
       };
     })
-    .filter(({ entryPath }) => databaseEntries.has(entryPath))
+    .filter(({ entryPath }) => selectedEntries.has(entryPath))
     .sort((left, right) => compareStrings(left.entryPath, right.entryPath));
   const payload = {
     entries,
@@ -1038,8 +1111,12 @@ function contextReusePolicyIdentity({
 
 function contextReuseAnalysisPolicy({ functionsDirectory, normalizedRoot, projectConfig }) {
   const configured = projectConfig.bundler.experimentalContextReuse;
+  const selectedActionEntries = (configured?.actions?.entries ?? [])
+    .map((entry) => toPosix(relative(normalizedRoot, resolve(functionsDirectory, entry))))
+    .sort(compareStrings);
   return {
     defaultEnabled: configured !== undefined,
+    ...(selectedActionEntries.length === 0 ? {} : { selectedActionEntries }),
     exclusions: Object.fromEntries(
       Object.entries(configured?.exclusions ?? {})
         .map(([entryPath, reason]) => [
@@ -1189,11 +1266,12 @@ function applyPinnedDefaultContextReusePolicy(source, policy) {
   if (!policy.enabled) {
     return source;
   }
-  const contextReuseExport = policy.initializationModule !== undefined
-    ? `export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: ${policy.httpActions}, initializationModule: ${JSON.stringify(policy.initializationModule)} };\n`
-    : policy.httpActions
-      ? DEFAULT_DATABASE_AND_HTTP_ACTION_CONTEXT_REUSE_EXPORT
-      : DEFAULT_DATABASE_CONTEXT_REUSE_EXPORT;
+  const contextReuseExport =
+    policy.initializationModule !== undefined || policy.actions === true
+      ? `export const experimental_reuseContext = { queries: true, mutations: true, actions: ${policy.actions === true}, httpActions: ${policy.httpActions}${policy.initializationModule === undefined ? "" : `, initializationModule: ${JSON.stringify(policy.initializationModule)}`} };\n`
+      : policy.httpActions
+        ? DEFAULT_DATABASE_AND_HTTP_ACTION_CONTEXT_REUSE_EXPORT
+        : DEFAULT_DATABASE_CONTEXT_REUSE_EXPORT;
   const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
   if (sourceMapComment === null || sourceMapComment.index === undefined) {
     return `${source.endsWith("\n") ? source : `${source}\n`}${contextReuseExport}`;
@@ -1765,8 +1843,8 @@ function createContextReuseAnalysisInputGraphBasis({
   analysisGraphBasis,
 }) {
   // Keep the complete config material in deployment graph authority, but project it out of the
-  // database-UDF analyzer identity. Database-relevant config is represented by the entry topology
-  // and reason-bearing policy below; retaining raw bytes here would make an HTTP-only policy
+  // context-reuse analyzer identity. Analysis-relevant config is represented by the entry topology
+  // and reason-bearing database/action policy below; retaining raw bytes here would make an HTTP-only policy
   // change rotate every database-UDF analysis result.
   freezeAuthenticatedJsonTree(inputMaterials);
   const analysisInputMaterials = Object.fromEntries(
@@ -1806,12 +1884,29 @@ function contextReuseAnalysisGraphBasisMaterial({
     ) {
       fail(`context-reuse analysis inventory function ${index} is incomplete`);
     }
-    return { entryPath: func.entryPath, exportName: func.exportName, udfKind: func.udfKind };
+    return {
+      entryPath: func.entryPath,
+      exportName: func.exportName,
+      udfKind: func.udfKind,
+    };
   });
+  const policy = contextReuseAnalysisPolicy({
+    functionsDirectory,
+    normalizedRoot,
+    projectConfig,
+  });
+  const actionFunctions = (inventory.actions ?? [])
+    .filter(({ entryPath }) => (policy.selectedActionEntries ?? []).includes(entryPath))
+    .map(({ entryPath, exportName, udfKind }) => ({
+      entryPath,
+      exportName,
+      udfKind,
+    }));
   return {
     databaseFunctions,
+    ...(actionFunctions.length === 0 ? {} : { actionFunctions }),
     generatedInventoryInputSha256: inputSha256,
-    policy: contextReuseAnalysisPolicy({ functionsDirectory, normalizedRoot, projectConfig }),
+    policy,
   };
 }
 
@@ -1827,6 +1922,7 @@ function bindContextReuseAnalysisToGraph({
   const identity = authenticateConvexContextReuseApplicationAdmission(analysis, {
     applicationAdmissionPolicy,
     expectedAnalysisInputGraphSha256: graphSha256,
+    strictEntries: graphBasis.policy.selectedActionEntries ?? [],
     expectedEntries,
   }).identity;
   if (canonicalJson(identity) !== canonicalJson(expectedIdentity)) {
@@ -1915,6 +2011,9 @@ async function bundledModulesFromResult({
           enabled,
           entry: toPosix(relative(functionsDirectory, entryPoint)),
           httpActions: contextReuse.httpActions,
+          actions: (contextReuse.actions?.entries ?? []).includes(
+            toPosix(relative(functionsDirectory, entryPoint))
+          ),
         });
       }
     }
@@ -1923,42 +2022,48 @@ async function bundledModulesFromResult({
     // The SDK helper resolves labels against cwd. Rebase labels only so a graph
     // for another application can use the installed helper without changing cwd.
     const sdkOutputPath = (path) => resolve(relative(repoRoot, path));
-    const { initializers, initializerByOutput } = await contextReuseGroups(
-      { crash: async ({ printedMessage }) => fail(printedMessage) },
-      outputFiles.map((file) => ({ path: sdkOutputPath(file.path), text: file.text })),
-      metafile,
-      new Set(
-        [...contextReuseOutputPolicy]
-          .filter(([, policy]) => policy.enabled)
-          .map(([path]) => sdkOutputPath(path))
-      ),
-      "_deps"
-    );
-    for (const [output, initializationModule] of initializerByOutput) {
-      const outputPath = resolve(repoRoot, relative(process.cwd(), output));
-      contextReuseOutputPolicy.get(outputPath).initializationModule = initializationModule;
-    }
-    for (const module of initializers) {
-      const outputPath = resolve(repoRoot, "out", module.path);
-      sources.push({ ...module, outputPath });
-      sourceMaps.set(
-        `${module.path}.map`,
-        JSON.stringify({ version: 3, sources: [], names: [], mappings: "" })
-      );
-      // Synthetic imports are part of the deployed graph, despite having no
-      // original source membership or esbuild-generated metafile record.
-      const ast = parseBabelAst(module.source, { sourceType: "module" });
-      metafile.outputs[toPosix(relative(repoRoot, outputPath))] = {
-        bytes: Buffer.byteLength(module.source),
-        exports: [],
-        imports: ast.program.body.map((statement) => ({
-          path: posix.normalize(
-            posix.join("out", posix.dirname(module.path), statement.source.value)
-          ),
-          kind: "import-statement",
+    for (const actions of [false, true]) {
+      if (actions && contextReuse.actions?.grouping === false) continue;
+      const { initializers, initializerByOutput } = await contextReuseGroups(
+        { crash: async ({ printedMessage }) => fail(printedMessage) },
+        outputFiles.map((file) => ({
+          path: sdkOutputPath(file.path),
+          text: file.text,
         })),
-        inputs: {},
-      };
+        metafile,
+        new Set(
+          [...contextReuseOutputPolicy]
+            .filter(([, policy]) => policy.enabled && (policy.actions === true) === actions)
+            .map(([path]) => sdkOutputPath(path))
+        ),
+        "_deps"
+      );
+      for (const [output, initializationModule] of initializerByOutput) {
+        const outputPath = resolve(repoRoot, relative(process.cwd(), output));
+        contextReuseOutputPolicy.get(outputPath).initializationModule = initializationModule;
+      }
+      for (const module of initializers) {
+        const outputPath = resolve(repoRoot, "out", module.path);
+        sources.push({ ...module, outputPath });
+        sourceMaps.set(
+          `${module.path}.map`,
+          JSON.stringify({ version: 3, sources: [], names: [], mappings: "" })
+        );
+        // Synthetic imports are part of the deployed graph, despite having no
+        // original source membership or esbuild-generated metafile record.
+        const ast = parseBabelAst(module.source, { sourceType: "module" });
+        metafile.outputs[toPosix(relative(repoRoot, outputPath))] = {
+          bytes: Buffer.byteLength(module.source),
+          exports: [],
+          imports: ast.program.body.map((statement) => ({
+            path: posix.normalize(
+              posix.join("out", posix.dirname(module.path), statement.source.value)
+            ),
+            kind: "import-statement",
+          })),
+          inputs: {},
+        };
+      }
     }
   }
   const modulesByPath = new Map();
@@ -2488,7 +2593,6 @@ async function materializeCachedDeploymentGraphSession({
   gitSourceSnapshot,
   graphMaterialVerificationMemo,
   includeSourceGraphSnapshot,
-  inventory,
   lookupUs,
   materialVerificationConcurrency,
   normalizedRoot,
@@ -2496,6 +2600,7 @@ async function materializeCachedDeploymentGraphSession({
   toolchainInputPaths,
   wasmCompilationPolicy,
 }) {
+  const functionsRelativePath = toPosix(relative(normalizedRoot, functionsDirectory));
   const cached = requireObject(admittedSnapshot.session, "cached source graph session");
   const metafile = freezeAuthenticatedJsonTree(
     requireObject(cached.metafile, "cached source graph metafile")
@@ -2559,13 +2664,10 @@ async function materializeCachedDeploymentGraphSession({
   const contextReusePolicy = freezeAuthenticatedJsonTree(
     admittedSnapshot.identity.contextReusePolicy
   );
-  // The deployment graph covers every isolate bundle entry, so a newly added action-only entry
-  // still invalidates the graph. Context-reuse analysis, however, is a database-UDF contract:
-  // actions are intentionally absent from the generated `functions` inventory and from this
-  // selection identity. Narrow result authentication to actual query/mutation entry paths.
-  const databaseEntryPaths = new Set(inventory.functions.map(({ entryPath }) => entryPath));
+  // The authenticated selection includes action-only entries as well as database entries.
+  // Cache hits must authenticate the same complete result as fresh graph construction.
   const contextReuseEnabledEntries = contextReusePolicy.entries
-    .filter(({ enabled, entryPath }) => enabled && databaseEntryPaths.has(entryPath))
+    .filter(({ enabled }) => enabled)
     .map(({ entryPath }) => entryPath)
     .sort(compareStrings);
   const contextReuseAnalysisIdentity =
@@ -2587,7 +2689,10 @@ async function materializeCachedDeploymentGraphSession({
   const dependencyGraphsByEntry = new Map(
     admittedSnapshot.dependencyGraphs.map((graph) => [
       graph.entryPath,
-      freezeAuthenticatedJsonTree({ inputPaths: [...graph.inputPaths], sha256: graph.sha256 }),
+      freezeAuthenticatedJsonTree({
+        inputPaths: [...graph.inputPaths],
+        sha256: graph.sha256,
+      }),
     ])
   );
   const isolateEntryPaths = lookupIdentity.bundleEntryPaths;
@@ -2890,7 +2995,10 @@ async function materializeCachedDeploymentGraphSession({
       deploymentOutputClosureByEntry: deploymentOutput.closures,
       deploymentOutputMetafileSha256: deploymentOutput.metafileSha256,
       deploymentOutputModulesByPath,
-      phaseTimingsUs: { esbuildGraph: 0, sourceGraphSnapshotCacheLookup: lookupUs },
+      phaseTimingsUs: {
+        esbuildGraph: 0,
+        sourceGraphSnapshotCacheLookup: lookupUs,
+      },
       runtimeModulePathByEntry,
       selectEntryCandidates,
       ...(sourceGraphSnapshot === undefined ? {} : { sourceGraphSnapshot }),
@@ -2907,7 +3015,9 @@ async function materializeCachedDeploymentGraphSession({
       verifyBundleInputMaterials,
       verifyBundleEntryPaths,
       verifyGitSourceSnapshot: async () =>
-        verifyConvexWasmGitSourceSnapshot(gitSourceSnapshot, { repoRoot: normalizedRoot }),
+        verifyConvexWasmGitSourceSnapshot(gitSourceSnapshot, {
+          repoRoot: normalizedRoot,
+        }),
       verifyInputMaterials,
     };
     const authenticatedGraphSession = bindDeploymentGraphSessionMaterialVerificationMemo(
@@ -3006,9 +3116,7 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
     fail("Convex functions directory must stay within the application root");
   }
   const generatedSourcePrefix =
-    functionsRelativePath === ""
-      ? "_generated/"
-      : `${functionsRelativePath}/_generated/`;
+    functionsRelativePath === "" ? "_generated/" : `${functionsRelativePath}/_generated/`;
   const expectedFunctionsDirectory = resolve(
     normalizedRoot,
     inventory.authority?.sourceRoot ?? "convex"
@@ -3041,6 +3149,7 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
   );
   const contextReusePolicy = contextReusePolicyIdentity({
     databaseEntryPaths: inventory.functions.map(({ entryPath }) => entryPath),
+    actionEntryPaths: (inventory.actions ?? []).map(({ entryPath }) => entryPath),
     entryPoints: isolateEntryPoints,
     functionsDirectory,
     normalizedRoot,
@@ -3177,7 +3286,6 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
       gitSourceSnapshot: normalizedGitSourceSnapshot.snapshot,
       graphMaterialVerificationMemo,
       includeSourceGraphSnapshot,
-      inventory,
       lookupUs: sourceGraphSnapshotCacheLookupUs,
       materialVerificationConcurrency,
       normalizedRoot,
@@ -3739,7 +3847,9 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
           ...(normalizedGitSourceSnapshot === undefined ||
           sourceGraphSnapshotCacheDirectory === undefined
             ? {}
-            : { sourceGraphSnapshotCacheLookup: sourceGraphSnapshotCacheLookupUs }),
+            : {
+                sourceGraphSnapshotCacheLookup: sourceGraphSnapshotCacheLookupUs,
+              }),
         },
         dependencyAdapter,
         registrationAdapter,
@@ -3783,7 +3893,9 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
         ...(normalizedGitSourceSnapshot === undefined ||
         sourceGraphSnapshotCacheDirectory === undefined
           ? {}
-          : { sourceGraphSnapshotCacheLookup: sourceGraphSnapshotCacheLookupUs }),
+          : {
+              sourceGraphSnapshotCacheLookup: sourceGraphSnapshotCacheLookupUs,
+            }),
       },
       runtimeModulePathByEntry,
       selectEntryCandidates,
@@ -3829,7 +3941,9 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
       ...(normalizedGitSourceSnapshot === undefined ? {} : { sourceGraphSnapshotSession }),
       ...(retainedGraphContext === undefined
         ? {}
-        : { sourceEnvelopeDerivation: retainedGraphContext.sourceEnvelopeDerivation }),
+        : {
+            sourceEnvelopeDerivation: retainedGraphContext.sourceEnvelopeDerivation,
+          }),
       toolchain,
       toolchainInputPaths,
       verifyBundleInputMaterials,
@@ -4136,11 +4250,12 @@ export function bindConvexWasmContextReuseAnalysisGraphSession({
   ) {
     fail("context-reuse graph binding basis disagrees with the pending graph session");
   }
-  const databaseEntryPaths = new Set(
-    graphBasis.databaseFunctions?.map(({ entryPath }) => entryPath) ?? []
-  );
+  const analyzedEntryPaths = new Set([
+    ...(graphBasis.databaseFunctions?.map(({ entryPath }) => entryPath) ?? []),
+    ...(graphBasis.policy.selectedActionEntries ?? []),
+  ]);
   const expectedEntries = graphSession.contextReusePolicy.entries
-    .filter(({ enabled, entryPath }) => enabled && databaseEntryPaths.has(entryPath))
+    .filter(({ enabled, entryPath }) => enabled && analyzedEntryPaths.has(entryPath))
     .map(({ entryPath }) => entryPath)
     .sort(compareStrings);
   if (
@@ -4154,6 +4269,8 @@ export function bindConvexWasmContextReuseAnalysisGraphSession({
       applicationAdmissionPolicy: bindingAuthority.contextReuseApplicationAdmissionPolicy,
       expectedAnalysisInputGraphSha256:
         createConvexContextReuseAnalysisInputGraphSha256(graphBasis),
+      // Mixed database/action entries also require strict action admission.
+      strictEntries: graphBasis.policy.selectedActionEntries ?? [],
       expectedEntries,
     }
   );

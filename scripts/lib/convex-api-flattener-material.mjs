@@ -202,18 +202,11 @@ function treeMaterialPaths(root, current, paths, activeDirectories = new Set()) 
   }
 }
 
-export function convexApiCompilerMaterialPaths({
-  arch = process.arch,
-  nodeModulesRoot,
-  platform = process.platform,
-}) {
+export function convexApiCompilerMaterialPaths({ nodeModulesRoot }) {
   const root = resolve(nodeModulesRoot);
   const paths = [];
-  for (const packagePath of [
-    "typescript",
-    "typescript-native",
-    `@typescript/typescript-${platform}-${arch}`,
-  ]) {
+  // Include all installed platform binaries and their libraries in compiler identity.
+  for (const packagePath of ["typescript", "tsrs", "@tsrs"]) {
     const packageRoot = join(root, packagePath);
     // The package root itself is not encountered by treeMaterialPaths. Include either its
     // directory state or its symlink/target state before walking descendants.
@@ -225,15 +218,21 @@ export function convexApiCompilerMaterialPaths({
 
 export function convexApiProgramMaterialPaths({ nodeModulesRoot, sourceFileNames }) {
   const root = resolve(nodeModulesRoot);
+  const canonicalRoot = realpathSync(root);
   const paths = [];
   const directoryPaths = new Set();
   const packageJsonPaths = new Set();
   for (const sourceFileName of sourceFileNames) {
-    const sourcePath = resolve(sourceFileName);
-    const materialPath = relative(root, sourcePath);
+    let materialPath = relative(root, resolve(sourceFileName));
+    if (materialPath === ".." || materialPath.startsWith(`..${sep}`) || isAbsolute(materialPath)) {
+      // tsrs can report canonical dependency paths when node_modules is a symlink. Keep
+      // those declarations in the same installed-material identity as lexical paths.
+      materialPath = relative(canonicalRoot, resolve(sourceFileName));
+    }
     if (materialPath === ".." || materialPath.startsWith(`..${sep}`) || isAbsolute(materialPath)) {
       continue;
     }
+    const sourcePath = join(root, materialPath);
     paths.push(toPosix(materialPath));
     let current = dirname(sourcePath);
     while (current !== root && current.startsWith(`${root}${sep}`)) {

@@ -8,9 +8,12 @@ import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { convexWasmGuestPromiseEffectExecutionMode } from "./convex-wasm-compiler-contract.mjs";
 import { authenticateConvexContextReuseResultIdentity } from "./convex-context-reuse-result-identity.mjs";
 import {
+  createConvexWasmSourceEnvelope,
   convexWasmSourceEnvelopeKind,
   publishConvexWasmSourceEnvelopePublication,
+  selectConvexWasmContextReuseExports,
   validateConvexWasmSourceEnvelope,
+  verifyCurrentConvexWasmSourceEnvelope,
 } from "./convex-wasm-source-envelope.mjs";
 
 function syntheticEnvelope() {
@@ -45,6 +48,68 @@ function syntheticEnvelope() {
   };
   return { ...payload, sourceEnvelopeSha256: fingerprintJson(payload) };
 }
+
+test("source envelopes retain action analysis while compiling only database routes", () => {
+  const base = syntheticEnvelope();
+  const action = {
+    entryPath: "functions/action.ts",
+    exportName: "run",
+    modulePath: "functions/action",
+    udfKind: "action",
+    visibility: "internal",
+  };
+  const inventory = {
+    actions: [action],
+    functions: base.routes,
+    ...base.inventoryAuthority,
+  };
+  const graphSession = {
+    ...base.graph,
+    graphSha256: base.graph.sha256,
+    bundleModulesByPath: new Map(base.routes.map((route) => [route.runtimeModulePath, {}])),
+    contextReuseAnalysisIdentity: {
+      ...base.contextReuseAnalysis,
+      entries: [action.entryPath, ...base.contextReuseAnalysis.entries],
+    },
+    contextReuseEnabledByEntry: new Map([
+      [action.entryPath, true],
+      [base.routes[0].entryPath, true],
+    ]),
+    dependencyGraphByEntry: new Map([
+      [base.routes[0].entryPath, { sha256: base.selectedRoutes[0].dependencyGraphSha256 }],
+    ]),
+    runtimeModulePathByEntry: new Map(
+      base.routes.map((route) => [route.entryPath, route.runtimeModulePath])
+    ),
+  };
+  const selectedExports = selectConvexWasmContextReuseExports({ graphSession, inventory });
+  assert.deepEqual(selectedExports, [{ modulePath: "functions/example", exportName: "read" }]);
+  const envelope = createConvexWasmSourceEnvelope({ graphSession, inventory, selectedExports });
+  assert.deepEqual(
+    envelope.contextReuseAnalysis.entries,
+    graphSession.contextReuseAnalysisIdentity.entries
+  );
+  assert.deepEqual(envelope.entryPaths, base.entryPaths);
+  assert.equal(envelope.actions[0].entryPath, action.entryPath);
+  assert.doesNotThrow(() =>
+    verifyCurrentConvexWasmSourceEnvelope({ envelope, graphSession, inventory })
+  );
+  assert.throws(
+    () =>
+      createConvexWasmSourceEnvelope({
+        graphSession,
+        inventory,
+        selectedExports: [{ modulePath: action.modulePath, exportName: action.exportName }],
+      }),
+    /was not found/u
+  );
+  graphSession.contextReuseAnalysisIdentity = base.contextReuseAnalysis;
+  for (const operation of [
+    () => selectConvexWasmContextReuseExports({ graphSession, inventory }),
+    () => createConvexWasmSourceEnvelope({ graphSession, inventory, selectedExports }),
+    () => verifyCurrentConvexWasmSourceEnvelope({ envelope, graphSession, inventory }),
+  ]) assert.throws(operation, /do not match the selected graph/u);
+});
 
 test("authenticates and publishes a synthetic source envelope", async (context) => {
   const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-source-envelope-"));

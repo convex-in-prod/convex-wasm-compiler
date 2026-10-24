@@ -11,17 +11,17 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{Comment, CommentKind};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    EsbuildImport, EsbuildMetafile, ImportBinding, LoadedModule, PhaseMeasurements,
-    RegistrationAdapterMaterial, UnitSummary, elapsed_us, generated_server_udf_kind, hash_bytes,
-    is_resolved_generated_server_module, line_column, load_module,
-    prune_and_log_module_summary_cache, read_bounded_control_file, read_checked_module,
-    validate_registration_adapter_material,
+    EsbuildImport, EsbuildMetafile, LoadedModule, PhaseMeasurements, RegistrationAdapterMaterial,
+    elapsed_us, generated_server_udf_kind, hash_bytes, is_resolved_generated_server_module,
+    line_column, load_module, prune_and_log_module_summary_cache, read_bounded_control_file,
+    read_checked_module, validate_registration_adapter_material,
 };
 
 const INPUT_KIND: &str = "convex-context-reuse-graph";
@@ -175,6 +175,7 @@ pub(crate) struct ContextModuleSummary {
     facts: Vec<ContextFact>,
     suppressions: Vec<SuppressionDeclaration>,
     opaque_exports: Vec<ContextOpaqueExport>,
+    runtime_exports: BTreeMap<String, (u32, u32)>,
     pub(crate) registrations: Vec<ContextRegistration>,
     pub(crate) reexports: Vec<ContextReexport>,
 }
@@ -212,7 +213,12 @@ struct ContextInput {
     // Standalone callers omit this; build callers supply every reviewed runtime input.
     source_texts: Option<BTreeMap<String, String>>,
     entry_candidates: Vec<String>,
-    database_functions: Vec<GeneratedDatabaseFunction>,
+    database_functions: Vec<GeneratedFunction>,
+    // Legacy database-only callers omit action selection entirely.
+    #[serde(default)]
+    action_functions: Vec<GeneratedFunction>,
+    #[serde(default)]
+    selected_action_entries: Vec<String>,
     default_enabled: bool,
     default_database_entries: Vec<String>,
     exclusions: BTreeMap<String, String>,
@@ -226,7 +232,7 @@ struct ContextInput {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct GeneratedDatabaseFunction {
+struct GeneratedFunction {
     entry_path: String,
     export_name: String,
     udf_kind: String,
@@ -660,7 +666,7 @@ struct MarkerExport {
     occurrences: Vec<ContextMarkerOccurrence>,
 }
 
-struct SourceDatabaseFunction {
+struct SourceFunction {
     udf_kind: String,
     start: u32,
     end: u32,
@@ -737,6 +743,8 @@ struct BindingModel {
     // Freshness is monotone over a binding's lifetime. Once an unknown initializer or assignment
     // is observed, a later fresh assignment cannot retroactively authorize an earlier mutation.
     non_fresh_bindings: BTreeSet<usize>,
+    // A property writer can replace a fresh member without replacing its fresh containing object.
+    invalidated_member_bindings: BTreeSet<usize>,
     // Preserve initializer structure for member-path freshness. Binding-wide freshness proves the
     // local holder, but it cannot prove that `holder.value` does not alias retained state.
     value_origins: BTreeMap<usize, Vec<FreshValueOrigin>>,
@@ -2414,10 +2422,10 @@ fn propagate_import_value(
     Ok((changed, helper_escape))
 }
 
-fn collect_import_propagation_nodes<'a>(value: &'a Value, nodes: &mut Vec<&'a Value>) {
+fn collect_runtime_nodes<'a>(value: &'a Value, nodes: &mut Vec<&'a Value>) {
     nodes.push(value);
     for child in ast_runtime_children(value) {
-        collect_import_propagation_nodes(child, nodes);
+        collect_runtime_nodes(child, nodes);
     }
 }
 
@@ -2545,7 +2553,7 @@ fn import_has_unsupported_member_access(
     // Replay the original runtime preorder: earlier nodes can taint bindings used later in the
     // same pass. Only immutable syntax is retained; each pass still recomputes provenance.
     let mut propagation_nodes = Vec::new();
-    collect_import_propagation_nodes(ast, &mut propagation_nodes);
+    collect_runtime_nodes(ast, &mut propagation_nodes);
     // Binding provenance is monotonic. Follow local flow so custom handlers can inspect derived
     // values and generic modes can detect an exact binding that reaches a helper escape.
     loop {
@@ -3037,11 +3045,20 @@ fn collect_pattern_bindings(
     Ok(())
 }
 
-fn pattern_contains_default_or_rest(pattern: &Value) -> bool {
+fn pattern_has_unresolved_value_path(pattern: &Value) -> bool {
     matches!(
         node_kind(pattern),
         Some("AssignmentPattern" | "RestElement")
-    ) || ast_runtime_children(pattern).any(pattern_contains_default_or_rest)
+    ) || (node_kind(pattern) == Some("Property")
+        && (if pattern.get("computed").and_then(Value::as_bool) == Some(true) {
+            pattern.get("key").and_then(literal_string)
+        } else {
+            pattern.get("key").and_then(static_name)
+        })
+        // Freshness paths use dot-separated fields. Dynamic keys and literal keys containing
+        // dots cannot select the static nested path suggested by their source spelling.
+        .is_none_or(|name| name.is_empty() || name.contains('.')))
+        || ast_runtime_children(pattern).any(pattern_has_unresolved_value_path)
 }
 
 fn pattern_suffix_fields(suffix: &str) -> Option<Vec<String>> {
@@ -3723,7 +3740,9 @@ impl BindingModel {
     }
 
     fn new(ast: &Value) -> Result<Self> {
-        Self::new_with_module_this_state(ast, false)
+        let mut model = Self::new_with_module_this_state(ast, false)?;
+        model.collect_fresh_bindings(ast)?;
+        Ok(model)
     }
 
     fn new_with_module_this_state(ast: &Value, module_this_state: bool) -> Result<Self> {
@@ -3754,6 +3773,7 @@ impl BindingModel {
             property_alias_paths: BTreeMap::new(),
             fresh_bindings: BTreeSet::new(),
             non_fresh_bindings: BTreeSet::new(),
+            invalidated_member_bindings: BTreeSet::new(),
             value_origins: BTreeMap::new(),
             direct_call_parameter_origins: BTreeMap::new(),
             reassigned_bindings: BTreeSet::new(),
@@ -3763,11 +3783,62 @@ impl BindingModel {
         // its declaration still resolves the callable that JavaScript invokes.
         model.collect_node(ast, 0, true)?;
         model.collect_assignment_aliases(ast)?;
-        model.collect_fresh_bindings(ast)?;
+        // Callers evaluate freshness after adding any authenticated direct-call origins.
         Ok(model)
     }
 
     fn collect_fresh_bindings(&mut self, value: &Value) -> Result<()> {
+        let member_targets = match node_kind(value) {
+            Some("CallExpression") => property_mutator_targets(value, self),
+            Some(
+                "AssignmentExpression"
+                | "ForOfStatement"
+                | "ForInStatement"
+                | "UpdateExpression"
+                | "UnaryExpression",
+            ) => value
+                .get(
+                    if matches!(
+                        node_kind(value),
+                        Some("UpdateExpression" | "UnaryExpression")
+                    ) {
+                        "argument"
+                    } else {
+                        "left"
+                    },
+                )
+                .filter(|_| {
+                    node_kind(value) != Some("UnaryExpression")
+                        || value.get("operator").and_then(Value::as_str) == Some("delete")
+                })
+                .map(assignment_pattern_targets)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|target| {
+                    matches!(
+                        node_kind(target),
+                        Some("MemberExpression" | "OptionalMemberExpression")
+                    )
+                })
+                .filter_map(|target| target.get("object"))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for target in member_targets {
+            // A fresh replacement can contain retained children. Follow all possible receiver
+            // bindings, including conditional receivers and inline object holders, so neither
+            // assignment syntax nor a property writer can preserve the old member tree.
+            let mut nodes = Vec::new();
+            collect_runtime_nodes(target, &mut nodes);
+            for node in nodes {
+                if let Some(name) = identifier(node)
+                    && let Some(binding_index) = self.binding_at(name, node_span(node)?.0)
+                {
+                    self.invalidated_member_bindings
+                        .extend(self.alias_bindings(binding_index, true));
+                }
+            }
+        }
         if node_kind(value) == Some("VariableDeclarator")
             && let (Some(id), Some(name)) = (value.get("id"), value.get("id").and_then(identifier))
         {
@@ -3849,24 +3920,59 @@ impl BindingModel {
     }
 
     fn invalidate_binding_and_direct_aliases(&mut self, binding_index: usize) {
+        for alias_index in self.alias_bindings(binding_index, false) {
+            self.fresh_bindings.remove(&alias_index);
+            self.non_fresh_bindings.insert(alias_index);
+        }
+    }
+
+    fn alias_bindings(
+        &self,
+        binding_index: usize,
+        include_member_aliases: bool,
+    ) -> BTreeSet<usize> {
         let mut pending = VecDeque::from([binding_index]);
         let mut visited = BTreeSet::new();
         while let Some(binding_index) = pending.pop_front() {
             if !visited.insert(binding_index) {
                 continue;
             }
-            self.fresh_bindings.remove(&binding_index);
-            self.non_fresh_bindings.insert(binding_index);
-
-            // A direct alias denotes the same object, so an unknown member write through either
-            // name invalidates the freshness proof for both. Property aliases are not equivalent
-            // roots and stay directional.
+            if include_member_aliases {
+                // Fresh parameter/member proofs can lead through object literals to caller
+                // allocations. A property replacement invalidates those origin trees too.
+                for origin in self
+                    .value_origins
+                    .get(&binding_index)
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        self.direct_call_parameter_origins
+                            .get(&binding_index)
+                            .into_iter()
+                            .flatten(),
+                    )
+                {
+                    let mut nodes = Vec::new();
+                    collect_runtime_nodes(&origin.value, &mut nodes);
+                    for node in nodes {
+                        if let Some(name) = identifier(node)
+                            && let Ok((position, _)) = node_span(node)
+                            && let Some(origin_index) = self.binding_at(name, position)
+                        {
+                            pending.push_back(origin_index);
+                        }
+                    }
+                }
+            }
+            // Direct aliases denote the same object. Invalidating nested-member origins also
+            // follows containing objects, whose initial member trees can no longer be trusted.
             for alias_index in 0..self.bindings.len() {
                 for (path, position) in &self.bindings[alias_index].alias_paths {
-                    if path.contains('.') {
+                    if !include_member_aliases && path.contains('.') {
                         continue;
                     }
-                    let Some(source_index) = self.binding_at(path, *position) else {
+                    let root = path.split('.').next().expect("alias path has no root");
+                    let Some(source_index) = self.binding_at(root, *position) else {
                         continue;
                     };
                     if alias_index == binding_index {
@@ -3877,6 +3983,7 @@ impl BindingModel {
                 }
             }
         }
+        visited
     }
 
     fn value_is_fresh(&self, value: &Value, active: &mut BTreeSet<usize>) -> bool {
@@ -3919,9 +4026,9 @@ impl BindingModel {
                         .get("right")
                         .is_some_and(|right| self.value_is_fresh(right, active))
             }
-            Some("AwaitExpression") => value
-                .get("argument")
-                .is_some_and(|argument| self.value_is_fresh(argument, active)),
+            // Await assimilates thenables: even a fresh object can resolve to retained storage.
+            // Its operand's allocation does not establish ownership of the awaited result.
+            Some("AwaitExpression") => false,
             _ => false,
         }
     }
@@ -4383,7 +4490,7 @@ impl BindingModel {
     }
 
     fn record_pattern_value_origins(&mut self, pattern: &Value, value: &Value) -> Result<()> {
-        if pattern_contains_default_or_rest(pattern) {
+        if pattern_has_unresolved_value_path(pattern) {
             return Ok(());
         }
         let mut pattern_bindings = Vec::new();
@@ -4471,7 +4578,7 @@ impl BindingModel {
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 for (parameter_index, parameter) in parameters.iter().enumerate() {
-                    if pattern_contains_default_or_rest(parameter)
+                    if pattern_has_unresolved_value_path(parameter)
                         || calls
                             .iter()
                             .any(|call| call.spread || parameter_index >= call.values.len())
@@ -4724,6 +4831,9 @@ impl BindingModel {
             && let (Some(left), Some(right)) = (value.get("left"), value.get("right"))
         {
             let alias_position = node_span(right)?.0;
+            // Borrowed methods such as `[].push` have no named state path. Preserve assignment
+            // origins too, or a later call/apply/bind can lose a known mutator's identity.
+            self.record_pattern_value_origins(left, right)?;
             let alias_paths = possible_alias_paths(right);
             let mut callable_nodes = Vec::new();
             self.collect_callable_result_function_nodes_with_bindings(
@@ -4895,14 +5005,16 @@ impl BindingModel {
                 );
             }
             Some("MemberExpression" | "OptionalMemberExpression") => {
-                let Some(property) = value.get("property").and_then(static_name) else {
+                // A computed identifier names a runtime-selected property, not its spelling.
+                // It cannot prove that the receiver is the fresh member with that name.
+                let Some(property) = static_member_name(value) else {
                     return false;
                 };
                 let Some(object) = value.get("object") else {
                     return false;
                 };
                 let mut nested_fields = Vec::with_capacity(fields.len() + 1);
-                nested_fields.push(property);
+                nested_fields.push(property.to_string());
                 nested_fields.extend_from_slice(fields);
                 return self.value_path_is_known_fresh(
                     object,
@@ -4915,12 +5027,13 @@ impl BindingModel {
                 let Some(properties) = value.get("properties").and_then(Value::as_array) else {
                     return false;
                 };
-                // A spread can overwrite an earlier key or provide an accessor for a missing key.
-                // Keep object-path freshness closed unless every property is explicit.
-                if properties
-                    .iter()
-                    .any(|property| node_kind(property) != Some("Property"))
-                {
+                // Spreads and runtime-selected keys can overwrite an earlier fresh member.
+                // Keep object-path freshness closed unless every property name is explicit.
+                if properties.iter().any(|property| {
+                    node_kind(property) != Some("Property")
+                        || (property.get("computed").and_then(Value::as_bool) == Some(true)
+                            && property.get("key").and_then(literal_string).is_none())
+                }) {
                     return false;
                 }
                 let Some(property) = properties.iter().rev().find(|property| {
@@ -4984,11 +5097,7 @@ impl BindingModel {
                         })
                     });
             }
-            Some("AwaitExpression") => {
-                return value.get("argument").is_some_and(|argument| {
-                    self.value_path_is_known_fresh(argument, fields, active_paths, active_bindings)
-                });
-            }
+            Some("AwaitExpression") => return false,
             _ => {}
         }
         fields.is_empty() && self.value_is_structurally_fresh(value)
@@ -5005,6 +5114,7 @@ impl BindingModel {
         if binding.module_state
             || self.non_fresh_bindings.contains(&binding_index)
             || self.reassigned_bindings.contains(&binding_index)
+            || (!fields.is_empty() && self.invalidated_member_bindings.contains(&binding_index))
         {
             return false;
         }
@@ -5052,7 +5162,10 @@ impl BindingModel {
             return false;
         }
         let binding = &self.bindings[binding_index];
-        let fresh = self.fresh_bindings.contains(&binding_index)
+        // Module allocations survive invocations even when their declaration is const. Local
+        // aliases and helper arguments must not inherit a fresh-storage proof from those roots.
+        let fresh = !binding.module_state
+            && self.fresh_bindings.contains(&binding_index)
             && !self.non_fresh_bindings.contains(&binding_index)
             && binding.alias_paths.iter().all(|(path, position)| {
                 let root = path.split('.').next().unwrap_or(path);
@@ -5089,9 +5202,34 @@ impl BindingModel {
                     && !resolved.module_state
                     && !resolved.possible_paths.is_empty()
                     && resolved.possible_paths.iter().all(|path| {
-                        is_known_fresh_constructor(
-                            path.strip_prefix("globalThis.").unwrap_or(path).to_string(),
-                        )
+                        let name = path.strip_prefix("globalThis.").unwrap_or(path);
+                        if is_known_fresh_constructor(name) {
+                            return true;
+                        }
+                        // A new view can share a retained ArrayBuffer. Only numeric lengths and
+                        // array literals prove independent typed-array storage without dataflow.
+                        matches!(
+                            name,
+                            "Float32Array"
+                                | "Float64Array"
+                                | "Int8Array"
+                                | "Int16Array"
+                                | "Int32Array"
+                                | "Uint8Array"
+                                | "Uint8ClampedArray"
+                                | "Uint16Array"
+                                | "Uint32Array"
+                        ) && value
+                            .get("arguments")
+                            .and_then(Value::as_array)
+                            .is_some_and(|arguments| {
+                                arguments.first().is_none_or(|argument| {
+                                    let argument = unwrap_expression(argument);
+                                    node_kind(argument) == Some("ArrayExpression")
+                                        || (node_kind(argument) == Some("Literal")
+                                            && argument.get("value").is_some_and(Value::is_number))
+                                })
+                            })
                     })
             }
             Some("ConditionalExpression" | "LogicalExpression") => {
@@ -5253,42 +5391,52 @@ impl BindingModel {
                 global_state: false,
             };
         }
-        let mut resolved_aliases = self
-            .property_alias_paths
-            .get(path)
-            .into_iter()
-            .flatten()
-            .filter(|(_, alias_position)| {
-                // Property aliases share a textual path across the module. Only provenance
-                // recorded for this lexical root may affect the resolved global or module value.
-                self.binding_at(root, *alias_position) == Some(binding_index)
-            })
-            .map(|(alias_path, alias_position)| {
-                self.resolve_path(alias_path, *alias_position, active_paths, active_bindings)
-            })
-            .collect::<Vec<_>>();
+        let mut resolved_aliases = Vec::new();
+        // A recorded property alias can be a prefix of the requested path: holder.child.value
+        // must follow holder.child's origin before checking value. Keep a separate active prefix
+        // while doing so, since a self-referential alias can otherwise grow the suffix forever.
+        for prefix_end in
+            std::iter::once(path.len()).chain(path.rmatch_indices('.').map(|(index, _)| index))
+        {
+            let (prefix, remaining) = path.split_at(prefix_end);
+            let Some(aliases) = self.property_alias_paths.get(prefix) else {
+                continue;
+            };
+            let prefix_key = (binding_index, prefix.to_string());
+            if prefix != path && !active_paths.insert(prefix_key.clone()) {
+                continue;
+            }
+            for (alias_path, alias_position) in aliases {
+                // Textual property paths must not cross a shadowed lexical root.
+                if self.binding_at(root, *alias_position) != Some(binding_index) {
+                    continue;
+                }
+                resolved_aliases.push(self.resolve_path(
+                    &format!("{alias_path}{remaining}"),
+                    *alias_position,
+                    active_paths,
+                    active_bindings,
+                ));
+            }
+            if prefix != path {
+                active_paths.remove(&prefix_key);
+            }
+        }
         // Binding aliases may append an existing suffix and revisit the same lexical binding with
         // a longer path forever, as in `current = current.cause`. Exact property aliases above
         // remain path-sensitive because they can reveal a callable or state origin at that path.
         if active_bindings.insert(binding_index) {
             resolved_aliases.extend(binding.alias_paths.iter().map(
                 |(alias_path, alias_position)| {
-                    let mut resolved = self.resolve_path(
-                        alias_path,
-                        *alias_position,
-                        active_paths,
-                        active_bindings,
-                    );
-                    if !suffix.is_empty() {
-                        resolved.path.push('.');
-                        resolved.path.push_str(suffix);
-                        resolved.possible_paths = resolved
-                            .possible_paths
-                            .into_iter()
-                            .map(|path| format!("{path}.{suffix}"))
-                            .collect();
-                    }
-                    resolved
+                    // Resolve the complete member path before following the alias. Appending
+                    // the suffix afterwards skips property provenance such as holder.value
+                    // when a local alias of holder reaches a retained collection.
+                    let alias_path = if suffix.is_empty() {
+                        alias_path.clone()
+                    } else {
+                        format!("{alias_path}.{suffix}")
+                    };
+                    self.resolve_path(&alias_path, *alias_position, active_paths, active_bindings)
                 },
             ));
             active_bindings.remove(&binding_index);
@@ -5632,7 +5780,7 @@ pub(crate) fn run_context_reuse(arguments: Vec<String>, started: Instant) -> Res
         .with_context(|| format!("invalid graph JSON {}", graph_path.display()))?;
     drop(graph_bytes);
     ensure!(
-        input.kind == INPUT_KIND,
+        input.kind == INPUT_KIND || input.kind == "convex-context-reuse-action-graph",
         "unsupported context-reuse graph kind {}",
         input.kind
     );
@@ -6907,8 +7055,47 @@ fn select_entries(
     input: &ContextInput,
     modules: &BTreeMap<String, LoadedModule>,
 ) -> Result<(Vec<String>, Vec<PendingDiagnostic>)> {
+    ensure!(
+        (input.selected_action_entries.is_empty() && input.action_functions.is_empty())
+            || input.kind == "convex-context-reuse-action-graph",
+        "action context reuse requires the action-aware graph protocol"
+    );
     let mut pending = generated_source_diagnostics(input, modules)?;
     let mut entries = Vec::new();
+    let action_entries = input
+        .action_functions
+        .iter()
+        .map(|function| &function.entry_path)
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        input
+            .database_functions
+            .iter()
+            .all(|function| matches!(function.udf_kind.as_str(), "query" | "mutation")),
+        "database function inventory contains a non-database registration"
+    );
+    ensure!(
+        input
+            .action_functions
+            .iter()
+            .all(|function| function.udf_kind == "action"),
+        "action function inventory contains a non-action registration"
+    );
+    ensure!(
+        input.default_enabled || input.selected_action_entries.is_empty(),
+        "action selection requires the centralized context-reuse policy"
+    );
+    for entry in &input.selected_action_entries {
+        ensure!(
+            input.entry_candidates.contains(entry) && action_entries.contains(entry),
+            "selected action entry {entry} has no generated action registration"
+        );
+        ensure!(
+            !input.exclusions.contains_key(entry),
+            "selected action entry {entry} is excluded from context reuse"
+        );
+        entries.push(entry.clone());
+    }
     let marker_exports = discover_marker_exports(input, modules)?;
     if input.default_enabled {
         let database_entries = input
@@ -6990,20 +7177,53 @@ fn generated_source_diagnostics(
     input: &ContextInput,
     modules: &BTreeMap<String, LoadedModule>,
 ) -> Result<Vec<PendingDiagnostic>> {
-    let mut source_functions = BTreeMap::<(String, String), SourceDatabaseFunction>::new();
+    let mut source_functions = BTreeMap::<(String, String), SourceFunction>::new();
     let mut opaque_source_exports = BTreeSet::<(String, String)>::new();
+    let mut pending = Vec::new();
     for entry in &input.entry_candidates {
         let summary = &modules
             .get(entry)
             .context("entry candidate was not summarized")?
             .summary
             .context_reuse;
-        opaque_source_exports.extend(
-            summary
-                .opaque_exports
-                .iter()
-                .map(|export| (entry.clone(), export.export_name.clone())),
-        );
+        if input.selected_action_entries.contains(entry) {
+            // The database inventory can classify destructured exports through generated types.
+            // Action permission requires source reconciliation, including exports omitted from
+            // that inventory: an opaque export could register another action in this context.
+            for reference in &summary.references {
+                if reference.kind == "reexport"
+                    && !reference.type_only
+                    && !summary.reexports.iter().any(|export| {
+                        export.start == reference.start && export.end == reference.end
+                    })
+                {
+                    pending.push(source_mismatch_diagnostic(
+                        entry,
+                        reference.start,
+                        reference.end,
+                        "Selected action entries require named registration re-exports; wildcard or namespace re-exports cannot establish a complete action inventory.".to_string(),
+                    ));
+                }
+            }
+            for export in &summary.opaque_exports {
+                pending.push(source_mismatch_diagnostic(
+                    entry,
+                    export.start,
+                    export.end,
+                    format!(
+                        "Selected action entry {entry} contains opaque export {}; use a direct or named re-exported registration so every action export can be reconciled.",
+                        export.export_name
+                    ),
+                ));
+            }
+        } else {
+            opaque_source_exports.extend(
+                summary
+                    .opaque_exports
+                    .iter()
+                    .map(|export| (entry.clone(), export.export_name.clone())),
+            );
+        }
         for registration in &summary.registrations {
             if let Some(udf_kind) = inventory_registration_kind(
                 &input.metafile,
@@ -7015,7 +7235,7 @@ fn generated_source_diagnostics(
             )? {
                 source_functions.insert(
                     (entry.clone(), registration.export_name.clone()),
-                    SourceDatabaseFunction {
+                    SourceFunction {
                         udf_kind,
                         start: registration.start,
                         end: registration.end,
@@ -7048,31 +7268,71 @@ fn generated_source_diagnostics(
             )? {
                 source_functions.insert(
                     (entry.clone(), reexport.export_name.clone()),
-                    SourceDatabaseFunction {
+                    SourceFunction {
                         udf_kind,
                         start: reexport.start,
                         end: reexport.end,
                     },
                 );
+            } else if input.selected_action_entries.contains(entry) {
+                pending.push(source_mismatch_diagnostic(
+                    entry,
+                    reexport.start,
+                    reexport.end,
+                    format!(
+                        "Selected action entry {entry} has unresolved registration re-export {}; its execution kind cannot be reconciled with the action inventory.",
+                        reexport.export_name
+                    ),
+                ));
+            }
+        }
+        if input.selected_action_entries.contains(entry) {
+            // A missing inventory record must not hide an action behind an alias, default
+            // export, member call, or destructuring form the registration resolver cannot prove.
+            for (export_name, &(start, end)) in &summary.runtime_exports {
+                if !source_functions.contains_key(&(entry.clone(), export_name.clone()))
+                    && !summary
+                        .opaque_exports
+                        .iter()
+                        .any(|export| export.export_name == *export_name)
+                {
+                    pending.push(source_mismatch_diagnostic(
+                        entry,
+                        start,
+                        end,
+                        format!(
+                            "Selected action entry {entry} has unresolved runtime export {export_name}; every value export must resolve to a supported registration."
+                        ),
+                    ));
+                }
             }
         }
     }
 
-    let generated_functions = input
+    let mut generated_functions = BTreeMap::new();
+    for function in input
         .database_functions
         .iter()
-        .map(|function| {
-            (
-                (function.entry_path.clone(), function.export_name.clone()),
-                function.udf_kind.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut pending = Vec::new();
+        .chain(&input.action_functions)
+    {
+        // A duplicate route must not overwrite an earlier execution-kind claim, including one
+        // from the other inventory in a mixed database/action entry.
+        ensure!(
+            generated_functions
+                .insert(
+                    (function.entry_path.clone(), function.export_name.clone()),
+                    function.udf_kind.clone(),
+                )
+                .is_none(),
+            "generated function inventory repeats {}:{}",
+            function.entry_path,
+            function.export_name
+        );
+    }
     for ((entry, export_name), generated_kind) in &generated_functions {
         ensure!(
             input.entry_candidates.contains(entry),
-            "generated database function {entry}:{export_name} has no entry candidate"
+            "generated function {entry}:{export_name} has no entry candidate"
         );
         match source_functions.get(&(entry.clone(), export_name.clone())) {
             Some(source) if source.udf_kind == *generated_kind => {}
@@ -7085,21 +7345,22 @@ fn generated_source_diagnostics(
                     source.udf_kind
                 ),
             )),
-            None if opaque_source_exports.contains(&(entry.clone(), export_name.clone())) => {}
+            None if generated_kind != "action"
+                && opaque_source_exports.contains(&(entry.clone(), export_name.clone())) => {}
             None => pending.push(policy_diagnostic(
                 entry,
                 "generated-inventory-source-mismatch",
                 format!(
-                    "Generated inventory selects {entry}:{export_name} as {generated_kind}, but source analysis cannot resolve that export to a supported direct or named re-exported database registration."
+                    "Generated inventory selects {entry}:{export_name} as {generated_kind}, but source analysis cannot resolve that export to a supported direct or named re-exported function registration."
                 ),
             )),
         }
     }
     for ((entry, export_name), source) in source_functions {
         if !generated_functions.contains_key(&(entry.clone(), export_name.clone())) {
-            // Actions intentionally stay out of the database-function inventory because they
-            // continue to run in V8. Only an omitted query or mutation is an inventory mismatch.
-            if source.udf_kind == "action" {
+            // Unselected action registrations do not grant context-reuse permission.
+            // Selected action modules must reconcile every action export.
+            if source.udf_kind == "action" && !input.selected_action_entries.contains(&entry) {
                 continue;
             }
             pending.push(source_mismatch_diagnostic(
@@ -7107,7 +7368,7 @@ fn generated_source_diagnostics(
                 source.start,
                 source.end,
                 format!(
-                    "Source analysis resolves {entry}:{export_name} as {}, but generated inventory does not contain that database function.",
+                    "Source analysis resolves {entry}:{export_name} as {}, but generated inventory does not contain that function.",
                     source.udf_kind
                 ),
             ));
@@ -8008,6 +8269,8 @@ mod tests {
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates,
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -8141,6 +8404,8 @@ mod tests {
             source_texts: Some(BTreeMap::from([(entry.clone(), source.to_string())])),
             entry_candidates: vec![entry.clone()],
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -8159,6 +8424,851 @@ mod tests {
             phase_timings_us: BTreeMap::new(),
         };
         (root, input)
+    }
+
+    #[test]
+    fn selected_action_graph_checks_all_exports_and_retained_state() {
+        let (root, mut input) = captured_source_analysis_input();
+        let entry = "convex/entry.ts";
+        let server = "convex/_generated/server.js";
+        let safe_source = r#"import { internalAction } from "./_generated/server";
+export const first = internalAction({ handler: async (_ctx, args) => args.value });
+export const second = internalAction({ handler: async (_ctx, args) => args.other });
+"#;
+        input.kind = "convex-context-reuse-action-graph".to_string();
+        input.default_enabled = true;
+        input.selected_action_entries = vec![entry.to_string()];
+        input.action_functions = ["first", "second"]
+            .into_iter()
+            .map(|name| super::GeneratedFunction {
+                entry_path: entry.to_string(),
+                export_name: name.to_string(),
+                udf_kind: "action".to_string(),
+            })
+            .collect();
+        input.source_texts = Some(BTreeMap::from([
+            (entry.to_string(), safe_source.to_string()),
+            (
+                server.to_string(),
+                "export const internalAction = undefined;".to_string(),
+            ),
+        ]));
+        input
+            .metafile
+            .inputs
+            .get_mut(entry)
+            .unwrap()
+            .imports
+            .push(crate::EsbuildImport {
+                path: server.to_string(),
+                kind: "import-statement".to_string(),
+                original: Some("./_generated/server".to_string()),
+                external: false,
+            });
+        input.metafile.inputs.insert(
+            server.to_string(),
+            EsbuildInput {
+                imports: Vec::new(),
+            },
+        );
+        let analyze = |input: &ContextInput| {
+            analyze_context_reuse(
+                input,
+                &root.0.join("cache"),
+                &mut PhaseMeasurements::default(),
+                Instant::now(),
+            )
+        };
+        let output = analyze(&input).unwrap();
+        assert!(
+            output.safe,
+            "{:?}",
+            serde_json::to_value(output.diagnostics()).unwrap()
+        );
+        assert_eq!(output.entries, vec![entry.to_string()]);
+        assert!(input.database_functions.is_empty());
+        assert!(input.default_database_entries.is_empty());
+
+        input.action_functions.pop();
+        let output = analyze(&input).unwrap();
+        assert!(!output.safe);
+        assert!(
+            output
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.rule == "generated-inventory-source-mismatch")
+        );
+        input.action_functions.push(super::GeneratedFunction {
+            entry_path: entry.to_string(),
+            export_name: "second".to_string(),
+            udf_kind: "action".to_string(),
+        });
+        for (export_name, declaration) in [
+            ("hidden", "export const hidden = first;"),
+            ("hidden", "const alias = first; export { alias as hidden };"),
+            (
+                "hidden",
+                "const container = { hidden: first }; export import hidden = container.hidden;",
+            ),
+            ("hidden", "export const [hidden] = [first];"),
+            (
+                "hidden",
+                "export const hidden = ({ register: internalAction }).register({ handler: async () => null });",
+            ),
+            (
+                "hidden",
+                "const register = internalAction; export const hidden = register({ handler: async () => null });",
+            ),
+            (
+                "default",
+                "export default internalAction({ handler: async () => null });",
+            ),
+            ("default", "export default first;"),
+        ] {
+            for include_inventory in [false, true] {
+                input
+                    .source_texts
+                    .as_mut()
+                    .unwrap()
+                    .insert(entry.to_string(), format!("{safe_source}\n{declaration}"));
+                if include_inventory {
+                    input.action_functions.push(super::GeneratedFunction {
+                        entry_path: entry.to_string(),
+                        export_name: export_name.to_string(),
+                        udf_kind: "action".to_string(),
+                    });
+                }
+                let output = analyze(&input).unwrap();
+                assert!(
+                    !output.safe,
+                    "{declaration}; inventoried={include_inventory}"
+                );
+                assert!(
+                    output.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.rule == "generated-inventory-source-mismatch"
+                            && diagnostic.message.contains("unresolved runtime export")
+                    }),
+                    "{declaration}"
+                );
+                if include_inventory {
+                    input.action_functions.pop();
+                }
+            }
+        }
+        for type_exports in [
+            "export interface Input { value: string }\nexport type Output = string;",
+            "export type * from './types';",
+            "export type * as types from './types';",
+            "export type { Input as experimental_reuseContext } from './types';",
+            "const hidden = internalAction({ handler: async () => null }); export type { hidden };",
+            "const hidden = internalAction({ handler: async () => null }); export { type hidden };",
+        ] {
+            input
+                .source_texts
+                .as_mut()
+                .unwrap()
+                .insert(entry.to_string(), format!("{safe_source}\n{type_exports}"));
+            assert!(analyze(&input).unwrap().safe, "{type_exports}");
+        }
+        input.source_texts.as_mut().unwrap().insert(
+            entry.to_string(),
+            safe_source
+                .replace("export const second", "let previous;\nexport const second")
+                .replace("args.other", "(previous = args)"),
+        );
+        let output = analyze(&input).unwrap();
+        assert!(!output.safe);
+        assert!(
+            output
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.rule != "generated-inventory-source-mismatch")
+        );
+
+        input
+            .source_texts
+            .as_mut()
+            .unwrap()
+            .insert(entry.to_string(), format!("\"use node\";\n{safe_source}"));
+        assert!(!analyze(&input).unwrap().safe);
+        input
+            .source_texts
+            .as_mut()
+            .unwrap()
+            .insert(entry.to_string(), safe_source.to_string());
+        for include_inventory in [false, true] {
+            input.source_texts.as_mut().unwrap().insert(
+                entry.to_string(),
+                format!(
+                    "{safe_source}\nexport const {{ hidden }} = {{ hidden: internalAction({{ handler: async () => null }}) }};"
+                ),
+            );
+            if include_inventory {
+                input.action_functions.push(super::GeneratedFunction {
+                    entry_path: entry.to_string(),
+                    export_name: "hidden".to_string(),
+                    udf_kind: "action".to_string(),
+                });
+            }
+            let output = analyze(&input).unwrap();
+            assert!(!output.safe);
+            assert!(output.diagnostics().iter().any(|diagnostic| {
+                diagnostic.rule == "generated-inventory-source-mismatch"
+                    && diagnostic.message.contains("opaque export hidden")
+            }));
+        }
+        input.action_functions.pop();
+        let target = "convex/other.ts";
+        input.source_texts.as_mut().unwrap().insert(
+            target.to_string(),
+            "import { internalAction } from './_generated/server';\nexport const hidden = internalAction({ handler: async () => null });".to_string(),
+        );
+        input.metafile.inputs.insert(
+            target.to_string(),
+            EsbuildInput {
+                imports: vec![crate::EsbuildImport {
+                    path: server.to_string(),
+                    kind: "import-statement".to_string(),
+                    original: Some("./_generated/server".to_string()),
+                    external: false,
+                }],
+            },
+        );
+        input
+            .metafile
+            .inputs
+            .get_mut(entry)
+            .unwrap()
+            .imports
+            .push(crate::EsbuildImport {
+                path: target.to_string(),
+                kind: "import-statement".to_string(),
+                original: Some("./other".to_string()),
+                external: false,
+            });
+        input.source_texts.as_mut().unwrap().insert(
+            entry.to_string(),
+            format!("{safe_source}\nexport * from './other';"),
+        );
+        let output = analyze(&input).unwrap();
+        assert!(!output.safe);
+        assert!(output.diagnostics().iter().any(|diagnostic| {
+            diagnostic.rule == "generated-inventory-source-mismatch"
+                && diagnostic.message.contains("wildcard or namespace")
+        }));
+        input.source_texts.as_mut().unwrap().insert(
+            entry.to_string(),
+            format!("{safe_source}\nexport {{ hidden }} from './other';"),
+        );
+        input.source_texts.as_mut().unwrap().insert(
+            target.to_string(),
+            "import { internalAction } from './_generated/server';\nexport const { hidden } = { hidden: internalAction({ handler: async () => null }) };".to_string(),
+        );
+        let output = analyze(&input).unwrap();
+        assert!(!output.safe);
+        assert!(output.diagnostics().iter().any(|diagnostic| {
+            diagnostic.rule == "generated-inventory-source-mismatch"
+                && diagnostic
+                    .message
+                    .contains("unresolved registration re-export hidden")
+        }));
+        input.metafile.inputs.get_mut(entry).unwrap().imports.pop();
+        input.metafile.inputs.remove(target);
+        input.source_texts.as_mut().unwrap().remove(target);
+        input
+            .source_texts
+            .as_mut()
+            .unwrap()
+            .insert(entry.to_string(), safe_source.to_string());
+        input.database_functions.push(super::GeneratedFunction {
+            entry_path: entry.to_string(),
+            export_name: "first".to_string(),
+            udf_kind: "query".to_string(),
+        });
+        assert!(
+            analyze(&input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("inventory repeats")
+        );
+        input.database_functions.clear();
+        input
+            .action_functions
+            .push(input.action_functions[0].clone());
+        assert!(
+            analyze(&input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("inventory repeats")
+        );
+        input.action_functions.pop();
+
+        input.kind = INPUT_KIND.to_string();
+        assert!(
+            analyze(&input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("action-aware graph protocol")
+        );
+        input.selected_action_entries.clear();
+        assert!(
+            analyze(&input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("action-aware graph protocol")
+        );
+        input.selected_action_entries.push(entry.to_string());
+        input.kind = "convex-context-reuse-action-graph".to_string();
+        input.action_functions[0].udf_kind = "query".to_string();
+        assert!(
+            analyze(&input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("non-action registration")
+        );
+        input.action_functions[0].udf_kind = "action".to_string();
+        input.selected_action_entries.clear();
+        input.action_functions.clear();
+        assert!(analyze(&input).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn reviewed_mutator_suppressions_are_site_specific_and_preserve_retention_findings() {
+        let (root, mut input) = captured_source_analysis_input();
+        let source = r#"export const experimental_reuseContext = true;
+export function run(input) {
+  const values = input.map(value => value);
+  values.sort();
+  return values;
+}
+"#;
+        let review = "// context-reuse-check-suppress unresolved-mutator-application: The map result is allocated by this invocation and does not escape.\n  ";
+        for (case, source, safe, suppressed, required_rule) in [
+            (
+                "unreviewed",
+                source.to_string(),
+                false,
+                0,
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "reviewed",
+                source.replace("values.sort();", &format!("{review}values.sort();")),
+                true,
+                1,
+                None,
+            ),
+            (
+                "template-text-is-not-a-review",
+                source.replace(
+                    "values.sort();",
+                    &format!("const note = `\n  {review}`; values.sort();"),
+                ),
+                false,
+                0,
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "block-comment-text-is-not-a-review",
+                source.replace(
+                    "values.sort();",
+                    &format!("/*\n  {review}*/ values.sort();"),
+                ),
+                false,
+                0,
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "ambiguous",
+                source.replace(
+                    "values.sort();",
+                    &format!("{review}values.sort(); values.reverse();"),
+                ),
+                false,
+                0,
+                Some("invalid-suppression"),
+            ),
+            (
+                "stale",
+                source.replace("values.sort();", &format!("{review}values.slice();")),
+                false,
+                0,
+                Some("invalid-suppression"),
+            ),
+            (
+                "retained-alias",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = [];\nexport function run",
+                    )
+                    .replace("input.map(value => value)", "retained")
+                    .replace("values.sort();", &format!("{review}values.sort();")),
+                false,
+                0,
+                Some("module-state-write"),
+            ),
+            (
+                "retained-holder-alias",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = [];\nexport function run",
+                    )
+                    .replace("input.map(value => value)", "{ collection: retained }")
+                    .replace(
+                        "values.sort();",
+                        &format!("{review}values.collection.sort();"),
+                    ),
+                false,
+                0,
+                Some("module-state-write"),
+            ),
+            (
+                "retained-holder-through-alias",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = [];\nexport function run",
+                    )
+                    .replace("input.map(value => value)", "{ collection: retained }")
+                    .replace(
+                        "values.sort();",
+                        &format!("const alias = values;\n  {review}alias.collection.sort();"),
+                    ),
+                false,
+                0,
+                Some("module-state-write"),
+            ),
+            (
+                "retained-computed-alias",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = { items: [] };\nexport function run",
+                    )
+                    .replace("input.map(value => value)", "retained[input.key]")
+                    .replace("values.sort();", &format!("{review}values.sort();")),
+                false,
+                0,
+                Some("module-state-write"),
+            ),
+            (
+                "retained-computed-assignment-alias",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = { items: [] };\nexport function run",
+                    )
+                    .replace(
+                        "const values = input.map(value => value);",
+                        "let values = []; values = retained[input.key];",
+                    )
+                    .replace("values.sort();", &format!("{review}values.sort();")),
+                false,
+                0,
+                Some("module-state-write"),
+            ),
+            (
+                "retained",
+                source
+                    .replace(
+                        "export function run",
+                        "const retained = [];\nexport function run",
+                    )
+                    .replace(
+                        "values.sort();",
+                        &format!("{review}values.sort();\n  retained.push(input);"),
+                    ),
+                false,
+                1,
+                Some("module-state-write"),
+            ),
+        ] {
+            input
+                .source_texts
+                .as_mut()
+                .unwrap()
+                .insert("convex/entry.ts".to_string(), source);
+            let output = analyze_context_reuse(
+                &input,
+                &root.0.join("cache"),
+                &mut PhaseMeasurements::default(),
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(
+                output.safe,
+                safe,
+                "{case}: {:?}",
+                serde_json::to_value(output.diagnostics()).unwrap()
+            );
+            assert_eq!(output.suppressed_findings, suppressed, "{case}");
+            if let Some(rule) = required_rule {
+                assert!(
+                    output
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| diagnostic.rule == rule),
+                    "{case}: expected {rule}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn computed_mutator_receivers_do_not_inherit_static_path_freshness() {
+        for (statement, expected_rule) in [
+            (
+                "retained[input.key].push(input);",
+                Some("module-state-write"),
+            ),
+            (
+                "(retained[input.key].push as (value: unknown) => number)(input);",
+                Some("module-state-write"),
+            ),
+            (
+                "const holder = { key: [], other: retained }; holder[input.key].push(input);",
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "const holder = { key: [], other: retained }; const key = input.key; holder[key].push(input);",
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "const field = input.key; const holder = { key: [], [field]: retained }; holder.key.push(input);",
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "const key = input.key; function mutate({ [key]: items }) { items.push(input); } mutate({ key: [], other: retained });",
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "function mutate({ 'a.b': items }) { items.push(input); } mutate({ a: { b: [] }, 'a.b': retained });",
+                Some("unresolved-mutator-application"),
+            ),
+            (
+                "function mutate({ ['items']: items }) { items.push(input); } mutate({ items: [] });",
+                None,
+            ),
+            (
+                "const holder = { key: [] }; holder['key'].push(input);",
+                None,
+            ),
+            (
+                "const holder = { ['key']: [] }; holder.key.push(input);",
+                None,
+            ),
+        ] {
+            let source =
+                format!("const retained = [[]];\nexport function run(input) {{ {statement} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            let blocking = summary
+                .context_reuse
+                .facts
+                .iter()
+                .filter(|fact| fact.severity != "information")
+                .collect::<Vec<_>>();
+            if let Some(rule) = expected_rule {
+                assert!(blocking.iter().any(|fact| fact.rule == rule), "{statement}");
+            } else {
+                assert!(blocking.is_empty(), "{statement}");
+            }
+        }
+    }
+
+    #[test]
+    fn property_mutators_invalidate_fresh_member_origins() {
+        for statement in [
+            "Object.assign(holder, { values: retained }); holder.values.push(input);",
+            "Object.defineProperty(holder, 'values', { value: retained }); holder.values.push(input);",
+            "Reflect.set(holder, 'values', retained); holder.values.push(input);",
+            "holder.__defineGetter__('values', () => retained); holder.values.push(input);",
+            "Object.prototype.__defineGetter__.call(holder, 'values', () => retained); holder.values.push(input);",
+            "const alias = holder; Object.assign(alias, { values: retained }); holder.values.push(input);",
+            "const assign = Object.assign; assign(holder, { values: retained }); holder.values.push(input);",
+            "Object.assign.call(null, holder, { values: retained }); holder.values.push(input);",
+            "Object.assign.apply(null, [holder, { values: retained }]); holder.values.push(input);",
+            "Reflect.apply(Object.assign, null, [holder, { values: retained }]); holder.values.push(input);",
+            "Object.assign(input.flag ? holder : {}, { values: retained }); holder.values.push(input);",
+            "Object.assign((0, holder), { values: retained }); holder.values.push(input);",
+            "Object.assign(({ target: holder }).target, { values: retained }); holder.values.push(input);",
+            "const replace = Object.assign.bind(null, holder); replace({ values: retained }); holder.values.push(input);",
+            "function replace(target) { Object.assign(target, { values: retained }); } replace(holder); holder.values.push(input);",
+            "function replace(write, target) { write(target, { values: retained }); } replace(Object.assign, holder); holder.values.push(input);",
+            "function replace(write, target) { write.call(null, target, { values: retained }); } replace(Object.assign, holder); holder.values.push(input);",
+            "function replace(write, target) { Reflect.apply(write, null, [target, { values: retained }]); } replace(Object.assign, holder); holder.values.push(input);",
+            "function replace({ target }) { Object.assign(target, { values: retained }); } replace({ target: holder }); holder.values.push(input);",
+            "const replace = input.flag ? Object.assign : Object.prototype.__defineGetter__; replace(holder, { values: retained }); holder.values.push(input);",
+            "const replace = input.flag ? Object.assign : Object.prototype.__defineGetter__; replace.call(null, holder, { values: retained }); holder.values.push(input);",
+            "const replace = input.flag ? Object.assign : Object.prototype.__defineGetter__; replace.apply(null, [holder, { values: retained }]); holder.values.push(input);",
+            "const replace = input.flag ? Object.assign : Object.prototype.__defineGetter__; Reflect.apply(replace, null, [holder, { values: retained }]); holder.values.push(input);",
+            "const replace = input.flag ? Object.assign : Object.prototype.__defineGetter__; const bound = replace.bind(null, holder); bound({ values: retained }); holder.values.push(input);",
+            "({ target: holder }).target.__defineGetter__('values', () => retained); holder.values.push(input);",
+            "const define = ({}).__defineGetter__; define.call(holder, 'values', () => retained); holder.values.push(input);",
+            "const define = ({}).__defineGetter__; Reflect.apply(define, holder, ['values', () => retained]); holder.values.push(input);",
+        ] {
+            let source = format!(
+                "const retained = [];\nexport function run(input) {{ const holder = {{ values: [] }}; {statement} }}"
+            );
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary.context_reuse.facts.iter().any(|fact| {
+                    fact.rule == "unresolved-mutator-application"
+                        && source[fact.start as usize..fact.end as usize]
+                            .contains("holder.values.push")
+                }),
+                "{statement}"
+            );
+            assert!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .filter(|fact| { fact.rule == "unresolved-mutator-application" })
+                    .all(|fact| source[fact.start as usize..fact.end as usize]
+                        .contains("holder.values.push")),
+                "fresh holder mutation must remain supported: {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_replacements_invalidate_fresh_nested_origins() {
+        for statement in [
+            "holder.child = { values: retained };",
+            "const alias = holder; alias.child = { values: retained };",
+            "[holder.child] = [{ values: retained }];",
+            "({ child: holder.child } = { child: { values: retained } });",
+            "(input.flag ? holder : {}).child = { values: retained };",
+            "for (holder.child of [{ values: retained }]) {}",
+            "delete holder.child;",
+            "function replace(target) { target.child = { values: retained }; } replace(holder);",
+            "function replace({ target }) { target.child = { values: retained }; } replace({ target: holder });",
+        ] {
+            let source = format!(
+                "const retained = [];\nexport function run(input) {{ const holder = {{ __proto__: {{ child: {{ values: retained }} }}, child: {{ values: [] }} }}; {statement} holder.child.values.push(input); }}"
+            );
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary.context_reuse.facts.iter().any(|fact| {
+                    fact.rule == "unresolved-mutator-application"
+                        && source[fact.start as usize..fact.end as usize]
+                            .contains("holder.child.values.push")
+                }),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutator_aliases_preserve_captured_storage_ownership() {
+        for mutation in [
+            "const append = values.push.bind(values); append(input);",
+            "const append = Array.prototype.push.bind(values); append(input);",
+            "const append = ({ values }).values.push.bind(values); append(input);",
+            "const append = values.push.bind(values, input); append();",
+            "const mutate = input.flag ? Array.prototype.push : Array.prototype.unshift; mutate.call(values, input);",
+            "const mutate = input.flag ? Array.prototype.push : Array.prototype.unshift; Reflect.apply(mutate, values, [input]);",
+            "Reflect.apply(values.push, values, [input]);",
+            "const append = values.push; Reflect.apply(append, values, [input]);",
+            "const local = []; Reflect.apply(local.push, values, [input]);",
+            "[].push.call(values, input);",
+            "[].push.apply(values, [input]);",
+            "Reflect.apply([].push, values, [input]);",
+            "const append = [].push; append.call(values, input);",
+            "const append = [].push; const alias = append; alias.apply(values, [input]);",
+            "const append = [].push; Reflect.apply(append, values, [input]);",
+            "const append = [].push; const bound = append.bind(values); bound(input);",
+            "let append = [].push; const alias = append; append = alias; append.call(values, input);",
+            "let append; append = [].push; append.call(values, input);",
+            "let append; ({ push: append } = []); Reflect.apply(append, values, [input]);",
+            "const { push: append } = []; append.call(values, input);",
+            "const append = input.flag ? [].push : [].unshift; append.call(values, input);",
+            "(input.flag ? [].push : [].unshift).apply(values, [input]);",
+            "function invoke(append) { append.call(values, input); } invoke([].push);",
+            "function invoke(assign) { assign(values, { value: input }); } invoke(Object.assign);",
+            "function invoke(set) { set(values, 'value', input); } invoke(Reflect.set);",
+            "const getCollection = () => []; getCollection().push.call(values, input);",
+            "const getCollection = () => []; getCollection().push.apply(values, [input]);",
+            "const getCollection = () => []; Reflect.apply(getCollection().push, values, [input]);",
+            "((Reflect) => { const append = Reflect.set; append.call(values, input); })(input);",
+            "((Reflect) => { const append = Reflect.set; globalThis.Reflect.apply(append, values, [input]); })(input);",
+            "const mutate = input.flag ? Object.assign : Array.prototype.push; mutate.call(values, {});",
+            "const mutate = input.flag ? Object.assign : Array.prototype.push; Reflect.apply(mutate, values, [{}]);",
+            "const assign = Object.assign.bind(null, values); assign({ value: input });",
+            "const define = Reflect.defineProperty.bind(null, values, 'value'); define({ value: input });",
+            "const set = Reflect.set.bind(null, values, 'value'); set(input);",
+            "const mutate = input.flag ? Object.assign : Array.prototype.push; const bound = mutate.bind(values, {}); bound();",
+        ] {
+            for retained in [false, true] {
+                let allocation = if retained { "retained" } else { "[]" };
+                let source = format!(
+                    "const retained = [];\nexport function run(input) {{ const values = {allocation}; {mutation} }}"
+                );
+                let summary = crate::summarize_module(
+                    "convex/entry.ts",
+                    std::path::Path::new("convex/entry.ts"),
+                    &source,
+                    "test-source-hash",
+                    "test-cache-key",
+                    "test-compiler-fingerprint",
+                    "test-policy-fingerprint",
+                    &mut PhaseMeasurements::default(),
+                )
+                .unwrap();
+                let blocking = summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .filter(|fact| fact.severity != "information")
+                    .collect::<Vec<_>>();
+                if retained {
+                    assert!(
+                        blocking
+                            .iter()
+                            .any(|fact| fact.rule == "module-state-write"),
+                        "{mutation}"
+                    );
+                } else {
+                    assert!(blocking.is_empty(), "{mutation}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mutator_bindings_require_a_captured_target() {
+        for mutation in [
+            "const assign = Object.assign.bind(null); assign(retained, { value: input });",
+            "const set = Reflect.set.bind(null); set(retained, 'value', input);",
+            "const assign = Object.assign.bind(...[null, retained]); assign({ value: input });",
+        ] {
+            let source =
+                format!("const retained = [];\nexport function run(input) {{ {mutation} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary.context_reuse.facts.iter().any(|fact| {
+                    fact.rule == "unresolved-mutator-application" && fact.severity == "unsupported"
+                }),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn awaited_thenables_do_not_prove_fresh_mutator_storage() {
+        for statement in [
+            "const values = await { then(resolve) { resolve(retained); } }; values.push(input);",
+            "(await { then(resolve) { resolve(retained); } }).push(input);",
+            "const holder = { then(resolve) { resolve({ values: retained }); } }; (await holder).values.push(input);",
+            "function append(values) { values.push(input); } append(await { then(resolve) { resolve(retained); } });",
+        ] {
+            let source =
+                format!("const retained = [];\nexport async function run(input) {{ {statement} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary.context_reuse.facts.iter().any(|fact| {
+                    fact.rule == "unresolved-mutator-application" && fact.severity == "unsupported"
+                }),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_views_do_not_prove_independent_mutator_storage() {
+        for (initializer, mutation, unresolved) in [
+            ("new Uint8Array(retained)", "view.fill(input)", true),
+            ("new DataView(retained)", "view.setUint8(0, input)", true),
+            (
+                "new globalThis.Uint16Array(retained)",
+                "view.fill(input)",
+                true,
+            ),
+            ("new Uint8Array(16)", "view.fill(input)", false),
+            ("new Uint8Array([1, 2])", "view.fill(input)", false),
+            ("new Uint8Array()", "view.fill(input)", false),
+        ] {
+            let source = format!(
+                "const retained = new ArrayBuffer(16);\nexport function run(input) {{ const view = {initializer}; {mutation}; }}"
+            );
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| { fact.rule == "unresolved-mutator-application" }),
+                unresolved,
+                "{initializer}"
+            );
+        }
     }
 
     #[test]
@@ -8734,13 +9844,11 @@ mod tests {
         );
         input.default_enabled = true;
         input.default_database_entries = vec!["convex/entry001.ts".to_string()];
-        input
-            .database_functions
-            .push(super::GeneratedDatabaseFunction {
-                entry_path: "convex/entry001.ts".to_string(),
-                export_name: "missingRegistration".to_string(),
-                udf_kind: "query".to_string(),
-            });
+        input.database_functions.push(super::GeneratedFunction {
+            entry_path: "convex/entry001.ts".to_string(),
+            export_name: "missingRegistration".to_string(),
+            udf_kind: "query".to_string(),
+        });
         // Generated inventory and marker-policy diagnostics remain current even on a BFS hit.
         assert_entry_result_parity(&input, &mut retained);
         assert_eq!((retained.hits, retained.misses), (1, 0));
@@ -9536,7 +10644,7 @@ export const escaped = alias;
             .binding_at("safe", source.len() as u32)
             .unwrap()]);
         let mut nodes = Vec::new();
-        super::collect_import_propagation_nodes(&model.ast, &mut nodes);
+        super::collect_runtime_nodes(&model.ast, &mut nodes);
         for escapes in [false, true] {
             let (mut derived, mut exact) = (seed.clone(), seed.clone());
             let (mut recursive_derived, mut recursive_exact) = (seed.clone(), seed.clone());
@@ -10509,6 +11617,106 @@ relationship = globalThis.relationship;
     }
 
     #[test]
+    fn retained_storage_cannot_be_hidden_by_receiver_and_call_forms() {
+        // These expressions denote the same array. Compose receiver and invocation forms
+        // independently so a syntax change cannot turn retained storage into a fresh proof.
+        let receivers = [
+            ("direct", "", "values"),
+            ("typed", "", "(values as number[])"),
+            ("inline-holder", "", "({ values }).values"),
+            ("alias", "const alias = values;", "alias"),
+            ("holder", "const holder = { values };", "holder.values"),
+            (
+                "computed-holder",
+                "const holder = { values }; const key = 'values';",
+                "holder[key]",
+            ),
+        ];
+        let mut checked = 0;
+        let mut failures = Vec::new();
+        for (receiver_name, setup, receiver) in receivers {
+            for call in [
+                "method",
+                "computed-method",
+                "call",
+                "apply",
+                "helper",
+                "bound",
+                "conditional",
+                "reflect-method",
+                "borrowed-inline",
+                "borrowed-alias",
+            ] {
+                let mutation = match call {
+                    "method" => format!("{receiver}.push(input);"),
+                    "computed-method" => format!("{receiver}['push'](input);"),
+                    "call" => format!("Array.prototype.push.call({receiver}, input);"),
+                    "apply" => format!("Reflect.apply(Array.prototype.push, {receiver}, [input]);"),
+                    "helper" => format!(
+                        "function append(target) {{ target.push(input); }} append({receiver});"
+                    ),
+                    "bound" => {
+                        format!("const append = {receiver}.push.bind({receiver}); append(input);")
+                    }
+                    "conditional" => format!(
+                        "const mutate = input.flag ? Array.prototype.push : Array.prototype.unshift; Reflect.apply(mutate, {receiver}, [input]);"
+                    ),
+                    "reflect-method" => {
+                        format!("Reflect.apply({receiver}.push, {receiver}, [input]);")
+                    }
+                    "borrowed-inline" => format!("[].push.call({receiver}, input);"),
+                    "borrowed-alias" => {
+                        format!("const append = [].push; append.call({receiver}, input);")
+                    }
+                    _ => unreachable!(),
+                };
+                for retained in [false, true] {
+                    let allocation = if retained { "retained" } else { "[]" };
+                    let source = format!(
+                        "const retained = [];\nexport function run(input) {{ const values = {allocation}; {setup} {mutation} }}"
+                    );
+                    let summary = crate::summarize_module(
+                        "convex/entry.ts",
+                        std::path::Path::new("convex/entry.ts"),
+                        &source,
+                        "test-source-hash",
+                        "test-cache-key",
+                        "test-compiler-fingerprint",
+                        "test-policy-fingerprint",
+                        &mut PhaseMeasurements::default(),
+                    )
+                    .unwrap();
+                    let findings = &summary.context_reuse.facts;
+                    let writes_retained = findings.iter().any(|fact| {
+                        matches!(
+                            fact.rule.as_str(),
+                            "module-state-write" | "global-state-write"
+                        )
+                    });
+                    let unresolved = findings.iter().any(|fact| {
+                        fact.rule == "unresolved-mutator-application"
+                            && fact.severity == "unsupported"
+                    });
+                    let invalid = if retained {
+                        !writes_retained && !unresolved
+                    } else {
+                        writes_retained || (receiver_name == "direct" && unresolved)
+                    };
+                    if invalid {
+                        failures.push(format!(
+                            "{receiver_name}/{call}/retained={retained}: {source}\nfacts={}",
+                            serde_json::to_string(findings).unwrap()
+                        ));
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 120);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
     fn known_mutators_reject_unresolved_targets_but_accept_fresh_values() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -10550,6 +11758,9 @@ function exerciseMutatorTargets(): void {
   Array.prototype.push.call(getTarget(), "value");
   Array.prototype.push.apply(getTarget(), ["value"]);
   Reflect.apply(Array.prototype.push, getTarget(), ["value"]);
+  [].push.call(getTarget(), "value");
+  [].push.apply(getTarget(), ["value"]);
+  Reflect.apply([].push, getTarget(), ["value"]);
 }
 
 exerciseMutatorTargets();
@@ -10582,7 +11793,7 @@ Reflect.apply(Array.prototype.push, [], ["value"]);
             .collect::<Vec<_>>();
         assert_eq!(
             unresolved.len(),
-            12,
+            15,
             "unresolved findings: {:?}",
             unresolved
                 .iter()
@@ -10743,6 +11954,61 @@ export function mutate(): void {
                 .iter()
                 .any(|fact| fact.rule == "module-state-write" && fact.start == add_start)
         );
+    }
+
+    #[test]
+    fn holder_aliases_preserve_retained_member_writes() {
+        for mutation in [
+            "TARGET.push(input);",
+            "TARGET.field = input;",
+            "const copied = TARGET; copied.push(input);",
+            "Object.assign(TARGET, { field: input });",
+        ] {
+            for (setup, target) in [
+                (
+                    "const holder = { value: ALLOCATION }; const alias = holder;",
+                    "alias.value",
+                ),
+                (
+                    "const child = { value: ALLOCATION }; const holder = { child };",
+                    "holder.child.value",
+                ),
+                (
+                    "const holder = { value: ALLOCATION }; const first = holder; const alias = first;",
+                    "alias.value",
+                ),
+                (
+                    "const holder = { value: ALLOCATION }; const alias = holder; const { value } = alias;",
+                    "value",
+                ),
+            ] {
+                for retained in [false, true] {
+                    let allocation = if retained { "retained" } else { "[]" };
+                    let setup = setup.replace("ALLOCATION", allocation);
+                    let mutation = mutation.replace("TARGET", target);
+                    let source = format!(
+                        "const retained = [];\nexport function run(input) {{ {setup} {mutation} }}"
+                    );
+                    let summary = crate::summarize_module(
+                        "convex/entry.ts",
+                        std::path::Path::new("convex/entry.ts"),
+                        &source,
+                        "test-source-hash",
+                        "test-cache-key",
+                        "test-compiler-fingerprint",
+                        "test-policy-fingerprint",
+                        &mut PhaseMeasurements::default(),
+                    )
+                    .unwrap();
+                    let facts = &summary.context_reuse.facts;
+                    assert_eq!(
+                        facts.iter().any(|fact| fact.rule == "module-state-write"),
+                        retained,
+                        "{setup} {mutation}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -11081,6 +12347,8 @@ void value;
             source_texts: None,
             entry_candidates: vec![entry.to_string()],
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -11762,6 +13030,8 @@ load("./not-a-static-edge");
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: Vec::new(),
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -12013,6 +13283,8 @@ load("./not-a-static-edge");
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: Vec::new(),
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -12166,6 +13438,8 @@ void value;
             roots: vec!["convex".to_string(), "shared".to_string()],
             entry_candidates: vec![entry.to_string()],
             database_functions: Vec::new(),
+            action_functions: Vec::new(),
+            selected_action_entries: Vec::new(),
             default_enabled: false,
             default_database_entries: Vec::new(),
             exclusions: BTreeMap::new(),
@@ -12772,14 +14046,16 @@ export const unsupportedWrapper = wrapped({ args: {}, handler: async () => null 
 pub(crate) fn summarize_context_module(
     source: &str,
     ast: &Value,
-    _imports: &BTreeMap<String, ImportBinding>,
-    _units: &BTreeMap<String, UnitSummary>,
+    comments: &[Comment],
     resolved_binding_facts: &BTreeMap<(u32, u32), crate::ResolvedBindingFact>,
     exports: &BTreeMap<String, String>,
     is_commonjs: bool,
 ) -> Result<ContextModuleSummary> {
     let mut bindings = BindingModel::new_with_module_this_state(ast, is_commonjs)?;
     bindings.add_direct_call_parameter_origins(ast, resolved_binding_facts, exports)?;
+    // Helper parameters can name property writers as well as their targets. Resolve those
+    // call-site origins before trusting any nested allocation proof.
+    bindings.collect_fresh_bindings(ast)?;
     let mut references = Vec::new();
     collect_module_references(ast, &bindings, &mut references)?;
     references
@@ -12824,8 +14100,9 @@ pub(crate) fn summarize_context_module(
         marker_reexports,
         references,
         facts,
-        suppressions: parse_suppressions(source),
+        suppressions: parse_suppressions(source, comments),
         opaque_exports: collect_opaque_exports(ast)?,
+        runtime_exports: collect_runtime_exports(ast)?,
         registrations: collect_registrations(ast)?,
         reexports: collect_reexports(ast)?,
     })
@@ -12842,6 +14119,10 @@ fn collect_marker_syntax(
     let mut occurrences = Vec::new();
     let mut reexports = Vec::new();
     for statement in body {
+        // Type-only exports have no runtime edge and cannot carry a reuse marker.
+        if statement.get("exportKind").and_then(Value::as_str) == Some("type") {
+            continue;
+        }
         match node_kind(statement) {
             Some("ExportNamedDeclaration") => {
                 if let Some(declaration) = statement
@@ -14106,10 +15387,18 @@ fn analyze_call(
     // Preserve a statically named member operation even when its receiver is dynamic (for
     // example, getTarget().push(value)). The receiver then fails closed in
     // report_mutator_write instead of disappearing because the full callee has no state path.
-    let method = callee_path
-        .rsplit('.')
-        .next()
-        .filter(|method| !method.is_empty())
+    let method = call
+        .get("callee")
+        // State resolution can fall back to the receiver's base path for a computed access.
+        // That base still proves retention, but its final segment is not the invoked method.
+        .filter(|callee| expression_path(callee).is_none())
+        .and_then(static_member_name)
+        .or_else(|| {
+            callee_path
+                .rsplit('.')
+                .next()
+                .filter(|method| !method.is_empty())
+        })
         .or_else(|| call.get("callee").and_then(static_member_name))
         .unwrap_or("");
     let possible_global_timer = global_callee
@@ -14288,14 +15577,73 @@ fn analyze_call(
         }
     }
 
+    if method == "bind"
+        && let Some(invoked) = callee_target(call)
+    {
+        let MutatorTargets {
+            target_first,
+            receiver: receiver_mutator,
+        } = mutator_targets(
+            invoked,
+            bindings,
+            is_target_first_mutator,
+            is_mutating_method,
+        );
+        for target_index in [0, 1].into_iter().filter(|index| {
+            if *index == 0 {
+                receiver_mutator
+            } else {
+                target_first
+            }
+        }) {
+            // A later invocation of the bound function has no syntactic receiver. Check the
+            // captured target here so binding a mutator cannot erase retained-state provenance.
+            if arguments
+                .iter()
+                .take(target_index + 1)
+                .any(is_spread_argument)
+                || (target_index == 1 && arguments.get(target_index).is_none())
+            {
+                facts.push(fact(
+                    "unresolved-mutator-application",
+                    "unsupported",
+                    "unsupported-construct",
+                    "Mutator binding must expose its captured target or receiver as a positional argument.",
+                    start,
+                    end,
+                    anchor_start,
+                ));
+            } else if let Some(target) = arguments.get(target_index) {
+                report_mutator_write(
+                    target,
+                    "Invoking a bound mutator",
+                    (start, end, anchor_start),
+                    bindings,
+                    facts,
+                );
+            }
+        }
+    }
     if is_mutating_method(method) {
         if matches!(method, "call" | "apply") {
-            if let Some(resolved_invoked) =
-                callee_target(call).and_then(|target| bindings.resolve_expression(target))
-            {
-                let invoked_method = resolved_invoked.path.rsplit('.').next().unwrap_or("");
+            if let Some(invoked) = callee_target(call) {
+                let resolved_invoked = bindings.resolve_expression(invoked);
+                let MutatorTargets {
+                    target_first,
+                    receiver: receiver_mutator,
+                } = mutator_targets(
+                    invoked,
+                    bindings,
+                    is_target_first_mutator,
+                    is_mutating_method,
+                );
+                let invoked_method = resolved_invoked
+                    .as_ref()
+                    .and_then(|resolved| resolved.path.rsplit('.').next())
+                    .or_else(|| static_member_name(invoked))
+                    .unwrap_or("mutator");
                 let mut unresolved_target_first_application = false;
-                let target = if resolves_to_target_first_mutator(&resolved_invoked) {
+                let target = if target_first {
                     match method {
                         "call" => {
                             if arguments.first().is_some_and(is_spread_argument) {
@@ -14328,7 +15676,7 @@ fn analyze_call(
                         }
                         _ => None,
                     }
-                } else if is_mutating_method(invoked_method) {
+                } else if receiver_mutator {
                     match arguments.first() {
                         Some(target) if is_spread_argument(target) => {
                             unresolved_target_first_application = true;
@@ -14348,19 +15696,34 @@ fn analyze_call(
                         facts,
                     );
                 }
+                // Conditional aliases may mix target-first functions with receiver methods.
+                // Their call conventions differ, so the target-first check cannot cover both.
+                if target_first
+                    && receiver_mutator
+                    && let Some(receiver) =
+                        arguments.first().filter(|value| !is_spread_argument(value))
+                {
+                    report_mutator_write(
+                        receiver,
+                        "Invoking an alternative receiver mutator",
+                        (start, end, anchor_start),
+                        bindings,
+                        facts,
+                    );
+                }
                 if unresolved_target_first_application {
                     facts.push(fact(
                         "unresolved-mutator-application",
                         "unsupported",
                         "unsupported-construct",
                         if method == "call"
-                            && resolves_to_target_first_mutator(&resolved_invoked)
+                            && target_first
                         {
                             "Target-first mutator call arguments must expose the mutated target as a positional argument."
                         } else if method == "call" {
                             "Mutator call arguments must expose the mutated receiver as a positional argument."
                         } else {
-                            if resolves_to_target_first_mutator(&resolved_invoked) {
+                            if target_first {
                                 "Target-first mutator apply arguments must expose the mutated target in an array literal."
                             } else {
                                 "Mutator apply arguments must expose the mutated receiver as a positional argument."
@@ -14398,12 +15761,26 @@ fn analyze_call(
                 )
             })
     }) && let Some(invoked) = arguments.first()
-        && let Some(resolved_invoked) = bindings.resolve_expression(invoked)
-        && resolved_invoked.global_state
     {
-        let invoked_method = resolved_invoked.path.rsplit('.').next().unwrap_or("");
+        // Receiver methods can be borrowed from local or retained objects. Only Reflect itself
+        // needs global provenance; the supplied receiver determines which storage is mutated.
+        let resolved_invoked = bindings.resolve_expression(invoked);
+        let MutatorTargets {
+            target_first,
+            receiver: receiver_mutator,
+        } = mutator_targets(
+            invoked,
+            bindings,
+            is_target_first_mutator,
+            is_mutating_method,
+        );
+        let invoked_method = resolved_invoked
+            .as_ref()
+            .and_then(|resolved| resolved.path.rsplit('.').next())
+            .or_else(|| static_member_name(invoked))
+            .unwrap_or("mutator");
         let mut unresolved_target_first_application = false;
-        let target = if resolves_to_target_first_mutator(&resolved_invoked) {
+        let target = if target_first {
             if arguments.get(1).is_some_and(is_spread_argument) {
                 unresolved_target_first_application = true;
                 None
@@ -14417,7 +15794,7 @@ fn analyze_call(
                     }
                 }
             }
-        } else if is_mutating_method(invoked_method) {
+        } else if receiver_mutator {
             match arguments.get(1) {
                 Some(target) if is_spread_argument(target) => {
                     unresolved_target_first_application = true;
@@ -14437,12 +15814,24 @@ fn analyze_call(
                 facts,
             );
         }
+        if target_first
+            && receiver_mutator
+            && let Some(receiver) = arguments.get(1).filter(|value| !is_spread_argument(value))
+        {
+            report_mutator_write(
+                receiver,
+                "Reflect.apply of an alternative receiver mutator",
+                (start, end, anchor_start),
+                bindings,
+                facts,
+            );
+        }
         if unresolved_target_first_application {
             facts.push(fact(
                 "unresolved-mutator-application",
                 "unsupported",
                 "unsupported-construct",
-                if resolves_to_target_first_mutator(&resolved_invoked) {
+                if target_first {
                     "Reflect.apply arguments for a target-first mutator must expose the mutated target in an array literal."
                 } else {
                     "Reflect.apply arguments for a mutator must expose the mutated receiver as a positional argument."
@@ -14453,10 +15842,15 @@ fn analyze_call(
             ));
         }
     }
-    if resolved_callee
-        .as_ref()
-        .is_some_and(resolves_to_target_first_mutator)
-    {
+    if call.get("callee").is_some_and(|callee| {
+        mutator_targets(
+            callee,
+            bindings,
+            is_target_first_mutator,
+            is_mutating_method,
+        )
+        .target_first
+    }) {
         match arguments.first() {
             Some(target) if node_kind(unwrap_expression(target)) == Some("SpreadElement") => {
                 facts.push(fact(
@@ -14702,14 +16096,12 @@ fn report_mutator_write(
     report_write(target, operation, location, false, bindings, facts);
 }
 
-fn is_known_fresh_constructor(name: String) -> bool {
-    let name = name.strip_prefix("globalThis.").unwrap_or(&name);
+fn is_known_fresh_constructor(name: &str) -> bool {
     matches!(
         name,
         "AbortController"
             | "Array"
             | "ArrayBuffer"
-            | "DataView"
             | "Date"
             | "Headers"
             | "Map"
@@ -14723,15 +16115,6 @@ fn is_known_fresh_constructor(name: String) -> bool {
             | "URLSearchParams"
             | "WeakMap"
             | "WeakSet"
-            | "Float32Array"
-            | "Float64Array"
-            | "Int8Array"
-            | "Int16Array"
-            | "Int32Array"
-            | "Uint8Array"
-            | "Uint8ClampedArray"
-            | "Uint16Array"
-            | "Uint32Array"
     ) || name.starts_with("Intl.")
 }
 
@@ -14810,6 +16193,9 @@ fn collect_registrations(ast: &Value) -> Result<Vec<ContextRegistration>> {
     let mut local_registrations = BTreeMap::<String, ContextRegistration>::new();
     let mut exported_names = BTreeMap::<String, String>::new();
     for statement in body {
+        if statement.get("exportKind").and_then(Value::as_str) == Some("type") {
+            continue;
+        }
         let exported_declaration = node_kind(statement) == Some("ExportNamedDeclaration")
             && statement.get("source").is_none_or(Value::is_null);
         let declaration = if exported_declaration {
@@ -14886,6 +16272,9 @@ fn collect_registrations(ast: &Value) -> Result<Vec<ContextRegistration>> {
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
             {
+                if specifier.get("exportKind").and_then(Value::as_str) == Some("type") {
+                    continue;
+                }
                 let Some(local) = specifier.get("local").and_then(static_name) else {
                     continue;
                 };
@@ -14908,6 +16297,91 @@ fn collect_registrations(ast: &Value) -> Result<Vec<ContextRegistration>> {
         .collect::<Vec<_>>();
     registrations.sort_by(|left, right| left.export_name.cmp(&right.export_name));
     Ok(registrations)
+}
+
+fn collect_runtime_exports(ast: &Value) -> Result<BTreeMap<String, (u32, u32)>> {
+    let body = ast
+        .get("body")
+        .and_then(Value::as_array)
+        .context("ESTree program has no body")?;
+    let mut exports = BTreeMap::new();
+    for statement in body {
+        if statement.get("exportKind").and_then(Value::as_str) == Some("type") {
+            continue;
+        }
+        match node_kind(statement) {
+            Some("ExportDefaultDeclaration" | "TSExportAssignment") => {
+                if statement.get("declaration").is_some_and(|declaration| {
+                    node_kind(declaration) == Some("TSInterfaceDeclaration")
+                }) {
+                    continue;
+                }
+                exports.insert("default".to_string(), node_span(statement)?);
+            }
+            Some("ExportNamedDeclaration") => {
+                // Named re-exports have their own recursive registration reconciliation.
+                if !statement.get("source").is_none_or(Value::is_null) {
+                    continue;
+                }
+                if let Some(declaration) = statement
+                    .get("declaration")
+                    .filter(|value| !value.is_null())
+                {
+                    // Type declarations and ambient declarations emit no runtime export.
+                    if declaration.get("declare").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    if declaration.get("importKind").and_then(Value::as_str) == Some("type") {
+                        continue;
+                    }
+                    if node_kind(declaration) == Some("VariableDeclaration") {
+                        for declarator in declaration
+                            .get("declarations")
+                            .and_then(Value::as_array)
+                            .context("variable declaration has no declarations")?
+                        {
+                            let mut bindings = Vec::new();
+                            collect_pattern_bindings(
+                                declarator.get("id").context("declarator has no pattern")?,
+                                "",
+                                &mut bindings,
+                            )?;
+                            for binding in bindings {
+                                exports.insert(binding.name, (binding.start, binding.end));
+                            }
+                        }
+                    } else if matches!(
+                        node_kind(declaration),
+                        Some(
+                            "FunctionDeclaration"
+                                | "ClassDeclaration"
+                                | "TSEnumDeclaration"
+                                | "TSModuleDeclaration"
+                                | "TSImportEqualsDeclaration"
+                        )
+                    ) && let Some(name) = declaration.get("id").and_then(static_name)
+                    {
+                        exports.insert(name, node_span(declaration)?);
+                    }
+                }
+                for specifier in statement
+                    .get("specifiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if specifier.get("exportKind").and_then(Value::as_str) == Some("type") {
+                        continue;
+                    }
+                    if let Some(name) = specifier.get("exported").and_then(static_name) {
+                        exports.insert(name, node_span(specifier)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(exports)
 }
 
 fn collect_opaque_exports(ast: &Value) -> Result<Vec<ContextOpaqueExport>> {
@@ -15042,11 +16516,24 @@ fn visit_reference_children(
     Ok(())
 }
 
-fn parse_suppressions(source: &str) -> Vec<SuppressionDeclaration> {
+fn parse_suppressions(source: &str, comments: &[Comment]) -> Vec<SuppressionDeclaration> {
+    // Directive-shaped text in a template literal or block comment is data, not a reviewed
+    // line comment. Use the parser's token boundaries while retaining the standalone-line rule.
+    let comment_starts = comments
+        .iter()
+        .filter(|comment| comment.kind == CommentKind::Line)
+        .map(|comment| comment.span.start as usize)
+        .collect::<BTreeSet<_>>();
+    let mut line_offset = 0;
     source
-        .lines()
+        .split_inclusive('\n')
         .enumerate()
         .filter_map(|(index, line)| {
+            let comment_start = line_offset + line.len() - line.trim_start().len();
+            line_offset += line.len();
+            if !comment_starts.contains(&comment_start) {
+                return None;
+            }
             let trimmed = line.trim();
             let Some(comment) = trimmed.strip_prefix("//") else {
                 return None;
@@ -15119,6 +16606,7 @@ fn is_suppressible_rule(rule: &str) -> bool {
             | "stateful-regexp"
             | "unknown-top-level-constructor"
             | "mutable-export"
+            | "unresolved-mutator-application"
     )
 }
 
@@ -15249,7 +16737,9 @@ fn expression_base_path(value: &Value) -> Option<String> {
 
 fn possible_alias_paths(value: &Value) -> Vec<String> {
     let value = unwrap_expression(value);
-    if let Some(path) = expression_path(value) {
+    // A computed member still aliases its receiver's retained storage. Losing that base
+    // would let a local alias downgrade a known retained write to a suppressible unknown.
+    if let Some(path) = expression_base_path(value) {
         return vec![path];
     }
     let mut paths = match node_kind(value) {
@@ -15324,7 +16814,7 @@ fn possible_alias_paths(value: &Value) -> Vec<String> {
 }
 
 fn callee_target(call: &Value) -> Option<&Value> {
-    let callee = call.get("callee")?;
+    let callee = unwrap_expression(call.get("callee")?);
     matches!(
         node_kind(callee),
         Some("MemberExpression" | "OptionalMemberExpression")
@@ -15789,6 +17279,193 @@ fn resolves_to_target_first_mutator(resolved: &ResolvedStatePath) -> bool {
             .possible_paths
             .iter()
             .any(|path| is_target_first_mutator(path))
+}
+
+struct MutatorTargets {
+    target_first: bool,
+    receiver: bool,
+}
+
+fn mutator_targets(
+    value: &Value,
+    bindings: &BindingModel,
+    target_first_mutator: fn(&str) -> bool,
+    receiver_mutator: fn(&str) -> bool,
+) -> MutatorTargets {
+    let mut target_first = false;
+    let mut receiver = false;
+    let mut pending = vec![value];
+    let mut visited_bindings = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        let value = unwrap_expression(value);
+        let resolved = bindings.resolve_expression(value);
+        let value_target_first = resolved.as_ref().is_some_and(|resolved| {
+            resolved.global_state
+                && resolved
+                    .possible_paths
+                    .iter()
+                    .any(|path| target_first_mutator(path))
+        });
+        target_first |= value_target_first;
+        // A statically named method stays a known mutator when its object is an expression such
+        // as `getCollection()`. Indirect invocation must still inspect its supplied receiver.
+        receiver |= (static_member_name(value).is_some_and(receiver_mutator)
+            && !value_target_first)
+            || resolved.as_ref().is_some_and(|resolved| {
+                resolved.possible_paths.iter().any(|path| {
+                    (!resolved.global_state || !target_first_mutator(path))
+                        && path.rsplit('.').next().is_some_and(receiver_mutator)
+                })
+            });
+        match node_kind(value) {
+            Some("Identifier") => {
+                let Some(binding_index) = identifier(value).and_then(|name| {
+                    node_span(value)
+                        .ok()
+                        .and_then(|(position, _)| bindings.binding_at(name, position))
+                }) else {
+                    continue;
+                };
+                if !visited_bindings.insert(binding_index) {
+                    continue;
+                }
+                // An initializer such as `[].push` has no state path. Preserve its known method
+                // through aliases without treating the callable's source as the mutated storage.
+                for origin in bindings
+                    .value_origins
+                    .get(&binding_index)
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        bindings
+                            .direct_call_parameter_origins
+                            .get(&binding_index)
+                            .into_iter()
+                            .flatten(),
+                    )
+                {
+                    if origin.fields.is_empty() {
+                        pending.push(&origin.value);
+                    } else if !value_target_first
+                        && origin
+                            .fields
+                            .last()
+                            .is_some_and(|field| receiver_mutator(field))
+                    {
+                        receiver = true;
+                    }
+                }
+            }
+            Some("ConditionalExpression" | "LogicalExpression") => {
+                for field in ["consequent", "alternate", "left", "right"] {
+                    if let Some(branch) = value.get(field) {
+                        pending.push(branch);
+                    }
+                }
+            }
+            Some("AssignmentExpression") => {
+                for field in assignment_result_fields(value) {
+                    if let Some(result) = value.get(*field) {
+                        pending.push(result);
+                    }
+                }
+            }
+            Some("SequenceExpression") => {
+                if let Some(result) = value
+                    .get("expressions")
+                    .and_then(Value::as_array)
+                    .and_then(|expressions| expressions.last())
+                {
+                    pending.push(result);
+                }
+            }
+            _ => {}
+        }
+    }
+    MutatorTargets {
+        target_first,
+        receiver,
+    }
+}
+
+fn property_mutator_targets<'a>(call: &'a Value, bindings: &BindingModel) -> Vec<&'a Value> {
+    let Some(callee) = call.get("callee") else {
+        return Vec::new();
+    };
+    let Some(arguments) = call.get("arguments").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let writers = |value: &Value| {
+        mutator_targets(
+            value,
+            bindings,
+            |path| {
+                matches!(
+                    path.strip_prefix("globalThis.").unwrap_or(path),
+                    "Object.assign"
+                        | "Object.defineProperties"
+                        | "Object.defineProperty"
+                        | "Object.setPrototypeOf"
+                        | "Reflect.defineProperty"
+                        | "Reflect.deleteProperty"
+                        | "Reflect.set"
+                        | "Reflect.setPrototypeOf"
+                )
+            },
+            |method| matches!(method, "__defineGetter__" | "__defineSetter__"),
+        )
+    };
+    let mut targets = Vec::new();
+    let direct = writers(callee);
+    if direct.receiver {
+        targets.extend(callee_target(call));
+    }
+    if direct.target_first {
+        targets.extend(arguments.first());
+    }
+    // A conditional alias can use both conventions. Invalidate every possible target rather
+    // than letting a receiver-based alternative hide a target-first property replacement.
+    let reflected = bindings.resolve_expression(callee).is_some_and(|resolved| {
+        resolved.global_state
+            && resolved
+                .possible_paths
+                .iter()
+                .any(|path| matches!(path.as_str(), "Reflect.apply" | "globalThis.Reflect.apply"))
+    });
+    if reflected {
+        if let Some(invoked) = arguments.first() {
+            let invoked = writers(invoked);
+            if invoked.receiver {
+                targets.extend(arguments.get(1));
+            }
+            if invoked.target_first
+                && let AppliedFirstArgument::Resolved(target) =
+                    first_applied_argument(arguments.get(2))
+            {
+                targets.push(target);
+            }
+        }
+    } else if let Some(invoked) = callee_target(call) {
+        let invoked = writers(invoked);
+        let method = static_member_name(callee);
+        if matches!(method, Some("call" | "apply" | "bind")) {
+            if invoked.receiver {
+                targets.extend(arguments.first());
+            }
+            if invoked.target_first {
+                if method == Some("apply") {
+                    if let AppliedFirstArgument::Resolved(target) =
+                        first_applied_argument(arguments.get(1))
+                    {
+                        targets.push(target);
+                    }
+                } else {
+                    targets.extend(arguments.get(1));
+                }
+            }
+        }
+    }
+    targets
 }
 
 fn is_mutable_initializer(value: &Value) -> bool {

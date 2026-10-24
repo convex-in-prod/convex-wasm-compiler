@@ -13,6 +13,12 @@ installed dependencies and Git checkout.
 Deployment authority and backend connection settings remain application inputs.
 The bundle does not install or configure a backend.
 
+API inventory generation resolves TypeScript and tsrs from the application's
+installed dependencies. The pinned tsrs version has Linux x64/arm64 and macOS
+arm64 binaries, but no macOS Intel binary. Native compiler and precompiler
+availability on Intel macOS does not establish API-generation support; that
+path also needs an installed tsrs release providing a matching platform package.
+
 ## Install and run
 
 Download the `convex-wasm-toolchain-VERSION-PLATFORM.tar.gz` archive and its

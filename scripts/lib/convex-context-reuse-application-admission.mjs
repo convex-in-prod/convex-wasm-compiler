@@ -1,3 +1,4 @@
+import { requireStrictContextReuseEntries } from "./convex-context-reuse-action-policy.mjs";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -329,7 +330,10 @@ export function dependencyMaterial(repoRoot, specifier, resolvedInputPath) {
       directory = parent;
     }
   }
-  return { identity: { packageName: requestedName, version: null }, packageJsonPath: undefined };
+  return {
+    identity: { packageName: requestedName, version: null },
+    packageJsonPath: undefined,
+  };
 }
 export function captureContextReuseExternalDependencyIdentities(repoRoot, metafile) {
   const externalDependencies = {};
@@ -948,6 +952,7 @@ export function authenticateConvexContextReuseApplicationAdmission(
     expectedEntries,
     expectedAnalysisInputGraphSha256,
     expectedIdentity,
+    strictEntries = [],
   } = {}
 ) {
   const retainedByPolicy =
@@ -975,6 +980,7 @@ export function authenticateConvexContextReuseApplicationAdmission(
         retained.admission.identity,
         expectedIdentity
       );
+      requireStrictContextReuseEntries(retained.admission, strictEntries);
       return retained.admission;
     }
   }
@@ -1023,7 +1029,7 @@ export function authenticateConvexContextReuseApplicationAdmission(
     moduleSummarySchema: output.moduleSummarySchema,
     policyFingerprint: output.policyFingerprint,
   };
-  return freezeGraphBasis({
+  const admission = freezeGraphBasis({
     ...(applicationAdmission === undefined ? {} : { applicationAdmission }),
     generatedInventoryInputSha256: output.generatedInventoryInputSha256,
     identity,
@@ -1037,6 +1043,8 @@ export function authenticateConvexContextReuseApplicationAdmission(
       "Convex context-reuse third-party material fingerprints"
     ),
   });
+  requireStrictContextReuseEntries(admission, strictEntries);
+  return admission;
 }
 
 export function retainConvexContextReuseApplicationAdmission(result, options = {}) {
