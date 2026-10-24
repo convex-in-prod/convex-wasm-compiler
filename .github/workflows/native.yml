@@ -101,7 +101,8 @@ jobs:
           tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1
           rm /tmp/node.tar.gz
           '@
-          $prerequisites.Replace("`r", "") | wsl.exe --distribution Ubuntu-24.04 --user root --exec bash -se
+          # Avoid PowerShell adding a CRLF pipe terminator to the Bash script.
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec bash -e -c $prerequisites.Replace("`r", "")
           if ($LASTEXITCODE -ne 0) { throw 'WSL2 prerequisite installation failed' }
           $archive = Get-Item artifact/wsl2/*.zip
           $expected = (Get-Content "$($archive.FullName).sha256").Split(' ')[0]

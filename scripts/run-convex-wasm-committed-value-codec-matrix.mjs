@@ -230,10 +230,11 @@ async function compileNativeTarget({
     generatedObjectPath,
     runtimeObjectPath,
     ...archives,
-    "-licuuc",
-    "-licui18n",
-    "-licudata",
-    "-Wl,--gc-sections",
+    // This reference executable runs on the host. Apple Hermes uses system
+    // frameworks and ld64; GNU ICU/linker flags only apply to the Linux host.
+    ...(process.platform === "darwin"
+      ? ["-framework", "CoreFoundation", "-framework", "Foundation", "-Wl,-dead_strip"]
+      : ["-licuuc", "-licui18n", "-licudata", "-Wl,--gc-sections"]),
     "-o",
     executablePath,
   ]);
