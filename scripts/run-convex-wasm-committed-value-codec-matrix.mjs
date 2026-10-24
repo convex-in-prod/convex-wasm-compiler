@@ -197,7 +197,12 @@ async function compileNativeTarget({
   const target = targetName("native", optimization);
   const generatedObjectPath = resolve(temporaryDirectory, `${target}.generated.o`);
   const runtimeObjectPath = resolve(temporaryDirectory, `${target}.runtime.o`);
-  const executablePath = resolve(temporaryDirectory, target);
+  // Keep each program at its own path: replacing an already-executed Mach-O
+  // image can retain stale macOS code-signature state for the replacement.
+  const executablePath = resolve(
+    temporaryDirectory,
+    `${target}${expectedIntegerRejection ? "-legacy-integer-rejection" : ""}`
+  );
   const includes = [
     `-I${temporaryDirectory}`,
     `-I${resolve(hostBuildPath, "lib/config")}`,
