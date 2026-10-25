@@ -22,6 +22,14 @@ function sameFileState(left, right) {
   );
 }
 
+async function settlePrivateEvidenceReads(reads) {
+  // Publication may release its cache lock on rejection; finish every admitted read first.
+  const results = await Promise.allSettled(reads);
+  const failure = results.find(({ status }) => status === "rejected");
+  if (failure !== undefined) throw failure.reason;
+  return results.map(({ value }) => value);
+}
+
 async function requireOwnerControlledParent(path, description) {
   if (typeof process.getuid !== "function") fail(description, "requires ownership checks");
   const currentUid = BigInt(process.getuid());
@@ -61,7 +69,7 @@ export async function readConvexWasmPrivateEvidence(
   }
   if (fsConstants.O_NOFOLLOW === undefined) fail(description, "requires O_NOFOLLOW");
   const currentUid = await requireOwnerControlledParent(path, description);
-  const [canonicalPath, initial] = await Promise.all([
+  const [canonicalPath, initial] = await settlePrivateEvidenceReads([
     fs.realpath(path),
     fs.lstat(path, { bigint: true }),
   ]);
@@ -89,7 +97,7 @@ export async function readConvexWasmPrivateEvidence(
       offset += read.bytesRead;
     }
     const trailing = await handle.read(Buffer.allocUnsafe(1), 0, 1, offset);
-    const [after, finalPath, finalCanonicalPath] = await Promise.all([
+    const [after, finalPath, finalCanonicalPath] = await settlePrivateEvidenceReads([
       handle.stat({ bigint: true }),
       fs.lstat(path, { bigint: true }),
       fs.realpath(path),

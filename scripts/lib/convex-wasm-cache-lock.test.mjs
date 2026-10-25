@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { bindConvexWasmProjectBuild } from "../bind-convex-wasm.mjs";
+import { publishConvexWasmProjectRegistry } from "../publish-registry.mjs";
+import { canonicalJson } from "./convex-wasm-artifact-contract.mjs";
 import { acquireConvexWasmCacheLock, requireConvexWasmCacheLockAuthority } from "./convex-wasm-cache-lock.mjs";
+import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 
 const TEST_TEMPORARY_DIRECTORY = process.platform === "linux" ? "/var/tmp" : tmpdir();
 
@@ -16,10 +21,161 @@ function delay(milliseconds) {
 }
 
 async function lockEnvironment(t) {
-  const directory = await fs.mkdtemp(join(TEST_TEMPORARY_DIRECTORY, "convex-wasm-cache-lock-test-"));
+  // Private evidence rejects symlink ancestors, including macOS's /var temporary paths.
+  const directory = await fs.realpath(
+    await fs.mkdtemp(join(TEST_TEMPORARY_DIRECTORY, "convex-wasm-cache-lock-test-"))
+  );
   t.after(() => fs.rm(directory, { force: true, recursive: true }));
   return { CONVEX_WASM_CACHE_LOCK_DB: join(directory, "convex-wasm-cache-lock.sqlite") };
 }
+
+function useLockEnvironment(t, environment) {
+  for (const key of ["CONVEX_WASM_CACHE_LOCK_DB", "CONVEX_WASM_CACHE_LOCK_AUTHORITY"]) {
+    const previous = process.env[key];
+    t.after(() => {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    });
+    if (environment[key] === undefined) delete process.env[key];
+    else process.env[key] = environment[key];
+  }
+}
+
+test("binding and registry publication wait for cache ownership and release it on failure", async (t) => {
+  for (const operation of [bindConvexWasmProjectBuild, publishConvexWasmProjectRegistry]) {
+    await t.test(operation.name, async (t) => {
+      const environment = await lockEnvironment(t);
+      useLockEnvironment(t, environment);
+      const releaseOwner = await acquireConvexWasmCacheLock({ environment });
+      let finished = false;
+      const outcome = assert.rejects(
+        operation({ configPath: join(dirname(environment.CONVEX_WASM_CACHE_LOCK_DB), "missing.json") })
+          .finally(() => { finished = true; }),
+        { code: "ENOENT" }
+      );
+      try {
+        await delay(350);
+        assert.equal(finished, false);
+      } finally {
+        releaseOwner();
+        await outcome;
+      }
+      const releaseNext = await acquireConvexWasmCacheLock({ environment });
+      releaseNext();
+    });
+  }
+});
+
+test("cache consumers preserve same-process and inherited-child ownership", async (t) => {
+  const environment = await lockEnvironment(t);
+  useLockEnvironment(t, environment);
+  const root = dirname(environment.CONVEX_WASM_CACHE_LOCK_DB);
+  const releaseOwner = await acquireConvexWasmCacheLock();
+  try {
+    for (const [operation, script, options] of [
+      [bindConvexWasmProjectBuild, "scripts/bind-convex-wasm.mjs", ["--output", join(root, "bound.json")]],
+      [publishConvexWasmProjectRegistry, "scripts/publish-registry.mjs", [
+        "--deployment", join(root, "bound.json"),
+        "--registry-root", join(root, "registry"),
+        "--publication", "shadow-only",
+        "--preflight-output", join(root, "preflight.json"),
+      ]],
+    ]) {
+      await assert.rejects(operation({ configPath: join(root, "missing.json") }), /already owns the cache lock/u);
+      const child = spawnSync(process.execPath, [
+        script, "--config", join(root, "missing.json"),
+        "--artifact-report", join(root, "report.json"), ...options,
+      ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10_000 });
+      assert.equal(child.error, undefined);
+      assert.equal(child.status, 1, child.stderr);
+      assert.match(child.stderr, /ENOENT/u);
+      requireConvexWasmCacheLockAuthority();
+      const contender = new DatabaseSync(environment.CONVEX_WASM_CACHE_LOCK_DB);
+      try {
+        assert.throws(() => contender.exec("BEGIN IMMEDIATE"), { errcode: 5 });
+      } finally {
+        contender.close();
+      }
+    }
+  } finally {
+    releaseOwner();
+  }
+});
+
+test("failed binding keeps cache ownership until its other package reads finish", async (t) => {
+  const environment = await lockEnvironment(t);
+  useLockEnvironment(t, environment);
+  const root = dirname(environment.CONVEX_WASM_CACHE_LOCK_DB);
+  const cacheRoot = join(root, "cache");
+  const layout = deriveConvexWasmCacheLayout({ buildId: "binding-test", cacheRoot, repositoryRoot: root });
+  const missingKey = "1".repeat(64);
+  const slowKey = "2".repeat(64);
+  const missingPackage = join(layout.immutable.packages, missingKey);
+  const slowPackage = join(layout.immutable.packages, slowKey);
+  await fs.mkdir(slowPackage, { recursive: true, mode: 0o700 });
+  const configPath = join(root, "config.json");
+  const artifactReportPath = join(root, "report.json");
+  const sourcePath = join(root, "source-envelope.json");
+  const source = Buffer.from("{}\n");
+  await fs.writeFile(configPath, JSON.stringify({
+    schemaVersion: 1, projectRoot: root, workRoot: join(root, "work"),
+    toolchain: join(root, "toolchain"), gatePolicy: join(root, "policy.json"),
+    artifactCacheRoot: cacheRoot, deployedRuntimeAuthority: join(root, "authority.json"),
+    selectedExports: ["items:read"], sourcePathspecs: ["functions"],
+    jobs: 1, aotWorkers: 1, memoryMaxMiB: 2048,
+  }));
+  await fs.writeFile(sourcePath, source, { mode: 0o600 });
+  await fs.writeFile(artifactReportPath, `${canonicalJson({
+    kind: "convex-wasm-project-artifact-report-v1",
+    graphs: [
+      { graphManifestSha256: missingKey, packagePath: missingPackage },
+      { graphManifestSha256: slowKey, packagePath: slowPackage },
+    ],
+    cohortContracts: [{}, {}], runtimeModules: [{}], contextReusePolicy: {},
+    startPush: { path: join(root, "request.json") },
+    cohortSchedule: { identity: { sha256: missingKey } }, scheduleSha256: missingKey,
+    sourceEnvelope: { path: sourcePath, sha256: createHash("sha256").update(source).digest("hex"), size: source.length },
+  })}\n`, { mode: 0o600 });
+
+  const paused = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const failed = Promise.withResolvers();
+  const lstat = fs.lstat;
+  t.mock.method(fs, "lstat", async (path, ...args) => {
+    if (path === slowPackage) {
+      paused.resolve();
+      await resume.promise;
+    }
+    if (path === missingPackage) {
+      await paused.promise;
+      try {
+        return await lstat(path, ...args);
+      } finally {
+        failed.resolve();
+      }
+    }
+    return await lstat(path, ...args);
+  });
+  const binding = bindConvexWasmProjectBuild({ configPath, artifactReportPath, outputPath: join(root, "bound.json") });
+  const rejected = assert.rejects(binding, { code: "ENOENT" });
+  let contender;
+  try {
+    await Promise.race([failed.promise, binding]);
+    // Let the failed read propagate while the sibling remains paused in the filesystem.
+    await new Promise((resolve) => setImmediate(resolve));
+    contender = new DatabaseSync(environment.CONVEX_WASM_CACHE_LOCK_DB);
+    assert.throws(() => contender.exec("BEGIN IMMEDIATE"), { errcode: 5 });
+  } finally {
+    resume.resolve();
+    try {
+      await rejected;
+    } finally {
+      contender?.close();
+    }
+  }
+  const releaseNext = await acquireConvexWasmCacheLock({ environment });
+  releaseNext();
+});
 
 test("legacy environment markers do not bypass an active lock", async (t) => {
   const ownerEnvironment = await lockEnvironment(t);

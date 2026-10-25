@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { canonicalJson } from "./lib/convex-wasm-artifact-contract.mjs";
+import { acquireConvexWasmCacheLock } from "./lib/convex-wasm-cache-lock.mjs";
 import {
   bindDeployedRuntimeIdentity,
   normalizeDeployedRuntimeAuthority,
@@ -54,7 +55,16 @@ function parseArguments(argumentsList) {
   return Object.fromEntries(values);
 }
 
-export async function bindConvexWasmProjectBuild({
+export async function bindConvexWasmProjectBuild(options) {
+  const releaseLock = await acquireConvexWasmCacheLock();
+  try {
+    return await bindProjectBuildWithCacheLock(options);
+  } finally {
+    releaseLock();
+  }
+}
+
+async function bindProjectBuildWithCacheLock({
   configPath,
   artifactReportPath,
   outputPath,
@@ -99,7 +109,8 @@ export async function bindConvexWasmProjectBuild({
     cacheRoot,
     repositoryRoot: config.projectRoot,
   });
-  const graphManifests = await Promise.all(
+  // Drain every reader before failure can release the lock and admit cache cleanup.
+  const graphResults = await Promise.allSettled(
     report.graphs.map(async ({ graphManifestSha256, packagePath }) => {
       const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
         cacheLayout,
@@ -110,6 +121,10 @@ export async function bindConvexWasmProjectBuild({
       return verified.graphManifest;
     })
   );
+  const graphManifests = graphResults.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
   const authority = normalizeDeployedRuntimeAuthority(
     (
       await readConvexWasmPrivateEvidenceJson(

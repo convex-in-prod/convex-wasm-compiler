@@ -123,7 +123,9 @@ async function registryFixture(root, receipt) {
 }
 
 test("fresh registries from independent caches share generation identity and authenticate published bytes", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-registry-publication-"));
+  const root = await fs.realpath(
+    await fs.mkdtemp(join(tmpdir(), "convex-wasm-registry-publication-"))
+  );
   try {
     const first = await registryFixture(join(root, "first"), "first-inode");
     const second = await registryFixture(join(root, "second"), "second-inode");
@@ -147,7 +149,9 @@ test("fresh registries from independent caches share generation identity and aut
 
 test("fresh publication rejects source metadata changes and payload corruption after preparation", async () => {
   for (const name of ["entry.json", "artifact.cwasm"]) {
-    const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-registry-corruption-"));
+    const root = await fs.realpath(
+      await fs.mkdtemp(join(tmpdir(), "convex-wasm-registry-corruption-"))
+    );
     try {
       const value = await registryFixture(root, "original-inode");
       const path = join(value.artifactRoot, name);

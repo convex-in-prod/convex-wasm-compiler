@@ -841,7 +841,9 @@ from the exported modules must acquire `acquireConvexWasmCacheLock`, create a wo
 `createConvexWasmBuildWorkLease`, and hold the lock through the build and the
 lease's `complete` or `fail` transition. The low-level artifact builders do not
 acquire the lock for the caller. `convex-wasm-build` and `verify:source-to-aot`
-acquire it around their builds.
+acquire it around their builds. `convex-wasm-bind` and
+`convex-wasm-publish-registry` acquire the same lock for binding and publication,
+holding it until all cache reads and artifact copies finish, including on failure.
 Hosts that serialize compilation with a broader lock can pass a `cacheLock`
 object to the lease, successful-use, maintenance, and immutable-GC functions.
 It supplies `acquire({ environment })`, `requireAuthority(environment)`, and

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { canonicalJson } from "./lib/convex-wasm-artifact-contract.mjs";
+import { acquireConvexWasmCacheLock } from "./lib/convex-wasm-cache-lock.mjs";
 import { defaultConvexWasmCacheRoot, deriveConvexWasmCacheLayout } from "./lib/convex-wasm-cache-layout.mjs";
 import {
   normalizeDeployedRuntimeAuthority,
@@ -60,7 +61,17 @@ function parseArguments(argv) {
   );
 }
 
-export async function publishConvexWasmProjectRegistry({
+export async function publishConvexWasmProjectRegistry(options) {
+  const releaseLock = await acquireConvexWasmCacheLock();
+  try {
+    // Verification retains cache paths; publication still reads them while copying artifacts.
+    return await publishProjectRegistryWithCacheLock(options);
+  } finally {
+    releaseLock();
+  }
+}
+
+async function publishProjectRegistryWithCacheLock({
   artifactReportPath,
   configPath,
   deploymentPath,
