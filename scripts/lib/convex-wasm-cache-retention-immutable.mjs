@@ -2626,7 +2626,10 @@ async function exists(path) {
 async function immutableCacheAllocatedBytes(cacheLayout) {
   if (!(await exists(cacheLayout.immutable.root))) return 0;
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, cacheLayout.immutable.root);
-  return (await treeStats(cacheLayout.immutable.root, false)).allocatedBytes;
+  const rootStatus = await fs.lstat(cacheLayout.immutable.root);
+  // Occupancy reports count the root's contents. Use the same boundary for pressure so an
+  // explicit sweep cannot evict an entry when measured occupancy is already at its watermark.
+  return (await treeStats(cacheLayout.immutable.root, false)).allocatedBytes - rootStatus.blocks * 512;
 }
 
 function immutableSweepTrashRoot(cacheLayout) {
@@ -3138,8 +3141,8 @@ export async function planConvexWasmImmutableGc({
   }
   // A lookup root is removed as a whole, including PREFERRED and superseded certificates. Pin
   // every package its reader can select for this pass, even if the root itself is removable.
-  // Interrupted removal then cannot leave an extant certificate without its
-  // package. Unknown corrupt roots cannot authorize deletion of any potentially referenced package.
+  // Interrupted removal then cannot leave an extant certificate without its package. Unknown
+  // corrupt roots cannot authorize deletion of any potentially referenced package.
   for (const certificateRoot of certificates) {
     const keys = certificateRoot.packageKeys ?? packagesByKey.keys();
     for (const key of keys) {
@@ -3296,8 +3299,8 @@ export async function planConvexWasmImmutableGc({
       type: record.type,
     });
   }
-  // Retire roots before independent artifacts. Their
-  // dependencies stay pinned for this pass; later passes can reclaim the newly unreachable data.
+  // Retire roots before independent artifacts. Their dependencies stay pinned for this pass;
+  // later passes can reclaim the newly unreachable data.
   const removalPriority = { "certificate-root": 0, package: 1, artifact: 2, "c-bundle": 2 };
   candidates.sort(
     (left, right) =>

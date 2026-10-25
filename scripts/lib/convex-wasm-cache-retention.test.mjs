@@ -3649,7 +3649,7 @@ test("host lock ownership covers leases, immutable planning and sweeping", async
   assert.deepEqual(report.immutable.sweep.removed.map(({ key }) => key), [artifact.key]);
 });
 
-test("maintenance stops at the high watermark after removing the largest eligible artifact", async (t) => {
+test("maintenance preserves entries at the high watermark and stops after reclaiming enough", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("bounded-sweep");
   const large = await writeGenericArtifact({
@@ -3672,6 +3672,19 @@ test("maintenance stops at the high watermark after removing the largest eligibl
     ageGenericArtifact(cacheLayout, large),
     ageGenericArtifact(cacheLayout, small),
   ]);
+
+  const occupancy = await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root);
+  const atWatermark = await maintainConvexWasmCache(
+    maintenanceOptions(value, {
+      apply: true,
+      immutableSweep: true,
+      immutableHighWatermarkAllocatedBytes: occupancy.uniqueAllocatedBytes,
+      nowMs: 2_000_000_000_000,
+    })
+  );
+  assert.deepEqual(atWatermark.immutable.sweep.removed, []);
+  assert.equal(atWatermark.immutable.plan.pressure.active, false);
+  assert.equal(atWatermark.immutable.sweep.remainingAllocatedBytes, occupancy.uniqueAllocatedBytes);
 
   const result = await maintainConvexWasmCache(
     maintenanceOptions(value, {
@@ -3907,7 +3920,7 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
   await assert.rejects(fs.lstat(trashRoot), { code: "ENOENT" });
 });
 
-test("immutable sweep recovers interrupted package and certificate retirement", async (t) => {
+test("maintenance recovers interrupted package and certificate retirement and finishes their closure", async (t) => {
   for (const type of ["package", "certificate-root"]) {
     for (const interruption of ["before-rename", "after-rename", "partial-removal", "marker-cleanup"]) {
       await t.test(`${type}: ${interruption}`, async (t) => {
@@ -3920,6 +3933,7 @@ test("immutable sweep recovers interrupted package and certificate retirement", 
           candidatePath = join(cacheLayout.immutable.packages, "deployment-results", "v1",
             fingerprintJson(certificate.lookupIdentity));
         }
+        await ageTree(cacheLayout.immutable.root);
         const options = {
           cacheLayout,
           environment: value.environment,
@@ -3962,14 +3976,32 @@ test("immutable sweep recovers interrupted package and certificate retirement", 
         }
         if (interruption === "before-rename") await fs.lstat(candidatePath);
         else await assert.rejects(fs.lstat(candidatePath), { code: "ENOENT" });
-        const recovered = await withHeavyLock(value.environment, () =>
-          sweepConvexWasmImmutableGc(options)
+        const report = await maintainConvexWasmCache(
+          maintenanceOptions(value, {
+            apply: true,
+            immutableSweep: true,
+            immutableHighWatermarkAllocatedBytes: options.highWatermarkAllocatedBytes,
+            nowMs: options.nowMs,
+          })
         );
+        const recovered = report.immutable.sweep;
         assert.equal(recovered.recovered.length, 1);
         assert.equal(recovered.recovered[0].status,
           interruption === "before-rename" ? "cleared-pre-rename-marker" :
             interruption === "marker-cleanup" ? "cleared-completed-marker" : "removed-quarantined-root");
-        assert.equal(recovered.plan.authenticated.invalid, 0);
+        assert.equal(report.immutable.plan.authenticated.invalid, 0);
+        assert.equal(report.immutable.plan.candidates, 0);
+        const removedRootCount = (interruption === "before-rename" ? 1 : 0) +
+          (type === "certificate-root" ? 1 : 0);
+        assert.equal(recovered.removed.length,
+          removedRootCount + material.packageMaterial.artifactReferences.length * 2);
+        assert.equal(new Set(recovered.removed.map(({ path }) => path)).size, recovered.removed.length);
+        for (const { aot, coreWasm } of material.packageMaterial.artifactReferences) {
+          for (const { artifact } of [aot, coreWasm]) {
+            await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts,
+              artifact.stage, artifact.cacheKey)), { code: "ENOENT" });
+          }
+        }
         await assert.rejects(fs.lstat(candidatePath), { code: "ENOENT" });
         await assert.rejects(fs.lstat(join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")), {
           code: "ENOENT",
