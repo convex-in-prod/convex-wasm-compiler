@@ -276,7 +276,11 @@ for (const encoding of ["expanded", "grouped", "admission"]) {
       result.diagnosticEncoding = encoding;
       result.diagnosticDefinitions = [definition];
       result.diagnosticGroups = [
-        { entry, findingIds: [diagnostic.id], ...(encoding === "grouped" ? { dependencyChain } : {}) },
+        {
+          entry,
+          findingIds: [diagnostic.id],
+          ...(encoding === "grouped" ? { dependencyChain } : {}),
+        },
       ];
     }
     result.diagnosticCounts = { unsupported: 1 };
@@ -294,7 +298,10 @@ for (const encoding of ["expanded", "grouped", "admission"]) {
       rationale:
         "This fixture admits only reviewed unresolved mutator applications in database function graphs.",
     };
-    const options = { applicationAdmissionPolicy, strictEntries: ["functions/query.ts"] };
+    const options = {
+      applicationAdmissionPolicy,
+      strictEntries: ["functions/query.ts"],
+    };
     assert.throws(
       () => authenticateConvexContextReuseApplicationAdmission(result, options),
       /without admitted findings/u
@@ -303,7 +310,8 @@ for (const encoding of ["expanded", "grouped", "admission"]) {
       applicationAdmissionPolicy,
       strictEntries: ["functions/action.ts"],
     });
-    const authentications = convexContextReuseTestHooks.applicationAdmissionFullAuthenticationCount();
+    const authentications =
+      convexContextReuseTestHooks.applicationAdmissionFullAuthenticationCount();
     assert.throws(
       () => authenticateConvexContextReuseApplicationAdmission(result, options),
       /without admitted findings/u
@@ -319,6 +327,58 @@ for (const encoding of ["expanded", "grouped", "admission"]) {
       convexContextReuseTestHooks.applicationAdmissionFullAuthenticationCount(),
       authentications
     );
+    const reviewedPolicy = {
+      ...applicationAdmissionPolicy,
+      reviewedActionEntries: ["functions/query.ts"],
+    };
+    const reviewed = retainConvexContextReuseApplicationAdmission(result, {
+      applicationAdmissionPolicy: reviewedPolicy,
+      strictEntries: ["functions/query.ts"],
+    });
+    assert.equal(result.safe, false);
+    assert.notEqual(reviewed.identity.resultSha256, retained.identity.resultSha256);
+    assert.equal(
+      reviewed.applicationAdmission.entryAdmissions.find(
+        (entry) => entry.entry === "functions/query.ts"
+      ).disposition,
+      "conservative-local-mutator-application"
+    );
+    assert.strictEqual(
+      authenticateConvexContextReuseApplicationAdmission(result, {
+        applicationAdmissionPolicy: reviewedPolicy,
+        strictEntries: ["functions/query.ts"],
+      }),
+      reviewed
+    );
+    assert.throws(
+      () =>
+        authenticateConvexContextReuseApplicationAdmission(result, {
+          applicationAdmissionPolicy,
+          strictEntries: ["functions/query.ts"],
+        }),
+      /without admitted findings/u
+    );
+    assert.throws(
+      () =>
+        authenticateConvexContextReuseApplicationAdmission(result, {
+          applicationAdmissionPolicy: {
+            ...reviewedPolicy,
+            reviewedActionEntries: ["functions/missing.ts"],
+          },
+          strictEntries: ["functions/missing.ts"],
+        }),
+      /missing/u
+    );
+    for (const invalid of [null, [], ["../action.ts"], ["a.ts", "a.ts"], ["b.ts", "a.ts"], true]) {
+      assert.throws(
+        () =>
+          authenticateConvexContextReuseApplicationAdmissionPolicy({
+            ...reviewedPolicy,
+            reviewedActionEntries: invalid,
+          }),
+        /reviewedActionEntries/u
+      );
+    }
   });
 }
 

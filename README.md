@@ -174,22 +174,36 @@ Ordinary V8 actions remain fresh unless selected through
 `bundler.experimentalContextReuse.actions.entries` in `convex.json`. Selected
 entries use the action-aware graph protocol and must reconcile every action
 registration with source, including named re-exports and export lists that rename
-a directly registered value. Every runtime value export must resolve to a supported
-registration; aliases through another variable, default-export declarations,
-destructured exports, wildcard or namespace re-exports, and unresolved named
-re-exports are unsupported. Keep exported helpers in dependency modules; explicit type-only
-exports do not require registration reconciliation. Duplicate inventory routes are invalid,
+a directly registered value. Runtime exports can also be structurally non-registration
+helpers: functions, primitive values, arrays, plain objects without registration markers,
+and classes without static members or custom inheritance. Non-primitive helper references
+also require accounted local uses; passing a helper to an opaque consumer cannot establish
+that it remains unregistered. Named helper re-exports follow
+reviewed local source. Retained helper writes still fail analysis. Unknown factory results,
+hidden registration aliases, destructured exports, wildcard or namespace re-exports, and
+unresolved named re-exports remain unsupported. Explicit type-only exports do not require
+registration reconciliation. Duplicate inventory routes are invalid,
 including conflicting database/action classifications of the same export. Older
 native packages reject the action-aware protocol rather than supplying action
 permission.
 
-Action admission checks the complete runtime dependency graph and cannot use the
-database-only unresolved-mutator admission exception. A source-specific
+Action admission checks the complete runtime dependency graph and defaults to strict
+analysis. An application admission policy can explicitly list `reviewedActionEntries`
+(normalized, sorted, unique repository-relative source paths) to apply its reviewed
+first-party unresolved-mutator disposition to those actions. Existing policies without
+that field grant no action exception. Hard findings, package findings, and other unsupported
+constructs remain blocking. The authenticated policy and exact per-entry finding IDs stay
+bound to the result; reviewed admission never changes the analyzer's `safe` value. Review
+covers action-only execution, async lifetime, and interactions between all selected exports,
+in addition to applicable shared database evidence. A source-specific
 `unresolved-mutator-application` suppression requires review of invocation-local
 allocation and escape behavior; other retained-state findings still block that
 site. A newly allocated typed array or `DataView` can share retained backing storage;
 review the buffer's ownership as well as the view's lifetime. Awaited values need
 their own ownership review because a fresh thenable can resolve to retained storage.
+The unshadowed built-in `Promise.all` and `Promise.allSettled` operations provide a
+specific proof for their newly allocated result arrays; that proof does not cover
+their elements, `Promise.resolve`, custom constructors, or other thenables.
 Known property writers invalidate member-allocation proofs, including through local
 aliases and direct helper parameters; the containing object can still be local.
 Assignments, destructuring, loop writes, and deletion also invalidate those proofs,
@@ -197,6 +211,43 @@ even when the replacement is newly allocated. Binding a known mutator preserves
 the captured receiver or target's ownership checks, and conditional mutator aliases
 must satisfy every possible invocation convention.
 Target-first mutator bindings without a statically captured target are unsupported.
+
+Ownership proofs distinguish a container from its children. Writes to members invalidate
+the child-origin proof without replacing a fresh containing allocation. Unshadowed
+`Object.keys`, `Object.values`, `Object.entries`, `Object.fromEntries`, `Array.from`, and
+`Array.of` allocate fresh containers. Copying array methods are recognized on direct
+array-allocation expressions, including chains; arbitrary parameter or variable receivers
+remain unsupported because their methods or species can return retained storage. A fresh
+built-in URL owns its `searchParams`, and a fresh `FormData` owns its form entries.
+
+An empty Map allocated within a function can supply fresh values through `get` when every
+insertion is a proved allocation and every Map and result reference stays within the checked
+uses in that function. A local value retrieved with a fresh `??` fallback can be mutated and
+reinserted into the same Map; every other insertion is still checked. Captured Maps or results,
+Map aliases, escaping result aliases, unknown helper calls, seeded Maps, and consumed `set`
+return values do not receive this proof. Returned element ownership is
+separate from the returned container. Atomics operations retain their first-argument checks;
+Atomics-only names such as `and`, `or`, and `store` do not classify unrelated receiver methods
+as built-in mutations.
+
+Direct-call parameter proofs include closed recursive and mutually recursive helpers.
+Forwarding the same parameter path preserves ownership only when every caller origin
+passes the same check. Retained inputs, reassigned parameters, escaping helpers, and
+recursive calls that change the member path remain unsupported.
+
+Direct calls to a stable local synchronous helper can transfer ownership of its return value
+when every return allocates a new container within that call. Local aliases and helper chains
+are checked against the same rule. Captured outer values, parameters, reassigned helpers,
+recursive return cycles, async functions, and generators do not receive this proof. Ownership
+of a returned container does not establish ownership of its elements.
+
+A factory allocation is not assumed to belong to each later invocation. Values captured
+by returned or yielded closures, bound functions, instance methods, or arrow fields lose their allocation
+proof, as do generator locals that can survive between resumptions. Allocations performed
+inside the eventual handler or method remain local to that call. A bounded local helper call
+does not by itself make that helper escape. The unshadowed built-in `Array.from` mapper runs
+synchronously and does not escape; any function returned by that mapper is checked separately.
+
 Action grouping uses
 the existing equivalent-output mechanism and can be disabled with
 `actions.grouping: false`. Actions remain separate from database

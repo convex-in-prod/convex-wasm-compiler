@@ -46,14 +46,40 @@ test("strict action admission rejects unresolved findings only for selected acti
     () => requireStrictContextReuseEntries(admission, ["functions/query.ts"]),
     /without admitted findings/u
   );
+  requireStrictContextReuseEntries(admission, ["functions/query.ts"], ["functions/query.ts"]);
+  assert.throws(
+    () =>
+      requireStrictContextReuseEntries(admission, ["functions/query.ts"], ["functions/action.ts"]),
+    /without admitted findings/u
+  );
+  assert.throws(
+    () =>
+      requireStrictContextReuseEntries(
+        admission,
+        ["functions/missing.ts"],
+        ["functions/missing.ts"]
+      ),
+    /missing/u
+  );
+  assert.throws(
+    () =>
+      requireStrictContextReuseEntries(
+        {
+          ...admission,
+          applicationAdmission: {
+            entryAdmissions: [{ entry: "functions/query.ts", disposition: "hard" }],
+          },
+        },
+        ["functions/query.ts"],
+        ["functions/query.ts"]
+      ),
+    /without admitted findings/u
+  );
   assert.throws(
     () => requireStrictContextReuseEntries(admission, ["functions/missing.ts"]),
     /missing/u
   );
   for (const entries of [null, undefined, "functions/action.ts", new Set()]) {
-    assert.throws(
-      () => requireStrictContextReuseEntries(admission, entries),
-      /must be an array/u
-    );
+    assert.throws(() => requireStrictContextReuseEntries(admission, entries), /must be an array/u);
   }
 });

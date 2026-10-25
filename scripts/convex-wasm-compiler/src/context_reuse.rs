@@ -176,6 +176,7 @@ pub(crate) struct ContextModuleSummary {
     suppressions: Vec<SuppressionDeclaration>,
     opaque_exports: Vec<ContextOpaqueExport>,
     runtime_exports: BTreeMap<String, (u32, u32)>,
+    non_registration_exports: BTreeSet<String>,
     pub(crate) registrations: Vec<ContextRegistration>,
     pub(crate) reexports: Vec<ContextReexport>,
 }
@@ -743,6 +744,8 @@ struct BindingModel {
     // Freshness is monotone over a binding's lifetime. Once an unknown initializer or assignment
     // is observed, a later fresh assignment cannot retroactively authorize an earlier mutation.
     non_fresh_bindings: BTreeSet<usize>,
+    // A returned bound mutator can retain an inline allocation without a lexical binding.
+    escaping_bound_values: BTreeSet<(u32, u32)>,
     // A property writer can replace a fresh member without replacing its fresh containing object.
     invalidated_member_bindings: BTreeSet<usize>,
     // Preserve initializer structure for member-path freshness. Binding-wide freshness proves the
@@ -751,6 +754,9 @@ struct BindingModel {
     // Parameters of a non-escaping local callable may inherit freshness from every direct call.
     // The origins retain destructuring paths so nested values are checked at the actual call site.
     direct_call_parameter_origins: BTreeMap<usize, Vec<FreshValueOrigin>>,
+    // Values inserted into non-escaping, invocation-local Maps. Every reference is accounted
+    // for before a get result can inherit the ownership of all possible inserted values.
+    local_map_values: BTreeMap<usize, Vec<Value>>,
     reassigned_bindings: BTreeSet<usize>,
 }
 
@@ -3773,9 +3779,11 @@ impl BindingModel {
             property_alias_paths: BTreeMap::new(),
             fresh_bindings: BTreeSet::new(),
             non_fresh_bindings: BTreeSet::new(),
+            escaping_bound_values: BTreeSet::new(),
             invalidated_member_bindings: BTreeSet::new(),
             value_origins: BTreeMap::new(),
             direct_call_parameter_origins: BTreeMap::new(),
+            local_map_values: BTreeMap::new(),
             reassigned_bindings: BTreeSet::new(),
         };
         // Function declarations are hoisted within their containing program/block. Register the
@@ -3835,7 +3843,7 @@ impl BindingModel {
                     && let Some(binding_index) = self.binding_at(name, node_span(node)?.0)
                 {
                     self.invalidated_member_bindings
-                        .extend(self.alias_bindings(binding_index, true));
+                        .extend(self.member_origin_aliases(binding_index));
                 }
             }
         }
@@ -3883,23 +3891,9 @@ impl BindingModel {
                     self.non_fresh_bindings.insert(binding_index);
                 }
             }
-            // A logical member assignment can retain an existing property value, and a plain
-            // member assignment can install an unknown RHS. The containing local object therefore
-            // cannot remain a freshness proof for a later member mutator unless a plain assignment
-            // writes a structurally fresh RHS. Direct aliases denote the same object and must lose
-            // freshness together; other alias paths stay dependent through
-            // `binding_is_known_fresh` below.
-            let member_assignment_is_fresh = value.get("operator").and_then(Value::as_str)
-                == Some("=")
-                && self.value_is_fresh(right, &mut BTreeSet::new());
-            if !member_assignment_is_fresh
-                && let Some(path) = expression_base_path(left)
-                && let Some(root) = path.split('.').next()
-                && let Some(position) = node_span(left).ok().map(|span| span.0)
-                && let Some(binding_index) = self.binding_at(root, position)
-            {
-                self.invalidate_binding_and_direct_aliases(binding_index);
-            }
+            // Replacing a member invalidates its origin tree above, but does not replace the
+            // containing allocation. A local array can hold retained elements and still be safe
+            // to sort; mutating one of those elements needs a separate member-path proof.
         }
         match value {
             Value::Array(values) => {
@@ -3919,48 +3913,35 @@ impl BindingModel {
         Ok(())
     }
 
-    fn invalidate_binding_and_direct_aliases(&mut self, binding_index: usize) {
-        for alias_index in self.alias_bindings(binding_index, false) {
-            self.fresh_bindings.remove(&alias_index);
-            self.non_fresh_bindings.insert(alias_index);
-        }
-    }
-
-    fn alias_bindings(
-        &self,
-        binding_index: usize,
-        include_member_aliases: bool,
-    ) -> BTreeSet<usize> {
+    fn member_origin_aliases(&self, binding_index: usize) -> BTreeSet<usize> {
         let mut pending = VecDeque::from([binding_index]);
         let mut visited = BTreeSet::new();
         while let Some(binding_index) = pending.pop_front() {
             if !visited.insert(binding_index) {
                 continue;
             }
-            if include_member_aliases {
-                // Fresh parameter/member proofs can lead through object literals to caller
-                // allocations. A property replacement invalidates those origin trees too.
-                for origin in self
-                    .value_origins
-                    .get(&binding_index)
-                    .into_iter()
-                    .flatten()
-                    .chain(
-                        self.direct_call_parameter_origins
-                            .get(&binding_index)
-                            .into_iter()
-                            .flatten(),
-                    )
-                {
-                    let mut nodes = Vec::new();
-                    collect_runtime_nodes(&origin.value, &mut nodes);
-                    for node in nodes {
-                        if let Some(name) = identifier(node)
-                            && let Ok((position, _)) = node_span(node)
-                            && let Some(origin_index) = self.binding_at(name, position)
-                        {
-                            pending.push_back(origin_index);
-                        }
+            // Fresh parameter/member proofs can lead through object literals to caller
+            // allocations. A property replacement invalidates those origin trees too.
+            for origin in self
+                .value_origins
+                .get(&binding_index)
+                .into_iter()
+                .flatten()
+                .chain(
+                    self.direct_call_parameter_origins
+                        .get(&binding_index)
+                        .into_iter()
+                        .flatten(),
+                )
+            {
+                let mut nodes = Vec::new();
+                collect_runtime_nodes(&origin.value, &mut nodes);
+                for node in nodes {
+                    if let Some(name) = identifier(node)
+                        && let Ok((position, _)) = node_span(node)
+                        && let Some(origin_index) = self.binding_at(name, position)
+                    {
+                        pending.push_back(origin_index);
                     }
                 }
             }
@@ -3968,9 +3949,6 @@ impl BindingModel {
             // follows containing objects, whose initial member trees can no longer be trusted.
             for alias_index in 0..self.bindings.len() {
                 for (path, position) in &self.bindings[alias_index].alias_paths {
-                    if !include_member_aliases && path.contains('.') {
-                        continue;
-                    }
                     let root = path.split('.').next().expect("alias path has no root");
                     let Some(source_index) = self.binding_at(root, *position) else {
                         continue;
@@ -3992,6 +3970,10 @@ impl BindingModel {
             return true;
         }
         match node_kind(value) {
+            Some("CallExpression") => {
+                self.local_map_get_is_fresh(value)
+                    || self.local_call_returns_fresh(value, &mut BTreeSet::new())
+            }
             Some("Identifier") => {
                 let Some(name) = identifier(value) else {
                     return false;
@@ -4620,6 +4602,595 @@ impl BindingModel {
         Ok(())
     }
 
+    fn collect_local_map_values(
+        &mut self,
+        ast: &Value,
+        resolved_binding_facts: &BTreeMap<(u32, u32), crate::ResolvedBindingFact>,
+    ) {
+        struct MapUsage {
+            function_scope: usize,
+            allowed_references: BTreeSet<(u32, u32)>,
+            values: Vec<Value>,
+        }
+        let mut candidates = BTreeMap::new();
+        for binding_index in 0..self.bindings.len() {
+            if self.bindings[binding_index].module_state
+                || self.non_fresh_bindings.contains(&binding_index)
+                || self.reassigned_bindings.contains(&binding_index)
+            {
+                continue;
+            }
+            let Some(origins) = self.value_origins.get(&binding_index) else {
+                continue;
+            };
+            if origins.len() != 1 || !origins[0].fields.is_empty() {
+                continue;
+            }
+            let initializer = unwrap_expression(&origins[0].value);
+            if node_kind(initializer) != Some("NewExpression")
+                || !initializer
+                    .get("arguments")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                || !initializer
+                    .get("callee")
+                    .and_then(|callee| self.resolve_expression(callee))
+                    .is_some_and(|resolved| {
+                        resolved.global_state
+                            && !resolved.module_state
+                            && !resolved.possible_paths.is_empty()
+                            && resolved
+                                .possible_paths
+                                .iter()
+                                .all(|path| matches!(path.as_str(), "Map" | "globalThis.Map"))
+                    })
+            {
+                continue;
+            }
+            candidates.insert(
+                binding_index,
+                MapUsage {
+                    function_scope: self
+                        .nearest_function_scope(self.scope_at(node_span(initializer).unwrap().0)),
+                    allowed_references: BTreeSet::new(),
+                    values: Vec::new(),
+                },
+            );
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let mut nodes = Vec::new();
+        collect_runtime_nodes(ast, &mut nodes);
+        let standalone_calls = nodes
+            .iter()
+            .filter(|node| node_kind(node) == Some("ExpressionStatement"))
+            .filter_map(|node| {
+                node.get("expression")
+                    .and_then(|expression| node_span(expression).ok())
+            })
+            .collect::<BTreeSet<_>>();
+        let mut safe_gets = BTreeSet::new();
+        let mut direct_receivers = BTreeSet::new();
+        let mut tested_values = BTreeSet::new();
+        let mut inserted_values = BTreeMap::new();
+        for node in &nodes {
+            if node_kind(node) == Some("CallExpression")
+                && standalone_calls.contains(&node_span(node).unwrap())
+                && node.get("callee").and_then(static_member_name) == Some("set")
+                && let Some(receiver) = callee_target(node)
+                && let Some(map) = identifier(receiver)
+                    .and_then(|name| self.binding_at(name, node_span(receiver).ok()?.0))
+                && candidates.contains_key(&map)
+                && let Some(arguments) = node.get("arguments").and_then(Value::as_array)
+                && arguments.len() == 2
+            {
+                inserted_values.insert(node_span(&arguments[1]).unwrap(), map);
+            }
+            if node_kind(node) == Some("CallExpression")
+                && standalone_calls.contains(&node_span(node).unwrap())
+                && node
+                    .get("callee")
+                    .and_then(static_member_name)
+                    .is_some_and(is_mutating_method)
+                && let Some(receiver) = callee_target(node)
+            {
+                direct_receivers.insert(node_span(receiver).unwrap());
+                if node_kind(receiver) == Some("CallExpression") {
+                    safe_gets.insert(node_span(receiver).unwrap());
+                }
+            }
+            if matches!(
+                node_kind(node),
+                Some("IfStatement" | "ConditionalExpression")
+            ) && let Some(test) = node.get("test")
+            {
+                tested_values.insert(node_span(test).unwrap());
+            }
+            if node_kind(node) == Some("BinaryExpression")
+                && matches!(
+                    node.get("operator").and_then(Value::as_str),
+                    Some("===" | "!==")
+                )
+            {
+                for field in ["left", "right"] {
+                    if let Some(value) = node.get(field) {
+                        tested_values.insert(node_span(value).unwrap());
+                    }
+                }
+            }
+            if node_kind(node) == Some("UnaryExpression")
+                && node.get("operator").and_then(Value::as_str) == Some("!")
+                && let Some(argument) = node.get("argument")
+            {
+                tested_values.insert(node_span(argument).unwrap());
+            }
+        }
+        for node in &nodes {
+            if node_kind(node) != Some("VariableDeclarator") {
+                continue;
+            }
+            let Some(initializer) = node.get("init") else {
+                continue;
+            };
+            let get = if node_kind(initializer) == Some("LogicalExpression")
+                && initializer.get("operator").and_then(Value::as_str) == Some("??")
+            {
+                initializer.get("left").unwrap()
+            } else {
+                initializer
+            };
+            if node_kind(get) != Some("CallExpression") {
+                continue;
+            }
+            let map = callee_target(get).and_then(|receiver| {
+                identifier(receiver)
+                    .and_then(|name| self.binding_at(name, node_span(receiver).ok()?.0))
+            });
+            let Some(binding_index) = node.get("id").and_then(|id| {
+                identifier(id).and_then(|name| self.binding_at(name, node_span(id).ok()?.0))
+            }) else {
+                continue;
+            };
+            let function_scope =
+                self.nearest_function_scope(self.scope_at(node_span(initializer).unwrap().0));
+            let references = self.binding_references(binding_index, resolved_binding_facts);
+            if !references.is_empty()
+                && references.iter().all(|reference| {
+                    reference.read
+                        && !reference.write
+                        && self.nearest_function_scope(self.scope_at(reference.start))
+                            == function_scope
+                        && (direct_receivers.contains(&(reference.start, reference.end))
+                            || tested_values.contains(&(reference.start, reference.end))
+                            || map.is_some_and(|map| {
+                                candidates.contains_key(&map)
+                                    && inserted_values.get(&(reference.start, reference.end))
+                                        == Some(&map)
+                            }))
+                })
+            {
+                safe_gets.insert(node_span(get).unwrap());
+            }
+        }
+        for node in nodes {
+            let receiver = match node_kind(node) {
+                Some("ReturnStatement") => node.get("argument"),
+                Some("CallExpression") => callee_target(node),
+                _ => None,
+            };
+            let Some(receiver) = receiver else {
+                continue;
+            };
+            let Some(binding_index) = identifier(receiver)
+                .and_then(|name| self.binding_at(name, node_span(receiver).ok()?.0))
+            else {
+                continue;
+            };
+            let Some(usage) = candidates.get_mut(&binding_index) else {
+                continue;
+            };
+            let span = node_span(receiver).unwrap();
+            // A closure can outlive the allocation's invocation. Do not infer freshness for
+            // captured Maps, aliases, callbacks, unknown helper calls, or returned mutators.
+            if self.nearest_function_scope(self.scope_at(span.0)) != usage.function_scope {
+                continue;
+            }
+            if node_kind(node) == Some("ReturnStatement") {
+                usage.allowed_references.insert(span);
+                continue;
+            }
+            let Some(method) = node.get("callee").and_then(static_member_name) else {
+                continue;
+            };
+            if !matches!(method, "get" | "set" | "has" | "clear" | "delete") {
+                continue;
+            }
+            let Some(arguments) = node.get("arguments").and_then(Value::as_array) else {
+                continue;
+            };
+            if arguments
+                .iter()
+                .any(|argument| node_kind(argument) == Some("SpreadElement"))
+            {
+                continue;
+            }
+            if method == "get" && !safe_gets.contains(&node_span(node).unwrap()) {
+                continue;
+            }
+            if method == "set" {
+                // set returns the Map itself. A consumed return value would be an alias whose
+                // later insertions are not included in this local proof.
+                if arguments.len() != 2 || !standalone_calls.contains(&node_span(node).unwrap()) {
+                    continue;
+                }
+                usage.values.push(arguments[1].clone());
+            }
+            usage.allowed_references.insert(span);
+        }
+        for (binding_index, usage) in candidates {
+            let references = self.binding_references(binding_index, resolved_binding_facts);
+            if !references.is_empty()
+                && references.iter().all(|reference| {
+                    reference.read
+                        && !reference.write
+                        && usage
+                            .allowed_references
+                            .contains(&(reference.start, reference.end))
+                })
+            {
+                self.local_map_values.insert(binding_index, usage.values);
+            }
+        }
+    }
+
+    fn invalidate_escaping_closure_captures(
+        &mut self,
+        ast: &Value,
+        resolved_binding_facts: &BTreeMap<(u32, u32), crate::ResolvedBindingFact>,
+    ) {
+        let mut nodes = Vec::new();
+        collect_runtime_nodes(ast, &mut nodes);
+        let mut pending = nodes
+            .iter()
+            .filter(|node| matches!(node_kind(node), Some("ReturnStatement" | "YieldExpression")))
+            .filter_map(|node| node.get("argument"))
+            .collect::<Vec<_>>();
+        // An expression-bodied arrow returns its expression without a ReturnStatement node.
+        pending.extend(
+            nodes
+                .iter()
+                .filter(|node| node_kind(node) == Some("ArrowFunctionExpression"))
+                .filter_map(|node| {
+                    node.get("body")
+                        .filter(|body| node_kind(body) != Some("BlockStatement"))
+                }),
+        );
+        let mut visited_bindings = BTreeSet::new();
+        let mut visited_values = BTreeSet::new();
+        let mut escaping_scopes = BTreeSet::new();
+        let mut escaping_bindings = BTreeSet::new();
+        let mut escaping_bound_values = BTreeSet::new();
+        let mut generator_scopes = BTreeSet::new();
+        for node in &nodes {
+            if node.get("generator").and_then(Value::as_bool) == Some(true) {
+                generator_scopes
+                    .insert(self.nearest_function_scope(self.scope_at(node_span(node).unwrap().0)));
+            }
+            if matches!(
+                node_kind(node),
+                Some("MethodDefinition" | "PropertyDefinition")
+            ) && let Some(function) = node.get("value").filter(|value| {
+                matches!(
+                    node_kind(value),
+                    Some("FunctionExpression" | "ArrowFunctionExpression")
+                )
+            }) {
+                // An instance can outlive the function that constructed it. Its methods and
+                // arrow fields cannot treat captured factory allocations as request-local.
+                escaping_scopes.insert(
+                    self.nearest_function_scope(self.scope_at(node_span(function).unwrap().0)),
+                );
+            }
+        }
+        while let Some(value) = pending.pop() {
+            let value = unwrap_expression(value);
+            let Ok(span) = node_span(value) else {
+                continue;
+            };
+            if !visited_values.insert(span) {
+                continue;
+            }
+            match node_kind(value) {
+                Some("FunctionDeclaration" | "FunctionExpression" | "ArrowFunctionExpression") => {
+                    escaping_scopes.insert(self.nearest_function_scope(self.scope_at(span.0)));
+                }
+                Some("Identifier") => {
+                    let Some(binding) =
+                        identifier(value).and_then(|name| self.binding_at(name, span.0))
+                    else {
+                        continue;
+                    };
+                    if !visited_bindings.insert(binding) {
+                        continue;
+                    }
+                    pending.extend(&self.bindings[binding].callable_values);
+                    if let Some(origins) = self.value_origins.get(&binding) {
+                        pending.extend(origins.iter().map(|origin| &origin.value));
+                    }
+                }
+                Some("CallExpression") => {
+                    if value.get("callee").is_some_and(|callee| {
+                        static_member_name(callee) == Some("bind")
+                            || self.resolve_expression(callee).is_some_and(|resolved| {
+                                resolved
+                                    .possible_paths
+                                    .iter()
+                                    .any(|path| path.ends_with(".bind"))
+                            })
+                    }) {
+                        // A returned bound function retains its receiver and bound arguments
+                        // without an explicit closure node in the source.
+                        let roots = callee_target(value).into_iter().chain(
+                            value
+                                .get("arguments")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten(),
+                        );
+                        for root in roots {
+                            escaping_bound_values
+                                .insert(node_span(unwrap_expression(root)).unwrap());
+                            let mut captured = Vec::new();
+                            collect_runtime_nodes(root, &mut captured);
+                            for node in captured {
+                                if let Some(index) = identifier(node)
+                                    .and_then(|name| self.binding_at(name, node_span(node).ok()?.0))
+                                {
+                                    escaping_bindings.insert(index);
+                                }
+                            }
+                        }
+                    }
+                    // Calling a local helper does not return that helper itself. Its return
+                    // expressions are already among the roots above. Receivers and arguments
+                    // can contain callbacks that the called operation returns or retains.
+                    if let Some(receiver) = callee_target(value) {
+                        pending.push(receiver);
+                    }
+                    if let Some(arguments) = value.get("arguments").and_then(Value::as_array) {
+                        // The built-in Array.from invokes its mapper synchronously and never
+                        // returns or retains the mapper. A custom receiver can change that
+                        // contract; keep its callback among the possible escaping values.
+                        let bounded_mapper = value
+                            .get("callee")
+                            .and_then(|callee| self.resolve_expression(callee))
+                            .is_some_and(|resolved| {
+                                resolved.global_state
+                                    && !resolved.module_state
+                                    && !resolved.possible_paths.is_empty()
+                                    && resolved.possible_paths.iter().all(|path| {
+                                        matches!(
+                                            path.as_str(),
+                                            "Array.from" | "globalThis.Array.from"
+                                        )
+                                    })
+                            })
+                            && self.value_is_fresh_array_expression(value)
+                            && !arguments
+                                .iter()
+                                .any(|argument| node_kind(argument) == Some("SpreadElement"));
+                        pending.extend(arguments.iter().enumerate().filter_map(
+                            |(index, argument)| (index != 1 || !bounded_mapper).then_some(argument),
+                        ));
+                    }
+                }
+                _ => pending.extend(ast_runtime_children(value)),
+            }
+        }
+        self.non_fresh_bindings.extend(escaping_bindings);
+        self.escaping_bound_values.extend(escaping_bound_values);
+        if escaping_scopes.is_empty() && generator_scopes.is_empty() {
+            return;
+        }
+        for binding_index in 0..self.bindings.len() {
+            let binding = &self.bindings[binding_index];
+            if binding.module_state {
+                continue;
+            }
+            let declaration_scope =
+                self.nearest_function_scope(self.scope_at(binding.declarations[0].0));
+            let captured = self
+                .binding_references(binding_index, resolved_binding_facts)
+                .iter()
+                .any(|reference| {
+                    let mut scope = self.scope_at(reference.start);
+                    loop {
+                        if scope == declaration_scope {
+                            return false;
+                        }
+                        if escaping_scopes.contains(&scope) {
+                            return true;
+                        }
+                        let Some(parent) = self.scopes[scope].parent else {
+                            return false;
+                        };
+                        scope = parent;
+                    }
+                });
+            if captured || generator_scopes.contains(&declaration_scope) {
+                // A factory's allocation can survive through a returned closure even though
+                // its lexical binding is local. Without a bounded caller-lifetime proof,
+                // freshness of that allocation cannot authorize later captured mutations.
+                // A generator can also retain its own locals between separate resumptions.
+                self.non_fresh_bindings.insert(binding_index);
+            }
+        }
+    }
+
+    fn local_map_get_is_fresh(&self, value: &Value) -> bool {
+        if value.get("callee").and_then(static_member_name) != Some("get") {
+            return false;
+        }
+        let Some(receiver) = callee_target(value) else {
+            return false;
+        };
+        let Some(binding_index) = identifier(receiver)
+            .and_then(|name| self.binding_at(name, node_span(receiver).ok()?.0))
+        else {
+            return false;
+        };
+        let Some(values) = self.local_map_values.get(&binding_index) else {
+            return false;
+        };
+        let scope = self
+            .nearest_function_scope(self.scope_at(self.bindings[binding_index].declarations[0].0));
+        values.iter().all(|value| {
+            self.value_is_allocated_in_scope(
+                value,
+                scope,
+                Some(binding_index),
+                &mut BTreeSet::new(),
+                &mut BTreeSet::new(),
+            )
+        })
+    }
+
+    fn local_call_returns_fresh(&self, value: &Value, active: &mut BTreeSet<usize>) -> bool {
+        let Some(callee) = value.get("callee").map(unwrap_expression) else {
+            return false;
+        };
+        let Some(binding_index) =
+            identifier(callee).and_then(|name| self.binding_at(name, node_span(callee).ok()?.0))
+        else {
+            return false;
+        };
+        let binding = &self.bindings[binding_index];
+        let Some(callable) = binding.callable_values.first() else {
+            return false;
+        };
+        if self.reassigned_bindings.contains(&binding_index)
+            || binding.declarations.len() != 1
+            || binding
+                .callable_values
+                .iter()
+                .any(|value| node_span(value).ok() != node_span(callable).ok())
+            || !active.insert(binding_index)
+        {
+            return false;
+        }
+        let fresh = self.callable_is_direct_binding_value(binding_index, callable)
+            && callable.get("async").and_then(Value::as_bool) != Some(true)
+            && callable.get("generator").and_then(Value::as_bool) != Some(true)
+            && callable.get("body").is_some_and(|body| {
+                let span = node_span(callable).unwrap();
+                let scope = self.nearest_function_scope(self.scope_at(span.0));
+                let returned = self.return_expressions(span, body);
+                !returned.is_empty()
+                    && returned.iter().all(|value| {
+                        self.value_is_allocated_in_scope(
+                            value,
+                            scope,
+                            None,
+                            active,
+                            &mut BTreeSet::new(),
+                        )
+                    })
+            });
+        active.remove(&binding_index);
+        fresh
+    }
+
+    fn value_is_allocated_in_scope(
+        &self,
+        value: &Value,
+        scope: usize,
+        reinsertion_map: Option<usize>,
+        active_calls: &mut BTreeSet<usize>,
+        active_values: &mut BTreeSet<usize>,
+    ) -> bool {
+        let value = unwrap_expression(value);
+        if self.value_is_structurally_fresh(value) {
+            return true;
+        }
+        match node_kind(value) {
+            Some("Identifier") => {
+                let Some(index) = identifier(value)
+                    .and_then(|name| self.binding_at(name, node_span(value).ok()?.0))
+                else {
+                    return false;
+                };
+                let binding = &self.bindings[index];
+                // A helper can return an outer allocation repeatedly. Only allocations made
+                // within this particular call transfer fresh ownership to its caller.
+                if binding.module_state
+                    || self.nearest_function_scope(self.scope_at(binding.declarations[0].0))
+                        != scope
+                    || self.non_fresh_bindings.contains(&index)
+                    || self.reassigned_bindings.contains(&index)
+                    || !active_values.insert(index)
+                {
+                    return false;
+                }
+                let fresh = self.value_origins.get(&index).is_some_and(|origins| {
+                    !origins.is_empty()
+                        && origins.iter().all(|origin| {
+                            origin.fields.is_empty()
+                                && self.value_is_allocated_in_scope(
+                                    &origin.value,
+                                    scope,
+                                    reinsertion_map,
+                                    active_calls,
+                                    active_values,
+                                )
+                        })
+                });
+                active_values.remove(&index);
+                fresh
+            }
+            Some("CallExpression") => {
+                // Reinserting a value from this same empty local Map adds no new origin.
+                // Every other inserted origin is checked by the enclosing all-values proof.
+                let reinsertion = reinsertion_map.is_some_and(|map| {
+                    value.get("callee").and_then(static_member_name) == Some("get")
+                        && callee_target(value).and_then(|receiver| {
+                            identifier(receiver)
+                                .and_then(|name| self.binding_at(name, node_span(receiver).ok()?.0))
+                        }) == Some(map)
+                });
+                reinsertion || self.local_call_returns_fresh(value, active_calls)
+            }
+            Some("ConditionalExpression" | "LogicalExpression") => {
+                ["consequent", "alternate", "left", "right"]
+                    .into_iter()
+                    .filter_map(|field| value.get(field))
+                    .all(|value| {
+                        self.value_is_allocated_in_scope(
+                            value,
+                            scope,
+                            reinsertion_map,
+                            active_calls,
+                            active_values,
+                        )
+                    })
+            }
+            Some("SequenceExpression") => value
+                .get("expressions")
+                .and_then(Value::as_array)
+                .and_then(|values| values.last())
+                .is_some_and(|value| {
+                    self.value_is_allocated_in_scope(
+                        value,
+                        scope,
+                        reinsertion_map,
+                        active_calls,
+                        active_values,
+                    )
+                }),
+            _ => false,
+        }
+    }
+
     fn binding_references<'a>(
         &self,
         binding_index: usize,
@@ -4970,6 +5541,11 @@ impl BindingModel {
     }
 
     fn mutator_value_is_resolved_or_fresh(&self, value: &Value) -> bool {
+        if node_span(unwrap_expression(value))
+            .is_ok_and(|span| self.escaping_bound_values.contains(&span))
+        {
+            return false;
+        }
         if let Some(resolved) = self.resolve_expression(value) {
             if resolved.module_state || resolved.global_state {
                 return true;
@@ -5022,6 +5598,22 @@ impl BindingModel {
                     active_paths,
                     active_bindings,
                 );
+            }
+            Some("NewExpression") if fields == ["searchParams"] => {
+                // Each built-in URL owns its searchParams object. Binding/member invalidation
+                // above still rejects an overwritten accessor or a retained URL instance.
+                return value
+                    .get("callee")
+                    .and_then(|callee| self.resolve_expression(callee))
+                    .is_some_and(|resolved| {
+                        resolved.global_state
+                            && !resolved.module_state
+                            && !resolved.possible_paths.is_empty()
+                            && resolved
+                                .possible_paths
+                                .iter()
+                                .all(|path| matches!(path.as_str(), "URL" | "globalThis.URL"))
+                    });
             }
             Some("ObjectExpression") if !fields.is_empty() => {
                 let Some(properties) = value.get("properties").and_then(Value::as_array) else {
@@ -5097,10 +5689,16 @@ impl BindingModel {
                         })
                     });
             }
-            Some("AwaitExpression") => return false,
+            Some("AwaitExpression") => {
+                return fields.is_empty() && self.value_is_fresh_array_expression(value);
+            }
             _ => {}
         }
-        fields.is_empty() && self.value_is_structurally_fresh(value)
+        fields.is_empty()
+            && (self.value_is_structurally_fresh(value)
+                || (node_kind(value) == Some("CallExpression")
+                    && (self.local_map_get_is_fresh(value)
+                        || self.local_call_returns_fresh(value, &mut BTreeSet::new()))))
     }
 
     fn binding_path_is_known_fresh(
@@ -5130,7 +5728,11 @@ impl BindingModel {
 
         let active_key = (binding_index, fields.to_vec());
         if !active_paths.insert(active_key.clone()) {
-            return false;
+            // A non-escaping helper's recursive call can forward exactly the same parameter
+            // path. That edge introduces no new storage: every other caller origin is still
+            // checked by the enclosing traversal. Reassignment, escaping functions and cycles
+            // that change the member path cannot use this invariant.
+            return parameter_origins.is_some();
         }
         // Exact paths stay distinct, while one lexical binding also terminates aliases such as
         // `current = current.value` whose suffix would otherwise grow without bound.
@@ -5176,6 +5778,114 @@ impl BindingModel {
         fresh
     }
 
+    fn value_is_fresh_array_expression(&self, value: &Value) -> bool {
+        let value = unwrap_expression(value);
+        if node_kind(value) == Some("AwaitExpression") {
+            let Some(argument) = value.get("argument").map(unwrap_expression) else {
+                return false;
+            };
+            // Promise.all/allSettled create their own result array. Promise.resolve and general
+            // awaited values can assimilate a thenable that supplies retained storage instead.
+            return node_kind(argument) == Some("CallExpression")
+                && argument
+                    .get("callee")
+                    .and_then(|callee| self.resolve_expression(callee))
+                    .is_some_and(|resolved| {
+                        resolved.global_state
+                            && !resolved.module_state
+                            && !resolved.possible_paths.is_empty()
+                            && resolved.possible_paths.iter().all(|path| {
+                                matches!(
+                                    path.as_str(),
+                                    "Promise.all"
+                                        | "Promise.allSettled"
+                                        | "globalThis.Promise.all"
+                                        | "globalThis.Promise.allSettled"
+                                )
+                            })
+                    })
+                && callee_target(argument)
+                    .and_then(|receiver| self.resolve_expression(receiver))
+                    .is_some_and(|resolved| {
+                        resolved.global_state
+                            && !resolved.module_state
+                            && !resolved.possible_paths.is_empty()
+                            && resolved.possible_paths.iter().all(|path| {
+                                matches!(path.as_str(), "Promise" | "globalThis.Promise")
+                            })
+                    });
+        }
+        if node_kind(value) == Some("ArrayExpression") {
+            return true;
+        }
+        if node_kind(value) == Some("NewExpression") {
+            return value
+                .get("callee")
+                .and_then(|callee| self.resolve_expression(callee))
+                .is_some_and(|resolved| {
+                    resolved.global_state
+                        && !resolved.module_state
+                        && !resolved.possible_paths.is_empty()
+                        && resolved
+                            .possible_paths
+                            .iter()
+                            .all(|path| matches!(path.as_str(), "Array" | "globalThis.Array"))
+                });
+        }
+        if node_kind(value) != Some("CallExpression") {
+            return false;
+        }
+        let Some(callee) = value.get("callee") else {
+            return false;
+        };
+        // Only a direct allocation expression is used as the receiver. A variable or parameter
+        // could supply an overridden method or a custom Array species returning retained storage.
+        if static_member_name(callee).is_some_and(|method| {
+            matches!(
+                method,
+                "map"
+                    | "filter"
+                    | "slice"
+                    | "flat"
+                    | "flatMap"
+                    | "concat"
+                    | "toSorted"
+                    | "toReversed"
+                    | "toSpliced"
+                    | "with"
+            )
+        }) && callee_target(value)
+            .is_some_and(|receiver| self.value_is_fresh_array_expression(receiver))
+        {
+            return true;
+        }
+        let Some(resolved) = self.resolve_expression(callee) else {
+            return false;
+        };
+        resolved.global_state
+            && !resolved.module_state
+            && !resolved.possible_paths.is_empty()
+            && resolved.possible_paths.iter().all(|path| {
+                matches!(
+                    path.strip_prefix("globalThis.").unwrap_or(path),
+                    "Object.keys" | "Object.values" | "Object.entries"
+                ) || (matches!(
+                    path.strip_prefix("globalThis.").unwrap_or(path),
+                    "Array.from" | "Array.of"
+                ) && callee_target(value).is_some_and(|receiver| {
+                    self.resolve_expression(receiver).is_some_and(|receiver| {
+                        receiver.global_state
+                            && !receiver.module_state
+                            && !receiver.possible_paths.is_empty()
+                            && receiver
+                                .possible_paths
+                                .iter()
+                                .all(|path| matches!(path.as_str(), "Array" | "globalThis.Array"))
+                    })
+                }))
+            })
+    }
+
     // A constructor name is fresh only when every resolved path is an unshadowed global
     // constructor.  Treating a local `Map` (or a mixed alias after reassignment) as the built-in
     // solely from its spelling would let a retained object escape the unresolved-target check.
@@ -5191,6 +5901,24 @@ impl BindingModel {
                 | "RegExpLiteral"
                 | "Literal",
             ) => true,
+            Some("CallExpression") => {
+                self.value_is_fresh_array_expression(value)
+                    || value
+                        .get("callee")
+                        .and_then(|callee| self.resolve_expression(callee))
+                        .is_some_and(|resolved| {
+                            resolved.global_state
+                                && !resolved.module_state
+                                && !resolved.possible_paths.is_empty()
+                                && resolved.possible_paths.iter().all(|path| {
+                                    matches!(
+                                        path.as_str(),
+                                        "Object.fromEntries" | "globalThis.Object.fromEntries"
+                                    )
+                                })
+                        })
+            }
+            Some("AwaitExpression") => self.value_is_fresh_array_expression(value),
             Some("NewExpression") => {
                 let Some(callee) = value.get("callee") else {
                     return false;
@@ -7274,7 +8002,15 @@ fn generated_source_diagnostics(
                         end: reexport.end,
                     },
                 );
-            } else if input.selected_action_entries.contains(entry) {
+            } else if input.selected_action_entries.contains(entry)
+                && !resolve_non_registration_export(
+                    input,
+                    modules,
+                    entry,
+                    &reexport.export_name,
+                    &mut BTreeSet::new(),
+                )?
+            {
                 pending.push(source_mismatch_diagnostic(
                     entry,
                     reexport.start,
@@ -7291,6 +8027,7 @@ fn generated_source_diagnostics(
             // export, member call, or destructuring form the registration resolver cannot prove.
             for (export_name, &(start, end)) in &summary.runtime_exports {
                 if !source_functions.contains_key(&(entry.clone(), export_name.clone()))
+                    && !summary.non_registration_exports.contains(export_name)
                     && !summary
                         .opaque_exports
                         .iter()
@@ -7301,7 +8038,7 @@ fn generated_source_diagnostics(
                         start,
                         end,
                         format!(
-                            "Selected action entry {entry} has unresolved runtime export {export_name}; every value export must resolve to a supported registration."
+                            "Selected action entry {entry} has unresolved runtime export {export_name}; every value export must resolve to a supported registration or a structurally non-registration helper."
                         ),
                     ));
                 }
@@ -7429,6 +8166,49 @@ fn resolve_source_registration(
         },
         visited,
     )
+}
+
+// Follow only named local re-exports; unknown factories and wildcard inventories stay closed.
+fn resolve_non_registration_export(
+    input: &ContextInput,
+    modules: &BTreeMap<String, LoadedModule>,
+    module: &str,
+    name: &str,
+    visited: &mut BTreeSet<(String, String)>,
+) -> Result<bool> {
+    if !visited.insert((module.to_string(), name.to_string())) {
+        return Ok(false);
+    }
+    let summary = &modules
+        .get(module)
+        .context("helper export module disappeared")?
+        .summary
+        .context_reuse;
+    if summary.non_registration_exports.contains(name) {
+        return Ok(true);
+    }
+    let Some(export) = summary
+        .reexports
+        .iter()
+        .find(|export| export.export_name == name)
+    else {
+        return Ok(false);
+    };
+    let reference = ContextModuleReference {
+        specifier: export.specifier.clone(),
+        kind: "reexport".to_string(),
+        type_only: false,
+        start: export.start,
+        end: export.end,
+    };
+    match resolve_reference(input, module, &reference)? {
+        ResolvedReference::Local(target)
+            if is_reviewed_root(&target, &input.roots) && modules.contains_key(&target) =>
+        {
+            resolve_non_registration_export(input, modules, &target, &export.imported_name, visited)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn source_mismatch_diagnostic(
@@ -8489,6 +9269,55 @@ export const second = internalAction({ handler: async (_ctx, args) => args.other
         assert!(input.database_functions.is_empty());
         assert!(input.default_database_entries.is_empty());
 
+        for helpers in [
+            "export function helper(value) { return value; }",
+            "function consume(callback) { return callback(1); } export function helper(value) { return value; } consume(helper);",
+            "export const helper = (value) => value; export const label = 'label';",
+            "function helper(value) { return value; } export { helper as shared };",
+            "export default function helper(value) { return value; }",
+            "export const options = { limit: 10 }; export const labels = ['one'];",
+            "export class HelperError extends Error { constructor() { super('failure'); } }",
+        ] {
+            input
+                .source_texts
+                .as_mut()
+                .unwrap()
+                .insert(entry.to_string(), format!("{safe_source}\n{helpers}"));
+            let output = analyze(&input).unwrap();
+            assert!(
+                output.safe,
+                "{helpers}: {:?}",
+                serde_json::to_value(output.diagnostics()).unwrap()
+            );
+        }
+        for hidden in [
+            "export function hidden() {} hidden.isAction = true;",
+            "function mark(fn) { fn.isAction = true; } export function hidden() {} mark(hidden);",
+            "function mark(fn) { arguments[0].isAction = true; } export function hidden() {} mark(hidden);",
+            "export function hidden() {} unknownFactory(hidden);",
+            "export const hidden = {}; function mark(value) { value.isAction = true; } mark(hidden);",
+            "export function hidden() {} const alias = hidden; Object.assign(alias, { isAction: true });",
+            "export const hidden = { isAction: true };",
+            "export const hidden = { ['is' + 'Action']: true };",
+            "export const hidden = { ...first };",
+            "export const hidden = { __proto__: first };",
+            "export const hidden = unknownFactory();",
+            "export class hidden { static isAction = true; }",
+            "export class hidden extends first {}",
+        ] {
+            input
+                .source_texts
+                .as_mut()
+                .unwrap()
+                .insert(entry.to_string(), format!("{safe_source}\n{hidden}"));
+            assert!(!analyze(&input).unwrap().safe, "{hidden}");
+        }
+        input
+            .source_texts
+            .as_mut()
+            .unwrap()
+            .insert(entry.to_string(), safe_source.to_string());
+
         input.action_functions.pop();
         let output = analyze(&input).unwrap();
         assert!(!output.safe);
@@ -8672,6 +9501,21 @@ export const second = internalAction({ handler: async (_ctx, args) => args.other
                     .message
                     .contains("unresolved registration re-export hidden")
         }));
+        input.source_texts.as_mut().unwrap().insert(
+            target.to_string(),
+            "export function hidden(value) { return value; }".to_string(),
+        );
+        assert!(analyze(&input).unwrap().safe);
+        input.action_functions.push(super::GeneratedFunction {
+            entry_path: entry.to_string(),
+            export_name: "hidden".to_string(),
+            udf_kind: "action".to_string(),
+        });
+        assert!(
+            !analyze(&input).unwrap().safe,
+            "A helper cannot satisfy an invented action inventory record"
+        );
+        input.action_functions.pop();
         input.metafile.inputs.get_mut(entry).unwrap().imports.pop();
         input.metafile.inputs.remove(target);
         input.source_texts.as_mut().unwrap().remove(target);
@@ -11910,8 +12754,82 @@ export function run(): void {
         assert!(!unresolved_starts.contains(&fresh_start));
         assert!(unresolved_starts.contains(&retained_start));
         assert!(unresolved_starts.contains(&escaped_start));
-        assert!(unresolved_starts.contains(&recursive_start));
+        assert!(!unresolved_starts.contains(&recursive_start));
         assert!(unresolved_starts.contains(&reassigned_start));
+    }
+
+    #[test]
+    fn recursive_helper_ownership_checks_every_entry_and_argument_path() {
+        for (helpers, call, blocked) in [
+            (
+                "function collect(value, output) { output.push(value); if (value.child) collect(value.child, output); }",
+                "collect(input, []);",
+                false,
+            ),
+            (
+                "function collect(value, output) { output.push(value); if (value.child) collect(value.child, output); }",
+                "collect(input, []); collect(input, retained);",
+                true,
+            ),
+            (
+                "function collect(value, output) { output.push(value); if (value.child) collect(value.child, input); }",
+                "collect(input, []);",
+                true,
+            ),
+            (
+                "function first(output) { output.push(input); second(output); } function second(output) { first(output); }",
+                "first([]);",
+                false,
+            ),
+            (
+                "function first(output) { output.push(input); second(output); } function second(output) { first(output); }",
+                "first([]); second(retained);",
+                true,
+            ),
+            (
+                "function collect(left, right) { left.push(input); if (input.flag) collect(right, left); }",
+                "collect([], retained);",
+                true,
+            ),
+            (
+                "function collect(output) { output.push(input); if (input.flag) collect(output.child); }",
+                "collect([]);",
+                true,
+            ),
+            (
+                "function collect(output) { output.push(input); output = retained; if (input.flag) collect(output); }",
+                "collect([]);",
+                true,
+            ),
+            (
+                "function collect(output) { output.push(input); if (input.flag) collect(output); }",
+                "collect([]); input.escape(collect);",
+                true,
+            ),
+        ] {
+            let source =
+                format!("const retained = []; export function run(input) {{ {helpers} {call} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.severity != "information"),
+                blocked,
+                "{helpers} {call}"
+            );
+        }
     }
 
     #[test]
@@ -12008,6 +12926,648 @@ export function mutate(): void {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn atomics_only_operations_require_intrinsic_provenance_and_check_the_target() {
+        for method in [
+            "store",
+            "exchange",
+            "compareExchange",
+            "sub",
+            "and",
+            "or",
+            "xor",
+        ] {
+            for (body, blocked) in [
+                (format!("input.{method}(input);"), false),
+                (format!("Atomics.{method}(retained, 0, 1);"), true),
+                (
+                    format!("const operation = Atomics.{method}; operation(retained, 0, 1);"),
+                    true,
+                ),
+                (
+                    format!("Atomics.{method}.call(null, retained, 0, 1);"),
+                    true,
+                ),
+                (
+                    format!("Reflect.apply(Atomics.{method}, null, [retained, 0, 1]);"),
+                    true,
+                ),
+                (format!("Atomics.{method}(input, 0, 1);"), true),
+            ] {
+                let source = format!(
+                    "const retained = new Int32Array(8); export function run(input) {{ {body} }}"
+                );
+                let summary = crate::summarize_module(
+                    "convex/entry.ts",
+                    std::path::Path::new("convex/entry.ts"),
+                    &source,
+                    "test-source-hash",
+                    "test-cache-key",
+                    "test-compiler-fingerprint",
+                    "test-policy-fingerprint",
+                    &mut PhaseMeasurements::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    summary
+                        .context_reuse
+                        .facts
+                        .iter()
+                        .any(|fact| fact.severity != "information"),
+                    blocked,
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_map_gets_require_fresh_insertions_and_accounted_references() {
+        for (body, blocked) in [
+            (
+                "const map = new Map(); map.set(input.key, []); map.get(input.key).push(input);",
+                false,
+            ),
+            (
+                "const map = new Map(); const existing = map.get(input.key); if (existing === undefined) { map.set(input.key, [input]); } else { existing.push(input); } return map;",
+                false,
+            ),
+            (
+                "const map = new Map(); map.set('x', Array.from(input)); const value = map.get('x'); if (value) value.sort();",
+                false,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? []; value.push(input); map.set(input.key, value); return map;",
+                false,
+            ),
+            (
+                "const map = new Map(); const values = []; map.set(input.key, values); map.get(input.key).push(input);",
+                false,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? retained; value.push(input); map.set(input.key, value);",
+                true,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? []; value.push(input); map.set(input.key, value); map.set('other', retained);",
+                true,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? []; input.mutate(value); map.set(input.key, value); value.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? []; map.set(input.key, value); return () => value.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); let value = []; value = retained; map.set(input.key, value); map.get(input.key).push(input);",
+                true,
+            ),
+            (
+                "const values = []; function mutate() { const map = new Map(); map.set('x', values); map.get('x').push(input); } return mutate;",
+                true,
+            ),
+            (
+                "const map = new Map(); const value = map.get(input.key) ?? []; const other = new Map(); other.set(input.key, value); value.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', retained); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(input); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const Map = input.Map; const map = new Map(); map.set('x', []); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); input.change(map); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); const alias = map; alias.set('x', retained); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []).set('x', retained); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); const alias = map.set('y', []); alias.set('x', retained); map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', { items: retained }); map.get('x').items.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); return () => map.get('x').push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); const value = map.get('x'); return () => value.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); const value = map.get('x'); const alias = value; return () => alias.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); const value = map.get('x'); const alias = value.sort(); return () => alias.push(input);",
+                true,
+            ),
+            (
+                "const map = new Map(); map.set('x', []); const value = map.get('x').sort(); return () => value.push(input);",
+                true,
+            ),
+        ] {
+            let source = format!("const retained = []; export function run(input) {{ {body} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.severity != "information"),
+                blocked,
+                "{body}: {:?}",
+                serde_json::to_value(&summary.context_reuse.facts).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn local_helper_returns_transfer_only_per_call_allocations() {
+        for (helpers, body, blocked) in [
+            (
+                "function make() { return []; }",
+                "make().push(input);",
+                false,
+            ),
+            (
+                "const make = () => new Map();",
+                "make().set(input, 1);",
+                false,
+            ),
+            (
+                "function make(input) { const values = Object.keys(input); return values; }",
+                "const values = make(input); values.sort();",
+                false,
+            ),
+            (
+                "function make(input) { const values = []; values.push(input); return values; }",
+                "const values = make(input); values.push(input);",
+                false,
+            ),
+            (
+                "function make(input) { const first = []; const result = first; return result; }",
+                "make(input).push(input);",
+                false,
+            ),
+            (
+                "function make(input) { return input.flag ? [] : new Array(); }",
+                "make(input).sort();",
+                false,
+            ),
+            (
+                "function first() { return []; } function make() { return first(); }",
+                "make().push(input);",
+                false,
+            ),
+            (
+                "function make() { return retained; }",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function make(input) { return input; }",
+                "make(retained).push(input);",
+                true,
+            ),
+            (
+                "function make(input) { if (input.flag) return []; return retained; }",
+                "make(input).push(input);",
+                true,
+            ),
+            (
+                "function make() { const values = []; return values; }",
+                "const alias = make; alias().push(input);",
+                true,
+            ),
+            (
+                "let make = () => []; make = () => retained;",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function make() { return []; }",
+                "function make() { return retained; } make().push(input);",
+                true,
+            ),
+            (
+                "function make() { return make(); }",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function first() { return make(); } function make() { return first(); }",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function make() { const values = []; return () => values; }",
+                "make()().push(input);",
+                true,
+            ),
+            (
+                "function make() { return [retained]; }",
+                "make()[0].push(input);",
+                true,
+            ),
+            (
+                "async function make() { return []; }",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function* make() { return []; }",
+                "make().push(input);",
+                true,
+            ),
+            (
+                "function make() { const values = []; return values; }",
+                "const values = make(); return () => values.push(input);",
+                true,
+            ),
+            (
+                "",
+                "const values = []; function make() { return values; } make().push(input);",
+                true,
+            ),
+            (
+                "function make() { let values = []; values = retained; return values; }",
+                "make().push(input);",
+                true,
+            ),
+        ] {
+            let source =
+                format!("const retained = []; {helpers}\nexport function run(input) {{ {body} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.severity != "information"),
+                blocked,
+                "{source}: {}",
+                serde_json::to_string(&summary.context_reuse.facts).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn returned_closures_cannot_reuse_a_factory_allocation_as_request_owned_storage() {
+        for allocation in ["[]", "Object.keys(input)", "Array.from(input)", "new Map()"] {
+            for returned in [
+                "() => values.push(input)",
+                "{ run: () => values.push(input) }",
+                "new class { run() { values.push(input); } }",
+                "new class { run = () => values.push(input); }",
+                "saved",
+            ] {
+                let saved = if returned == "saved" {
+                    "const saved = () => values.push(input);"
+                } else {
+                    ""
+                };
+                let source = format!(
+                    "export function factory(input) {{ const values = {allocation}; values.key = input; {saved} return {returned}; }}"
+                );
+                let summary = crate::summarize_module(
+                    "convex/entry.ts",
+                    std::path::Path::new("convex/entry.ts"),
+                    &source,
+                    "test-source-hash",
+                    "test-cache-key",
+                    "test-compiler-fingerprint",
+                    "test-policy-fingerprint",
+                    &mut PhaseMeasurements::default(),
+                )
+                .unwrap();
+                assert!(
+                    summary
+                        .context_reuse
+                        .facts
+                        .iter()
+                        .any(|fact| fact.rule == "unresolved-mutator-application"),
+                    "{source}"
+                );
+            }
+        }
+        for source in [
+            "export function* factory(input) { const values = Object.keys(input); yield 1; values.push(input); }",
+            "export function* factory(input) { const values = Object.keys(input); yield () => values.push(input); }",
+            "export function* factory(input) { const map = new Map(); map.set('x', []); yield 1; map.get('x').push(input); }",
+            "export function factory(input) { const values = []; return values.push.bind(values); }",
+            "export function factory(input) { const values = []; const append = Array.prototype.push.bind(values); return append; }",
+            "export function factory(input) { const values = {}; return Object.assign.bind(null, values); }",
+            "export function factory(input) { return Array.prototype.push.bind([]); }",
+            "export function factory(input) { return Object.assign.bind(null, {}); }",
+            "export function factory(Array, input) { const values = []; return Array.from(input, item => { values.push(item); return item; }); }",
+            "export function factory(input) { const values = []; return Array.from.call(input.constructor, input, item => { values.push(item); return item; }); }",
+            "export function factory(input) { const values = []; return Array.from(input, item => () => values.push(item)); }",
+            "export function factory(input) { const values = Object.keys(input); class Handler { run() { values.push(input); } } return new Handler(); }",
+        ] {
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.rule == "unresolved-mutator-application"),
+                "{source}"
+            );
+        }
+        for source in [
+            "export function factory() { return input => { const values = Object.keys(input); values.sort(); return values; }; }",
+            "export function run(input) { const values = Object.keys(input); function sort() { values.sort(); } sort(); return values; }",
+            "export function run(input) { const values = Object.keys(input); function sort() { values.sort(); return values; } return sort(); }",
+            "export function run(input) { const values = []; return Array.from(input, item => { values.push(item); return item; }); }",
+            "export function run(input) { const values = []; const mapper = item => { values.push(item); return item; }; return globalThis.Array.from(input, mapper); }",
+            "export class Handler { run(input) { const values = Object.keys(input); values.sort(); return values; } }",
+        ] {
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .all(|fact| fact.severity == "information"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn awaited_aggregate_arrays_do_not_authorize_thenables_or_elements() {
+        for (expression, blocked) in [
+            ("await Promise.all(input)", false),
+            ("await globalThis.Promise.allSettled(input)", false),
+            ("(await Promise.all(input))[0]", true),
+            ("await Promise.resolve(input)", true),
+            ("await Promise.race(input)", true),
+            ("await Promise.any(input)", true),
+            ("await Promise.all.call(input.constructor, input)", true),
+            ("await { then(resolve) { resolve(input); } }", true),
+            ("await input.all(input)", true),
+        ] {
+            let source = format!(
+                "export async function run(input) {{ const values = {expression}; values.sort(); }}"
+            );
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.severity != "information"),
+                blocked,
+                "{expression}"
+            );
+        }
+        let source = "export async function run(Promise, input) { const values = await Promise.all(input); values.sort(); }";
+        let summary = crate::summarize_module(
+            "convex/entry.ts",
+            std::path::Path::new("convex/entry.ts"),
+            source,
+            "test-source-hash",
+            "test-cache-key",
+            "test-compiler-fingerprint",
+            "test-policy-fingerprint",
+            &mut PhaseMeasurements::default(),
+        )
+        .unwrap();
+        assert!(
+            summary
+                .context_reuse
+                .facts
+                .iter()
+                .any(|fact| fact.rule == "unresolved-mutator-application")
+        );
+    }
+
+    #[test]
+    fn intrinsic_allocations_prove_only_the_returned_container() {
+        for (statement, blocked) in [
+            ("Object.keys(input).sort();", false),
+            ("[...input].filter(x => x).sort();", false),
+            ("Array.from(input).map(x => x).flat().sort();", false),
+            ("new Array(input).slice().reverse();", false),
+            (
+                "const result = Object.values(input).flatMap(x => x); result.sort();",
+                false,
+            ),
+            ("Array.from(input).map(x => x)[0].push(input);", true),
+            ("const Array = input; new Array().slice().sort();", true),
+            ("Object.fromEntries(input).map(x => x).sort();", true),
+            (
+                "const receiver = []; receiver.constructor = input; receiver.map(x => x).sort();",
+                true,
+            ),
+            (
+                "const receiver = []; receiver.map = () => retained; receiver.map().sort();",
+                true,
+            ),
+            (
+                "const url = new URL(input); url.searchParams.set('key', input);",
+                false,
+            ),
+            (
+                "const url = new URL(input); const alias = url; alias.searchParams.append('key', input);",
+                false,
+            ),
+            (
+                "const URL = input; const url = new URL(); url.searchParams.set('key', input);",
+                true,
+            ),
+            (
+                "const url = new URL(input); Object.defineProperty(url, 'searchParams', { value: input }); url.searchParams.set('key', input);",
+                true,
+            ),
+            (
+                "const form = new FormData(); form.append('key', input);",
+                false,
+            ),
+            (
+                "const FormData = input; const form = new FormData(); form.append('key', input);",
+                true,
+            ),
+            (
+                "const values = Object.values(input); values.reverse();",
+                false,
+            ),
+            (
+                "const entries = Object.entries(input); entries.push(['x', input]);",
+                false,
+            ),
+            (
+                "const copy = Object.fromEntries(input); Object.assign(copy, input);",
+                false,
+            ),
+            ("const values = Array.from(input); values.sort();", false),
+            (
+                "const values = globalThis.Array.of(input); values.push(input);",
+                false,
+            ),
+            (
+                "const A = Array; const values = A.from(input); values.sort();",
+                false,
+            ),
+            ("const keys = Object.keys; keys(input).sort();", false),
+            (
+                "const values = Array.from(input); values[0].push(input);",
+                true,
+            ),
+            (
+                "const copy = Object.fromEntries(input); copy.items.push(input);",
+                true,
+            ),
+            ("const Array = input; Array.from(input).sort();", true),
+            ("const Object = input; Object.keys(input).sort();", true),
+            (
+                "const from = input.flag ? Array.from : input.from; from(input).sort();",
+                true,
+            ),
+            ("Array.from.call(input.constructor, input).sort();", true),
+            (
+                "const holder = { from: Array.from }; holder.from(input).sort();",
+                true,
+            ),
+            ("input.map(x => x).sort();", true),
+            ("input.flat().sort();", true),
+        ] {
+            let source = format!("export function run(input) {{ {statement} }}");
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .context_reuse
+                    .facts
+                    .iter()
+                    .any(|fact| fact.severity != "information"),
+                blocked,
+                "{statement}: {:?}",
+                serde_json::to_value(&summary.context_reuse.facts).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn member_writes_preserve_the_container_but_invalidate_children() {
+        for statement in [
+            "holder.items = retained;",
+            "holder.items ||= retained;",
+            "const alias = holder; alias.items = retained;",
+            "Object.assign(holder, { items: retained });",
+            "({ items: holder.items } = { items: retained });",
+            "for (holder.items of [retained]) {}",
+        ] {
+            let source = format!(
+                "const retained = []; export function run(input) {{ const holder = {{ items: [] }}; {statement} Object.assign(holder, {{ other: input }}); holder.items.push(input); }}"
+            );
+            let summary = crate::summarize_module(
+                "convex/entry.ts",
+                std::path::Path::new("convex/entry.ts"),
+                &source,
+                "test-source-hash",
+                "test-cache-key",
+                "test-compiler-fingerprint",
+                "test-policy-fingerprint",
+                &mut PhaseMeasurements::default(),
+            )
+            .unwrap();
+            let container = source.find("Object.assign(holder, { other:").unwrap() as u32;
+            let child = source.find("holder.items.push").unwrap() as u32;
+            let facts = &summary.context_reuse.facts;
+            assert!(
+                !facts
+                    .iter()
+                    .any(|fact| fact.start == container && fact.severity != "information"),
+                "{statement}"
+            );
+            assert!(
+                facts
+                    .iter()
+                    .any(|fact| fact.start == child && fact.severity != "information"),
+                "{statement}"
+            );
         }
     }
 
@@ -14053,6 +15613,8 @@ pub(crate) fn summarize_context_module(
 ) -> Result<ContextModuleSummary> {
     let mut bindings = BindingModel::new_with_module_this_state(ast, is_commonjs)?;
     bindings.add_direct_call_parameter_origins(ast, resolved_binding_facts, exports)?;
+    bindings.invalidate_escaping_closure_captures(ast, resolved_binding_facts);
+    bindings.collect_local_map_values(ast, resolved_binding_facts);
     // Helper parameters can name property writers as well as their targets. Resolve those
     // call-site origins before trusting any nested allocation proof.
     bindings.collect_fresh_bindings(ast)?;
@@ -14103,6 +15665,12 @@ pub(crate) fn summarize_context_module(
         suppressions: parse_suppressions(source, comments),
         opaque_exports: collect_opaque_exports(ast)?,
         runtime_exports: collect_runtime_exports(ast)?,
+        non_registration_exports: collect_non_registration_exports(
+            ast,
+            exports,
+            &bindings,
+            resolved_binding_facts,
+        )?,
         registrations: collect_registrations(ast)?,
         reexports: collect_reexports(ast)?,
     })
@@ -16104,6 +17672,7 @@ fn is_known_fresh_constructor(name: &str) -> bool {
             | "ArrayBuffer"
             | "Date"
             | "Headers"
+            | "FormData"
             | "Map"
             | "RegExp"
             | "Request"
@@ -16297,6 +17866,228 @@ fn collect_registrations(ast: &Value) -> Result<Vec<ContextRegistration>> {
         .collect::<Vec<_>>();
     registrations.sort_by(|left, right| left.export_name.cmp(&right.export_name));
     Ok(registrations)
+}
+
+fn collect_non_registration_exports(
+    ast: &Value,
+    exports: &BTreeMap<String, String>,
+    bindings: &BindingModel,
+    resolved_binding_facts: &BTreeMap<(u32, u32), crate::ResolvedBindingFact>,
+) -> Result<BTreeSet<String>> {
+    let body = ast
+        .get("body")
+        .and_then(Value::as_array)
+        .context("ESTree program has no body")?;
+    let mut values = BTreeMap::new();
+    for statement in body {
+        let declaration = match node_kind(statement) {
+            Some("ExportNamedDeclaration" | "ExportDefaultDeclaration") => {
+                statement.get("declaration")
+            }
+            _ => Some(statement),
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        if node_kind(declaration) == Some("VariableDeclaration") {
+            for declarator in declaration
+                .get("declarations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(name), Some(value)) = (
+                    declarator.get("id").and_then(identifier),
+                    declarator.get("init"),
+                ) {
+                    values.insert(name.to_string(), value);
+                }
+            }
+        } else if let Some(name) = declaration.get("id").and_then(identifier) {
+            values.insert(name.to_string(), declaration);
+        }
+        if node_kind(statement) == Some("ExportDefaultDeclaration") {
+            values.insert("default".to_string(), declaration);
+        }
+    }
+    // A helper passed to an opaque consumer can acquire registration flags. Account for
+    // every local value use before classifying an exported object as a non-registration.
+    let mut allowed = BTreeSet::new();
+    let mut invoked = BTreeSet::new();
+    let mut uses_implicit_arguments = false;
+    let mut nodes = Vec::new();
+    collect_runtime_nodes(ast, &mut nodes);
+    for node in nodes {
+        if identifier(node) == Some("arguments")
+            && bindings
+                .binding_at("arguments", node_span(node)?.0)
+                .is_none()
+        {
+            uses_implicit_arguments = true;
+        }
+        let reference = match node_kind(node) {
+            Some("CallExpression" | "NewExpression") => node.get("callee"),
+            Some("MemberExpression" | "OptionalMemberExpression") => node.get("object"),
+            Some("ExportSpecifier") => node.get("local"),
+            Some("ExportDefaultDeclaration") => node.get("declaration"),
+            Some("BinaryExpression")
+                if node.get("operator").and_then(Value::as_str) == Some("instanceof") =>
+            {
+                node.get("right")
+            }
+            _ => None,
+        };
+        if let Some(reference) = reference
+            .map(unwrap_expression)
+            .filter(|reference| identifier(reference).is_some())
+        {
+            allowed.insert(node_span(reference)?);
+            if matches!(node_kind(node), Some("CallExpression" | "NewExpression")) {
+                invoked.insert(node_span(reference)?);
+            }
+        }
+    }
+    for (parameter, origins) in &bindings.direct_call_parameter_origins {
+        // A closed local consumer that only invokes its callback cannot decorate it. Implicit
+        // arguments can expose the same value without a parameter reference, so keep those
+        // modules conservative. Unknown consumers stay opaque.
+        if !uses_implicit_arguments
+            && bindings
+                .binding_references(*parameter, resolved_binding_facts)
+                .iter()
+                .all(|reference| {
+                    !reference.write
+                        && (!reference.read || invoked.contains(&(reference.start, reference.end)))
+                })
+        {
+            for origin in origins {
+                let value = unwrap_expression(&origin.value);
+                if origin.fields.is_empty() && identifier(value).is_some() {
+                    allowed.insert(node_span(value)?);
+                }
+            }
+        }
+    }
+    let closed_uses = |local: &str, value: &Value| {
+        let value = unwrap_expression(value);
+        if matches!(
+            node_kind(value),
+            Some("Literal" | "TemplateLiteral" | "BinaryExpression" | "UnaryExpression")
+        ) {
+            return true;
+        }
+        let name = if local == "default" {
+            value.get("id").and_then(identifier)
+        } else {
+            Some(local)
+        };
+        let Some(name) = name else { return true };
+        let Some(binding) = bindings.binding_at(name, node_span(value).unwrap().0) else {
+            return false;
+        };
+        bindings
+            .binding_references(binding, resolved_binding_facts)
+            .iter()
+            .all(|reference| {
+                !reference.write
+                    && (!reference.read || allowed.contains(&(reference.start, reference.end)))
+            })
+    };
+    let mut helpers: BTreeSet<String> = exports
+        .iter()
+        .filter_map(|(export, local)| {
+            let value = values.get(local).or_else(|| {
+                (export == "default")
+                    .then(|| values.get("default"))
+                    .flatten()
+            })?;
+            (non_registration_value(value, &values, bindings, &mut BTreeSet::new())
+                && closed_uses(local, value))
+            .then(|| export.clone())
+        })
+        .collect();
+    if values.get("default").is_some_and(|value| {
+        non_registration_value(value, &values, bindings, &mut BTreeSet::new())
+            && closed_uses("default", value)
+    }) {
+        helpers.insert("default".to_string());
+    }
+    Ok(helpers)
+}
+
+fn non_registration_value(
+    value: &Value,
+    values: &BTreeMap<String, &Value>,
+    bindings: &BindingModel,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    let value = unwrap_expression(value);
+    match node_kind(value) {
+        // Property writes to these retained helpers remain hard findings, including at import
+        // time. A declaration is not itself a registration; an unknown factory result can be.
+        Some("FunctionDeclaration" | "FunctionExpression" | "ArrowFunctionExpression") => true,
+        Some("ClassDeclaration" | "ClassExpression") => {
+            value
+                .get("decorators")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                && value.get("superClass").is_none_or(|parent| {
+                    parent.is_null()
+                        || bindings.resolve_expression(parent).is_some_and(|resolved| {
+                            resolved.global_state && resolved.path == "Error"
+                        })
+                })
+                && value
+                    .get("body")
+                    .and_then(|body| body.get("body"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|members| {
+                        members.iter().all(|member| {
+                            node_kind(member) != Some("StaticBlock")
+                                && member.get("static").and_then(Value::as_bool) != Some(true)
+                                && member
+                                    .get("decorators")
+                                    .and_then(Value::as_array)
+                                    .is_none_or(Vec::is_empty)
+                        })
+                    })
+        }
+        Some("Literal") => value.get("regex").is_none(),
+        Some("TemplateLiteral" | "BinaryExpression" | "UnaryExpression") => true,
+        Some("Identifier") => {
+            let Some(name) = identifier(value) else {
+                return false;
+            };
+            if !visited.insert(name.to_string()) {
+                return false;
+            }
+            let result = values
+                .get(name)
+                .is_some_and(|origin| non_registration_value(origin, values, bindings, visited));
+            visited.remove(name);
+            result
+        }
+        Some("ArrayExpression") => true,
+        Some("ObjectExpression") => value
+            .get("properties")
+            .and_then(Value::as_array)
+            .is_some_and(|properties| {
+                properties.iter().all(|property| {
+                    node_kind(property) == Some("Property")
+                        && property.get("computed").and_then(Value::as_bool) != Some(true)
+                        && property
+                            .get("key")
+                            .and_then(static_name)
+                            .is_some_and(|key| {
+                                !matches!(
+                                    key.as_str(),
+                                    "isAction" | "isQuery" | "isMutation" | "__proto__"
+                                )
+                            })
+                })
+            }),
+        _ => false,
+    }
 }
 
 fn collect_runtime_exports(ast: &Value) -> Result<BTreeMap<String, (u32, u32)>> {
@@ -17233,13 +19024,6 @@ fn is_mutating_method(method: &str) -> bool {
             | "grow"
             | "transfer"
             | "transferToFixedLength"
-            | "store"
-            | "exchange"
-            | "compareExchange"
-            | "sub"
-            | "and"
-            | "or"
-            | "xor"
             | "__defineGetter__"
             | "__defineSetter__"
             | "call"
@@ -17248,6 +19032,8 @@ fn is_mutating_method(method: &str) -> bool {
 }
 
 fn is_target_first_mutator(path: &str) -> bool {
+    // Atomics operations mutate their first argument, not the object exposing the method.
+    // Their names alone must not classify unrelated query builders or storage APIs as writes.
     let path = path.strip_prefix("globalThis.").unwrap_or(path);
     matches!(
         path,

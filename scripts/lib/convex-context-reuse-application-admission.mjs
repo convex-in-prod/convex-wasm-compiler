@@ -145,6 +145,9 @@ export function authenticateConvexContextReuseApplicationAdmissionPolicy(
       "kind",
       "otherUnsupportedFindings",
       "rationale",
+      ...(value != null && Object.hasOwn(value, "reviewedActionEntries")
+        ? ["reviewedActionEntries"]
+        : []),
     ]) ||
     value.kind !== APPLICATION_ADMISSION_POLICY_KIND ||
     value.hardFindings !== "block" ||
@@ -179,6 +182,20 @@ export function authenticateConvexContextReuseApplicationAdmissionPolicy(
     throw new Error(
       `${description} must admit only unsupported unresolved-mutator-application findings in sorted first-party file roots.`
     );
+  }
+  if (Object.hasOwn(value, "reviewedActionEntries")) {
+    const entries = value.reviewedActionEntries;
+    if (
+      !Array.isArray(entries) ||
+      entries.length === 0 ||
+      entries.some((entry) => typeof entry !== "string" || !validContextReusePath(entry)) ||
+      new Set(entries).size !== entries.length ||
+      JSON.stringify([...entries].sort(compareRustStrings)) !== JSON.stringify(entries)
+    ) {
+      throw new Error(
+        `${description} reviewedActionEntries must be non-empty, unique, sorted normalized source paths.`
+      );
+    }
   }
   return freezeGraphBasis(structuredClone(value));
 }
@@ -980,7 +997,11 @@ export function authenticateConvexContextReuseApplicationAdmission(
         retained.admission.identity,
         expectedIdentity
       );
-      requireStrictContextReuseEntries(retained.admission, strictEntries);
+      requireStrictContextReuseEntries(
+        retained.admission,
+        strictEntries,
+        normalizedApplicationAdmissionPolicy?.reviewedActionEntries
+      );
       return retained.admission;
     }
   }
@@ -1043,7 +1064,11 @@ export function authenticateConvexContextReuseApplicationAdmission(
       "Convex context-reuse third-party material fingerprints"
     ),
   });
-  requireStrictContextReuseEntries(admission, strictEntries);
+  requireStrictContextReuseEntries(
+    admission,
+    strictEntries,
+    normalizedApplicationAdmissionPolicy?.reviewedActionEntries
+  );
   return admission;
 }
 

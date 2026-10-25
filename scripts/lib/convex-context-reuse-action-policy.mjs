@@ -42,8 +42,12 @@ export function contextReuseActionPolicy(value) {
   return { entries, grouping };
 }
 
-/** Selected action graphs cannot inherit a database mutator-analysis exception. */
-export function requireStrictContextReuseEntries(admission, strictEntries) {
+/** Action graphs default to strict admission; reviewed entries need explicit policy authority. */
+export function requireStrictContextReuseEntries(
+  admission,
+  strictEntries,
+  reviewedActionEntries = []
+) {
   if (!Array.isArray(strictEntries)) {
     throw new Error("Strict context-reuse entries must be an array.");
   }
@@ -54,7 +58,14 @@ export function requireStrictContextReuseEntries(admission, strictEntries) {
     }
   }
   for (const entry of admission.applicationAdmission?.entryAdmissions ?? []) {
-    if (selected.has(entry.entry) && entry.disposition !== "analysis-safe") {
+    if (
+      selected.has(entry.entry) &&
+      entry.disposition !== "analysis-safe" &&
+      !(
+        entry.disposition === "conservative-local-mutator-application" &&
+        reviewedActionEntries.includes(entry.entry)
+      )
+    ) {
       throw new Error(
         `Action context reuse requires supported analysis without admitted findings: ${entry.entry}`
       );
