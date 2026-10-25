@@ -11,6 +11,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 function compareStrings(left, right) {
@@ -204,9 +205,49 @@ function treeMaterialPaths(root, current, paths, activeDirectories = new Set()) 
 
 export function convexApiCompilerMaterialPaths({ nodeModulesRoot }) {
   const root = resolve(nodeModulesRoot);
+  const canonicalRoot = realpathSync(root);
+  const manifestPath = realpathSync(join(root, "tsrs", "package.json"));
+  const manifest = JSON.parse(readStableInstalledFile(manifestPath, false).contents);
+  if (
+    manifest.optionalDependencies === null ||
+    typeof manifest.optionalDependencies !== "object" ||
+    Array.isArray(manifest.optionalDependencies)
+  ) {
+    throw new Error("Installed tsrs has no native package dependency manifest.");
+  }
+  const requireFromTsrs = createRequire(manifestPath);
+  const packagePaths = new Set(["tsrs"]);
   const paths = [];
+  try {
+    lstatSync(join(root, "@tsrs"));
+    // Resolution canonicalizes package symlinks. Retain the installed scope too so
+    // changing a native package link cannot leave its old target authenticated.
+    packagePaths.add("@tsrs");
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  for (const name of Object.keys(manifest.optionalDependencies)) {
+    if (!name.startsWith("@tsrs/")) {
+      throw new Error(`Unsupported installed tsrs native dependency: ${name}`);
+    }
+    let nativeManifest;
+    try {
+      nativeManifest = requireFromTsrs.resolve(`${name}/package.json`);
+    } catch (error) {
+      // npm intentionally omits optional packages for other platforms.
+      if (error instanceof Error && "code" in error && error.code === "MODULE_NOT_FOUND") continue;
+      throw error;
+    }
+    // Resolve from tsrs itself: npm may nest its native package instead of hoisting it.
+    // Keep the same repository-relative material boundary for every resolved package.
+    const nativePath = checkedMaterialPath(toPosix(relative(canonicalRoot, dirname(nativeManifest))));
+    packagePaths.add(nativePath);
+    for (let ancestor = dirname(nativePath); ancestor !== "."; ancestor = dirname(ancestor)) {
+      paths.push(toPosix(ancestor));
+    }
+  }
   // Include all installed platform binaries and their libraries in compiler identity.
-  for (const packagePath of ["typescript", "tsrs", "@tsrs"]) {
+  for (const packagePath of packagePaths) {
     const packageRoot = join(root, packagePath);
     // The package root itself is not encountered by treeMaterialPaths. Include either its
     // directory state or its symlink/target state before walking descendants.
@@ -216,12 +257,38 @@ export function convexApiCompilerMaterialPaths({ nodeModulesRoot }) {
   return [...new Set(paths)].sort(compareStrings);
 }
 
-export function convexApiProgramMaterialPaths({ nodeModulesRoot, sourceFileNames }) {
+export function convexApiProgramMaterialPaths({ missingPaths = [], nodeModulesRoot, sourceFileNames }) {
   const root = resolve(nodeModulesRoot);
   const canonicalRoot = realpathSync(root);
   const paths = [];
   const directoryPaths = new Set();
   const packageJsonPaths = new Set();
+  // A missing dependency can become resolvable without changing an existing file.
+  // Authenticate its nearest existing parent listing so exact and surface reuse
+  // both notice that addition. The node_modules root is authenticated separately.
+  for (const missingPath of missingPaths) {
+    let current = dirname(resolve(missingPath));
+    while (current !== root && current !== canonicalRoot) {
+      const parentRelative = relative(canonicalRoot, current);
+      const lexicalRelative = relative(root, current);
+      if ([parentRelative, lexicalRelative].every((path) =>
+        path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)
+      )) {
+        throw new Error(`Installed resolution probe escapes node_modules: ${missingPath}`);
+      }
+      const status = statSync(current, { throwIfNoEntry: false });
+      if (status !== undefined) {
+        if (!status.isDirectory()) {
+          throw new Error(`Installed resolution probe parent is not a directory: ${current}`);
+        }
+        const materialPath = lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`)
+          ? parentRelative : lexicalRelative;
+        directoryPaths.add(toPosix(materialPath));
+        break;
+      }
+      current = dirname(current);
+    }
+  }
   for (const sourceFileName of sourceFileNames) {
     let materialPath = relative(root, resolve(sourceFileName));
     if (materialPath === ".." || materialPath.startsWith(`..${sep}`) || isAbsolute(materialPath)) {
@@ -278,11 +345,9 @@ function walkConvexApiInstalledMaterial({
   } else if (rootBefore.isSymbolicLink()) {
     const { state, target } = readStableInstalledSymlink(root);
     const targetPath = realpathSync(root);
-    const targetState = lstatSync(targetPath, { bigint: true });
-    if (targetState.isSymbolicLink() || !targetState.isDirectory()) {
-      throw new Error(`Installed generator material root has an unsupported target: ${root}`);
-    }
+    const { entries, state: targetState } = readStableInstalledDirectory(targetPath);
     rootAuthority = {
+      entries: Object.freeze(entries.map((entry) => Object.freeze({ ...entry }))),
       kind: "symlink",
       state,
       target,
@@ -306,6 +371,16 @@ function walkConvexApiInstalledMaterial({
     hash.update("\0");
   }
   let bytes = 0;
+  function hashDirectoryEntries(entries) {
+    for (const entry of entries) {
+      bytes += Buffer.byteLength(entry.name);
+      hash.update(entry.kind);
+      hash.update("\0");
+      hash.update(entry.name);
+      hash.update("\0");
+    }
+  }
+  hashDirectoryEntries(rootAuthority.entries);
   const regularFiles = [];
   const verificationRecords = [];
   for (const materialPath of normalizedPaths) {
@@ -343,13 +418,7 @@ function walkConvexApiInstalledMaterial({
       hash.update("\0");
       hash.update(Number(state.mode & 0o7777n).toString(8));
       hash.update("\0");
-      for (const entry of entries) {
-        bytes += Buffer.byteLength(entry.name);
-        hash.update(entry.kind);
-        hash.update("\0");
-        hash.update(entry.name);
-        hash.update("\0");
-      }
+      hashDirectoryEntries(entries);
       if (captureRegularFiles) {
         verificationRecords.push({
           entries: Object.freeze(entries.map((entry) => Object.freeze({ ...entry }))),
@@ -390,9 +459,11 @@ function walkConvexApiInstalledMaterial({
           });
         }
       } else if (targetStatus.isDirectory()) {
+        const { entries, state } = readStableInstalledDirectory(targetPath);
         hash.update("directory-target\0");
-        hash.update(Number(targetStatus.mode & 0o7777n).toString(8));
+        hash.update(Number(state.mode & 0o7777n).toString(8));
         hash.update("\0");
+        hashDirectoryEntries(entries);
         if (captureRegularFiles) {
           verificationRecords.push({
             kind: "symlink",
@@ -401,7 +472,7 @@ function walkConvexApiInstalledMaterial({
             target,
             targetKind: "directory",
             targetPath,
-            targetState: capturedInstalledState(targetStatus),
+            targetState: state,
           });
         }
       } else {
@@ -466,6 +537,26 @@ function walkConvexApiInstalledMaterial({
 
 export function captureConvexApiInstalledMaterial(options) {
   return walkConvexApiInstalledMaterial({ ...options, captureRegularFiles: true });
+}
+
+export function verifyConvexApiInstalledMaterial(capture) {
+  // Content hashes alone miss a dependency that changes during analysis and is restored.
+  // These process-local states bind the captured files to the native/API load window.
+  for (const record of [capture.rootAuthority, ...capture.verificationRecords]) {
+    const current = lstatSync(record.path, { bigint: true });
+    if (!sameFileState(record.state, current)) {
+      throw new Error(`Installed generator material changed after capture: ${record.path}`);
+    }
+    if (record.kind === "symlink") {
+      if (
+        readlinkSync(record.path) !== record.target ||
+        realpathSync(record.path) !== record.targetPath ||
+        !sameFileState(record.targetState, lstatSync(record.targetPath, { bigint: true }))
+      ) {
+        throw new Error(`Installed generator material changed after capture: ${record.path}`);
+      }
+    }
+  }
 }
 
 export function convexApiInstalledMaterialIdentity(options) {

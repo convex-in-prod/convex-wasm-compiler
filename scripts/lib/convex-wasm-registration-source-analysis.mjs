@@ -1,22 +1,9 @@
-import { extname } from "node:path";
+import { parseTsrsSource } from "./tsrs-source.mjs";
 
-export function createConvexWasmRegistrationSourceAnalyzer(ts) {
-  if (typeof ts?.createSourceFile !== "function" || typeof ts.version !== "string") {
-    throw new Error("registration source analyzer requires a TypeScript runtime");
+export function createConvexWasmRegistrationSourceAnalyzer({ api, ts }) {
+  if (typeof api?.createSourceFile !== "function" || typeof ts?.isIdentifier !== "function") {
+    throw new Error("registration source analyzer requires a tsrs API and AST helpers");
   }
-  function scriptKind(path) {
-    return {
-      ".cjs": ts.ScriptKind.JS,
-      ".cts": ts.ScriptKind.TS,
-      ".js": ts.ScriptKind.JS,
-      ".jsx": ts.ScriptKind.JSX,
-      ".mjs": ts.ScriptKind.JS,
-      ".mts": ts.ScriptKind.TS,
-      ".ts": ts.ScriptKind.TS,
-      ".tsx": ts.ScriptKind.TSX,
-    }[extname(path)];
-  }
-
   function transparentExpression(expression) {
     let current = expression;
     while (
@@ -24,7 +11,7 @@ export function createConvexWasmRegistrationSourceAnalyzer(ts) {
       ts.isAsExpression(current) ||
       ts.isSatisfiesExpression(current) ||
       ts.isNonNullExpression(current) ||
-      ts.isTypeAssertionExpression(current)
+      ts.isTypeAssertion(current)
     ) {
       current = current.expression;
     }
@@ -99,13 +86,10 @@ export function createConvexWasmRegistrationSourceAnalyzer(ts) {
 
   function registrationInputAnalysis({ absolutePath, input, inputPath, material }) {
     const source = new TextDecoder("utf-8", { fatal: true }).decode(material.contents);
-    const sourceFile = ts.createSourceFile(
-      absolutePath,
-      source,
-      ts.ScriptTarget.ESNext,
-      true,
-      scriptKind(absolutePath)
-    );
+    const sourceFile = parseTsrsSource(api, ts, absolutePath, source);
+    if (sourceFile === undefined) {
+      throw new Error(`Registration source is not valid: ${inputPath}`);
+    }
     const resolvedImports = new Map();
     for (const imported of input.imports ?? []) {
       if (

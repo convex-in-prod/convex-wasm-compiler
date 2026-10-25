@@ -4,6 +4,13 @@ import { createRequire } from "node:module";
 import { dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  captureConvexApiInstalledMaterial,
+  convexApiCompilerMaterialPaths,
+  verifyConvexApiInstalledMaterial,
+} from "./convex-api-flattener-material.mjs";
+import { authenticateTsrsRuntimeMaterial, parseTsrsSource } from "./tsrs-source.mjs";
+
 import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import {
   requirePrivateCacheDirectory,
@@ -17,8 +24,9 @@ import {
 } from "./convex-wasm-runtime-surface.mjs";
 import { convexWasmStaticHermesEsbuildSupportedSyntax } from "./convex-wasm-static-hermes-syntax.mjs";
 
+
 const PROFILE_KIND = "convex-wasm-esbuild-compile-profile-v2";
-const PROFILE_IDENTITY_KIND = "convex-wasm-esbuild-compile-profile-identity-v2";
+const PROFILE_IDENTITY_KIND = "convex-wasm-esbuild-compile-profile-identity-v3";
 const LOCAL_PROFILE_KIND = "convex-wasm-local-compile-profile-v1";
 const PROFILE_CACHE_KEY_KIND = "convex-wasm-local-compile-profile-cache-key-v1";
 const PROFILE_CACHE_METADATA_KIND = "convex-wasm-local-compile-profile-cache-metadata-v1";
@@ -1495,19 +1503,7 @@ function sourceLoader(path) {
   return loader;
 }
 
-function scriptKind(ts, path) {
-  return {
-    ".cjs": ts.ScriptKind.JS,
-    ".cts": ts.ScriptKind.TS,
-    ".js": ts.ScriptKind.JS,
-    ".jsx": ts.ScriptKind.JSX,
-    ".mjs": ts.ScriptKind.JS,
-    ".mts": ts.ScriptKind.TS,
-    ".ts": ts.ScriptKind.TS,
-    ".tsx": ts.ScriptKind.TSX,
-  }[extname(path)];
-}
-
+const SCRIPT_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"]);
 
 async function registrationModuleRecords({
   analyzeRegistrationInput,
@@ -1516,7 +1512,6 @@ async function registrationModuleRecords({
   materialsByAbsolutePath,
   metafile,
   repoRoot,
-  typescript,
 }) {
   const records = new Map();
   await Promise.all(
@@ -1524,8 +1519,7 @@ async function registrationModuleRecords({
       if (inputPath.includes(":")) return;
       const absolutePath = resolve(repoRoot, inputPath);
       const material = materialsByAbsolutePath.get(absolutePath);
-      const kind = scriptKind(typescript, absolutePath);
-      if (material === undefined || kind === undefined) return;
+      if (material === undefined || !SCRIPT_EXTENSIONS.has(extname(absolutePath))) return;
       const imports = (input.imports ?? []).map(({ external = false, kind, original, path }) => ({
         external,
         kind,
@@ -1562,7 +1556,6 @@ async function targetRegistrationTransforms({
   materialsByAbsolutePath,
   metafile,
   repoRoot,
-  typescript,
 }) {
   const records = await registrationModuleRecords({
     analyzeRegistrationInput,
@@ -1571,7 +1564,6 @@ async function targetRegistrationTransforms({
     materialsByAbsolutePath,
     metafile,
     repoRoot,
-    typescript,
   });
   const exportMemo = new Map();
   const bindingMemo = new Map();
@@ -1674,14 +1666,13 @@ async function sideEffectFreeApplicationModules({
   serverOnlyPlugin,
   toolchainRoot,
   transformedSources,
-  typescript,
   wasmPlugin,
 }) {
   const candidates = Object.entries(metafile.inputs)
     .filter(
       ([inputPath]) =>
         applicationInputPath(repoRoot, inputPath) &&
-        scriptKind(typescript, resolve(repoRoot, inputPath)) !== undefined
+        SCRIPT_EXTENSIONS.has(extname(inputPath))
     )
     .sort(([left], [right]) => compareStrings(left, right));
   if (candidates.length === 0) return new Set();
@@ -1952,9 +1943,10 @@ function sourceMaterialPlugin(
 function bindingPatternContainsName(ts, pattern, name) {
   if (ts.isIdentifier(pattern)) return pattern.text === name;
   if (!ts.isObjectBindingPattern(pattern) && !ts.isArrayBindingPattern(pattern)) return false;
+  // tsrs represents array holes as binding elements without a name.
   return pattern.elements.some(
     (element) =>
-      !ts.isOmittedExpression(element) && bindingPatternContainsName(ts, element.name, name)
+      element.name !== undefined && bindingPatternContainsName(ts, element.name, name)
   );
 }
 
@@ -1968,7 +1960,7 @@ function importBindingIsTypeOnly(ts, node) {
 }
 
 function declaredRuntimeBindingName(ts, node) {
-  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) return node.name;
+  if (ts.isVariableDeclaration(node) || ts.isParameterDeclaration(node)) return node.name;
   if (
     (ts.isFunctionDeclaration(node) ||
       ts.isFunctionExpression(node) ||
@@ -1993,11 +1985,11 @@ function declaredRuntimeBindingName(ts, node) {
   return undefined;
 }
 
-function assertTargetApplicationGlobalBindingIsUnbound(ts, { absolutePath, inputPath, material }) {
-  const kind = scriptKind(ts, absolutePath);
-  if (kind === undefined) return;
+function assertTargetApplicationGlobalBindingIsUnbound(api, ts, { absolutePath, inputPath, material }) {
+  if (!SCRIPT_EXTENSIONS.has(extname(absolutePath))) return;
   const source = new TextDecoder("utf-8", { fatal: true }).decode(material.contents);
-  const sourceFile = ts.createSourceFile(absolutePath, source, ts.ScriptTarget.ESNext, true, kind);
+  const sourceFile = parseTsrsSource(api, ts, absolutePath, source);
+  if (sourceFile === undefined) fail(`invalid source in reachable input ${inputPath}`);
   const visit = (node) => {
     const declaredName = declaredRuntimeBindingName(ts, node);
     if (
@@ -2010,23 +2002,24 @@ function assertTargetApplicationGlobalBindingIsUnbound(ts, { absolutePath, input
         )} is reserved in reachable input ${inputPath}`
       );
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(sourceFile);
 }
 
 function assertTargetApplicationGlobalBindingIsReserved({
+  api,
   materialsByAbsolutePath,
   metafile,
   repoRoot,
-  typescript,
+  tsrs,
 }) {
   const inputs = requireObject(metafile.inputs, "esbuild metafile inputs");
   for (const inputPath of Object.keys(inputs).sort(compareStrings)) {
     const absolutePath = resolve(repoRoot, inputPath);
     const material = materialsByAbsolutePath.get(absolutePath);
     if (material === undefined) continue;
-    assertTargetApplicationGlobalBindingIsUnbound(typescript, { absolutePath, inputPath, material });
+    assertTargetApplicationGlobalBindingIsUnbound(api, tsrs, { absolutePath, inputPath, material });
   }
 }
 
@@ -2142,6 +2135,9 @@ async function loadToolchain(
   ) {
     fail("ESBUILD_BINARY_PATH must be unset so the pinned installed binary is authoritative");
   }
+  if (process.env.TSRS_BINARY !== undefined) {
+    fail("TSRS_BINARY must be unset so the pinned installed binary is authoritative");
+  }
   const packageSet = resolveConvexWasmApplicationPackageSet(toolchainRoot);
   const requireFromToolchain = createRequire(resolve(toolchainRoot, "package.json"));
   const convexPackageJsonPath = requireFromToolchain.resolve("convex/package.json");
@@ -2155,8 +2151,7 @@ async function loadToolchain(
   }
   const nativePackageJsonPath = requireFromConvex.resolve(`@esbuild/${nativePlatform}/package.json`);
   const nativeBinaryPath = requireFromConvex.resolve(`@esbuild/${nativePlatform}/bin/esbuild`);
-  const typescriptPackageJsonPath = requireFromToolchain.resolve("typescript/package.json");
-  const typescriptRuntimePath = requireFromToolchain.resolve("typescript");
+  const tsrsPackageJsonPath = requireFromToolchain.resolve("tsrs/package.json");
   const convexDirectory = dirname(convexPackageJsonPath);
   const bundlerDirectory = join(convexDirectory, "dist", "esm", "bundler");
   const cliDirectory = join(convexDirectory, "dist", "esm", "cli", "lib");
@@ -2172,8 +2167,15 @@ async function loadToolchain(
     ["toolchain/esbuild/launcher", esbuildLauncherPath],
     ["toolchain/esbuild/native-package.json", nativePackageJsonPath],
     ["toolchain/esbuild/native-binary", nativeBinaryPath],
-    ["registration-analysis/typescript/package.json", typescriptPackageJsonPath],
-    ["registration-analysis/typescript/runtime.js", typescriptRuntimePath],
+    ["registration-analysis/tsrs/package.json", tsrsPackageJsonPath],
+    [
+      "registration-analysis/parser",
+      fileURLToPath(new URL("./tsrs-source.mjs", import.meta.url)),
+    ],
+    [
+      "registration-analysis/materials",
+      fileURLToPath(new URL("./convex-api-flattener-material.mjs", import.meta.url)),
+    ],
     ["compile-profile-adapter", fileURLToPath(import.meta.url)],
     [
       "compile-profile-library/application-package-set",
@@ -2212,6 +2214,18 @@ async function loadToolchain(
     fixedPaths.set("target-zod-jitless/package.json", targetZodPaths.packageManifest);
     fixedPaths.set("target-zod-jitless/v4/core/util.js", targetZodPaths.source);
   }
+  const nodeModulesRoot = dirname(dirname(tsrsPackageJsonPath));
+  const compilerMaterialPaths = convexApiCompilerMaterialPaths({ nodeModulesRoot });
+  const tsrsMaterialCapture = captureConvexApiInstalledMaterial({
+    materialPaths: compilerMaterialPaths,
+    nodeModulesRoot,
+  });
+  for (const path of compilerMaterialPaths) {
+    const absolutePath = join(nodeModulesRoot, path);
+    if ((await fs.stat(absolutePath)).isFile()) {
+      fixedPaths.set(`registration-analysis/${path}`, absolutePath);
+    }
+  }
   const materials = {};
   const materialPaths = new Map();
   for (const [name, path] of fixedPaths) {
@@ -2222,7 +2236,7 @@ async function loadToolchain(
   for (const [name, identity] of [
     ["toolchain/convex/package.json", packageSet.convex],
     ["toolchain/esbuild/package.json", packageSet.esbuild],
-    ["registration-analysis/typescript/package.json", packageSet.typescript],
+    ["registration-analysis/tsrs/package.json", packageSet.tsrs],
   ]) {
     if (materials[name].sha256 !== identity.sha256) {
       fail(`${name} changed after application package resolution`);
@@ -2273,24 +2287,30 @@ async function loadToolchain(
     (await readMaterial(esbuildPackageJsonPath)).contents,
     esbuildPackageJsonPath
   );
-  const typescriptVersion = packageVersion(
-    (await readMaterial(typescriptPackageJsonPath)).contents,
-    typescriptPackageJsonPath
+  const tsrsVersion = packageVersion(
+    (await readMaterial(tsrsPackageJsonPath)).contents,
+    tsrsPackageJsonPath
   );
   if (
     convexVersion !== packageSet.convex.version ||
     esbuildVersion !== packageSet.esbuild.version ||
-    typescriptVersion !== packageSet.typescript.version
+    tsrsVersion !== packageSet.tsrs.version
   ) {
     fail("toolchain versions changed after application package resolution");
   }
   const esbuild = requireFromConvex("esbuild");
-  const typescript = requireFromToolchain("typescript");
+  const tsrsRuntimePath = requireFromToolchain.resolve("tsrs/unstable/sync");
+  authenticateTsrsRuntimeMaterial(tsrsRuntimePath, tsrsMaterialCapture);
+  const [tsrsVersionMetadata, tsrs, { API: TsrsAPI }] = await Promise.all([
+    import(pathToFileURL(requireFromToolchain.resolve("tsrs")).href),
+    import(pathToFileURL(requireFromToolchain.resolve("tsrs/unstable/ast")).href),
+    import(pathToFileURL(tsrsRuntimePath).href),
+  ]);
   if (esbuild.version !== esbuildVersion) {
     fail("resolved esbuild runtime and package versions disagree");
   }
-  if (typescript.version !== typescriptVersion) {
-    fail("resolved TypeScript runtime and package versions disagree");
+  if (tsrsVersionMetadata.version !== tsrsVersion) {
+    fail("resolved tsrs runtime and package versions disagree");
   }
   const [{ serverOnlyPlugin }, { wasmPlugin }] = await Promise.all([
     import(pathToFileURL(join(bundlerDirectory, "serverOnly.js")).href),
@@ -2302,8 +2322,10 @@ async function loadToolchain(
     materials,
     serverOnlyPlugin,
     ...(targetZodJitless === undefined ? {} : { targetZodJitless }),
-    toolchain: { convex: convexVersion, esbuild: esbuildVersion, typescript: typescriptVersion },
-    typescript,
+    toolchain: { convex: convexVersion, esbuild: esbuildVersion, tsrs: tsrsVersion },
+    tsrs,
+    TsrsAPI,
+    tsrsMaterialCapture,
     wasmPlugin,
   };
 }
@@ -3020,9 +3042,11 @@ function pluginIdentity(toolMaterials, mode, versions) {
     plugins.push({
       analyzer: {
         implementation: toolMaterials["registration-analysis/source-analyzer"],
-        packageManifest: toolMaterials["registration-analysis/typescript/package.json"],
-        runtime: toolMaterials["registration-analysis/typescript/runtime.js"],
-        version: versions.typescript,
+        packageManifest: toolMaterials["registration-analysis/tsrs/package.json"],
+        materialsSha256: fingerprintJson(Object.fromEntries(
+          Object.entries(toolMaterials).filter(([name]) => name.startsWith("registration-analysis/"))
+        )),
+        version: versions.tsrs,
       },
       implementation: toolMaterials["compile-profile-adapter"],
       name: "convex-target-registration-pruning",
@@ -3359,7 +3383,7 @@ function validateProfileIdentity(identity) {
   );
   requireExactKeys(
     identity.toolchain.versions,
-    ["convex", "esbuild", "typescript"],
+    ["convex", "esbuild", "tsrs"],
     "compile profile toolchain versions"
   );
   for (const [name, version] of Object.entries(identity.toolchain.versions)) {
@@ -3749,35 +3773,43 @@ async function buildCompileProfileInSession(entryPath, selectedExportNames, sess
       `installed esbuild returned ${initialResult.errors.length} errors and ${initialResult.warnings.length} warnings without rejecting the initial build`
     );
   }
+  let registrationTransforms = new Map();
   if (selectedMode === convexWasmCompileProfileTargetAdapterMode) {
-    // esbuild resolves a define replacement through a same-named local binding, so reject that
-    // binding from every input in the selected graph before target transforms or runtime checks.
-    assertTargetApplicationGlobalBindingIsReserved({
-      materialsByAbsolutePath,
-      metafile: initialResult.metafile,
-      repoRoot: normalizedRoot,
-      typescript: loaded.typescript,
-    });
+    if (process.env.TSRS_BINARY !== undefined) {
+      fail("TSRS_BINARY must be unset so the pinned installed binary is authoritative");
+    }
+    await session.verifyTsrsMaterials();
+    const api = new loaded.TsrsAPI({ cwd: normalizedToolchainRoot });
+    try {
+      // esbuild resolves a define replacement through a same-named local binding, so reject that
+      // binding from every input before applying the target transforms.
+      assertTargetApplicationGlobalBindingIsReserved({
+        api,
+        materialsByAbsolutePath,
+        metafile: initialResult.metafile,
+        repoRoot: normalizedRoot,
+        tsrs: loaded.tsrs,
+      });
+      registrationTransforms = await runStage("registration-analysis", entryPath, async () =>
+        targetRegistrationTransforms({
+          analyzeRegistrationInput,
+          analyzeSource: createConvexWasmRegistrationSourceAnalyzer({ api, ts: loaded.tsrs }),
+          analyzerIdentity: {
+            materialsSha256: fingerprintJson(Object.fromEntries(
+              Object.entries(loaded.materials).filter(([name]) => name.startsWith("registration-analysis/"))
+            )),
+            version: loaded.toolchain.tsrs,
+          },
+          materialsByAbsolutePath,
+          metafile: initialResult.metafile,
+          repoRoot: normalizedRoot,
+        })
+      );
+    } finally {
+      api.close();
+    }
+    await session.verifyTsrsMaterials();
   }
-  const registrationTransforms =
-    selectedMode === convexWasmCompileProfileTargetAdapterMode
-      ? await runStage("registration-analysis", entryPath, async () =>
-          targetRegistrationTransforms({
-            analyzeRegistrationInput,
-            analyzeSource: createConvexWasmRegistrationSourceAnalyzer(loaded.typescript),
-            analyzerIdentity: {
-              implementation: loaded.materials["registration-analysis/source-analyzer"],
-              packageManifest: loaded.materials["registration-analysis/typescript/package.json"],
-              runtime: loaded.materials["registration-analysis/typescript/runtime.js"],
-              version: loaded.toolchain.typescript,
-            },
-            materialsByAbsolutePath,
-            metafile: initialResult.metafile,
-            repoRoot: normalizedRoot,
-            typescript: loaded.typescript,
-          })
-        )
-      : new Map();
   const transformedSources = new Map(fixedTransformedSources);
   for (const [path, source] of registrationTransforms) {
     if (transformedSources.has(path)) {
@@ -3799,7 +3831,6 @@ async function buildCompileProfileInSession(entryPath, selectedExportNames, sess
             serverOnlyPlugin: loaded.serverOnlyPlugin,
             toolchainRoot: normalizedToolchainRoot,
             transformedSources,
-            typescript: loaded.typescript,
             wasmPlugin: loaded.wasmPlugin,
           })
         )
@@ -4056,6 +4087,7 @@ export function createConvexWasmCompileProfileSession({
     ),
   };
   const materialExpectations = new Map();
+  let tsrsMaterialCapture;
   const ownedProfiles = new WeakSet();
   const profileBuildQueue = [];
   const profileVerifiers = [];
@@ -4263,6 +4295,9 @@ export function createConvexWasmCompileProfileSession({
 
   async function loadSessionToolchain() {
     assertOpen();
+    if (process.env.TSRS_BINARY !== undefined) {
+      fail("TSRS_BINARY must be unset so the pinned installed binary is authoritative");
+    }
     const key = fingerprintJson({
       arch: process.arch,
       mode: selectedMode,
@@ -4280,6 +4315,7 @@ export function createConvexWasmCompileProfileSession({
         normalizedSourceConfigurationPaths,
         readMaterial
       );
+      tsrsMaterialCapture = value.tsrsMaterialCapture;
       const materialPaths = [...value.materialPaths].map((entry) => Object.freeze(entry));
       const materials = Object.fromEntries(
         Object.entries(value.materials).map(([name, material]) => [
@@ -4294,6 +4330,7 @@ export function createConvexWasmCompileProfileSession({
         toolchain: Object.freeze({ ...value.toolchain }),
       });
     });
+    await verifyTsrsMaterials();
     return {
       ...loaded,
       materialPaths: new Map(loaded.materialPaths),
@@ -4302,6 +4339,18 @@ export function createConvexWasmCompileProfileSession({
       ),
       toolchain: { ...loaded.toolchain },
     };
+  }
+
+  function verifyTsrsMaterials() {
+    if (tsrsMaterialCapture === undefined) return;
+    // Native resolution also depends on directories and symlinks. A restored
+    // package tree must fail even when each original file remains unchanged.
+    try {
+      verifyConvexApiInstalledMaterial(tsrsMaterialCapture);
+    } catch (error) {
+      invalidated = true;
+      throw error;
+    }
   }
 
   async function loadInitialBundle(key, materialsByAbsolutePath, compute) {
@@ -4334,6 +4383,7 @@ export function createConvexWasmCompileProfileSession({
   }
 
   async function verifyMaterialUnion(force = false) {
+    verifyTsrsMaterials();
     const revision = materialRevision;
     if (!force && verifiedMaterialRevision === revision) return;
     if (verificationRecord?.revision === revision) return verificationRecord.promise;
@@ -4396,6 +4446,7 @@ export function createConvexWasmCompileProfileSession({
       sessionCacheRetention === convexWasmCompileProfileSessionCacheRetention.activeBuild,
     runStage,
     verifyMaterialUnion,
+    verifyTsrsMaterials,
   };
 
   async function cachedOrBuildProfile(entryPath, exportNames) {

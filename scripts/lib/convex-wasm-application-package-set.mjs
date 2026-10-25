@@ -103,9 +103,9 @@ export function resolveConvexWasmApplicationPackageSet(applicationRoot) {
   const { packageSet, requireFromApplication } = resolveBundlerPackages(applicationRoot);
   return Object.freeze({
     ...packageSet,
-    typescript: readPackage(
-      resolvePackage(requireFromApplication, "typescript/package.json", "typescript"),
-      "typescript"
+    tsrs: readPackage(
+      resolvePackage(requireFromApplication, "tsrs/package.json", "tsrs"),
+      "tsrs"
     ),
   });
 }

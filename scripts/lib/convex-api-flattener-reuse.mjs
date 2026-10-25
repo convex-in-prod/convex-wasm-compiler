@@ -9,6 +9,8 @@ import {
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
+import { parseTsrsSource } from "./tsrs-source.mjs";
+
 import { validateConvexWasmGitSourceSnapshot } from "./convex-wasm-git-source-snapshot.mjs";
 
 const sha256Pattern = /^[a-f0-9]{64}$/u;
@@ -59,19 +61,8 @@ function requireExactKeys(value, expectedKeys, description) {
   }
 }
 
-function sourceFileForProjection(ts, sourcePath, source) {
-  const sourceFile = ts.createSourceFile(
-    sourcePath,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    sourcePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
-  return sourceFile.parseDiagnostics.length === 0 ? sourceFile : undefined;
-}
-
 function hasExplicitReturnTypeAndBody(ts, node) {
-  return ts.isFunctionLike(node) && node.type !== undefined && node.body !== undefined;
+  return ts.isFunctionLikeDeclaration(node) && node.type !== undefined && node.body !== undefined;
 }
 
 function containsModuleResolutionSyntax(ts, node) {
@@ -104,8 +95,8 @@ function containsModuleResolutionSyntax(ts, node) {
   return found;
 }
 
-export function convexApiSourceSurfaceProjection({ source, sourceFileCache, sourcePath, ts }) {
-  const sourceFile = sourceFileForProjection(ts, sourcePath, source);
+export function convexApiSourceSurfaceProjection({ source, sourceFileCache, sourcePath, syntaxApi, ts }) {
+  const sourceFile = parseTsrsSource(syntaxApi, ts, sourcePath, source);
   if (sourceFile === undefined) {
     return undefined;
   }
@@ -118,7 +109,7 @@ export function convexApiSourceSurfaceProjection({ source, sourceFileCache, sour
 
   const bodyRanges = [];
   function visit(node) {
-    // TypeScript still resolves modules referenced inside an explicitly typed body, including the
+    // tsrs still resolves modules referenced inside an explicitly typed body, including the
     // implicit JSX runtime. Those modules can contribute global declarations that change another
     // exported function's inferred API, so keep such bodies exact.
     if (hasExplicitReturnTypeAndBody(ts, node) && !containsModuleResolutionSyntax(ts, node.body)) {
@@ -466,10 +457,11 @@ function repositorySurfaceMaterial({
   repositoryRoot,
   sourceFileCache,
   sourcePaths,
+  syntaxApi,
   ts,
 }) {
-  if (ts === undefined) {
-    throw new Error("TypeScript is required to compute the Convex API repository surface.");
+  if (ts === undefined || syntaxApi === undefined) {
+    throw new Error("tsrs is required to compute the Convex API repository surface.");
   }
   const root = resolve(repositoryRoot);
   const projectedPaths = new Set(
@@ -502,6 +494,7 @@ function repositorySurfaceMaterial({
         source: source.toString("utf8"),
         sourcePath,
         sourceFileCache,
+        syntaxApi,
         ts,
       });
       if (projection === undefined) {
@@ -535,6 +528,7 @@ export function convexApiRepositorySurfaceSha256({
   repositoryRoot,
   sourceFileCache,
   sourcePaths,
+  syntaxApi,
   ts,
 }) {
   const material = repositorySurfaceMaterial({
@@ -544,6 +538,7 @@ export function convexApiRepositorySurfaceSha256({
     repositoryRoot,
     sourceFileCache,
     sourcePaths,
+    syntaxApi,
     ts,
   });
   return material?.repositorySurfaceSha256;
@@ -743,6 +738,7 @@ export function createConvexApiStagedSurfaceManifest({
   sourceFileCache,
   scopeIdentity,
   sourcePaths,
+  syntaxApi,
   ts,
 }) {
   const surface = repositorySurfaceMaterial({
@@ -750,6 +746,7 @@ export function createConvexApiStagedSurfaceManifest({
     repositoryRoot,
     sourceFileCache,
     sourcePaths,
+    syntaxApi,
     ts,
   });
   if (surface === undefined) {
@@ -783,6 +780,7 @@ export function reuseConvexApiStagedSurfaceManifest({
   sourceFileCache,
   scopeIdentity,
   sourcePaths,
+  syntaxApi,
   ts,
 }) {
   validateConvexApiStagedSurfaceManifest(previousManifest, scopeIdentity);
@@ -853,6 +851,7 @@ export function reuseConvexApiStagedSurfaceManifest({
         source: source.toString("utf8"),
         sourcePath,
         sourceFileCache,
+        syntaxApi,
         ts,
       });
       if (projection === undefined || sha256(projection) !== previousInput.surfaceSha256) {
@@ -966,7 +965,7 @@ function collectOutputFunctions(ts, typeNode, visibility, path, functions) {
     throw new Error("Flattened Convex API output contains an unsupported API tree node.");
   }
   for (const member of typeNode.members) {
-    if (!ts.isPropertySignature(member) || member.type === undefined) {
+    if (!ts.isPropertySignatureDeclaration(member) || member.type === undefined) {
       throw new Error("Flattened Convex API output contains an unsupported API tree member.");
     }
     const nextPath = [...path, propertyName(ts, member)];
@@ -999,8 +998,8 @@ function collectOutputFunctions(ts, typeNode, visibility, path, functions) {
   }
 }
 
-export function convexApiFunctionsFromOutput({ output, sourcePath = "api.d.ts", ts }) {
-  const sourceFile = sourceFileForProjection(ts, sourcePath, output);
+export function convexApiFunctionsFromOutput({ output, sourcePath = "api.d.ts", syntaxApi, ts }) {
+  const sourceFile = parseTsrsSource(syntaxApi, ts, sourcePath, output);
   if (sourceFile === undefined) {
     throw new Error("Flattened Convex API output is not valid TypeScript.");
   }
@@ -1067,6 +1066,7 @@ export function validateConvexApiCachedInventory({
   inventory,
   output,
   routeInventoryOnly = false,
+  syntaxApi,
   ts,
 }) {
   if (!(expectedEntryPathByModulePath instanceof Map)) {
@@ -1184,7 +1184,7 @@ export function validateConvexApiCachedInventory({
         modulePath,
         visibility,
       }))
-    ) !== JSON.stringify(convexApiFunctionsFromOutput({ output, ts }))
+    ) !== JSON.stringify(convexApiFunctionsFromOutput({ output, syntaxApi, ts }))
   ) {
     throw new Error("Shared flattened API inventory cache disagrees with the generated output.");
   }

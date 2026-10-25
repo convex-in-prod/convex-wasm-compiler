@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { main as flattenConvexApi } from "../flatten-convex-api.mjs";
 import { resolveConvexWasmApplicationPackageSet } from "./convex-wasm-application-package-set.mjs";
 import {
   authenticateConvexWasmCompileProfile,
@@ -125,10 +126,23 @@ test("builds a target profile using the explicit application package root", asyn
   assert.deepEqual(profile.identity.toolchain.versions, {
     convex: packageSet.convex.version,
     esbuild: packageSet.esbuild.version,
-    typescript: packageSet.typescript.version,
+    tsrs: packageSet.tsrs.version,
   });
   assert.ok(profile.javascript.length > 0);
   await profile.verifyMaterials();
+  const linkedRoot = await fs.mkdtemp(join(await fs.realpath(tmpdir()), "convex-wasm-profile-link-"));
+  context.after(() => fs.rm(linkedRoot, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(join(linkedRoot, "package.json"), JSON.stringify(applicationManifest)),
+    fs.writeFile(join(linkedRoot, "convex.json"), '{"functions":"functions/"}\n'),
+    fs.writeFile(join(linkedRoot, "flattener.config.mjs"), "export default { unknown: true };\n"),
+    fs.symlink(join(applicationRoot, "node_modules"), join(linkedRoot, "node_modules"), "dir"),
+  ]);
+  // A linked installation shares Node's API modules with the profile caller.
+  // Its distinct link authority must not look like a changed compiler runtime.
+  await assert.rejects(flattenConvexApi([
+    "--check", "--project-root", linkedRoot, "--config", "flattener.config.mjs",
+  ]), /Unknown Convex API flattener configuration field: unknown/u);
   const bootstrap = await buildConvexWasmCompileProfile({
     ...options,
     mode: convexWasmCompileProfileInstalledBootstrapMode,
@@ -198,6 +212,12 @@ test("builds a target profile using the explicit application package root", asyn
     toolchainRoot: copiedRoot,
   });
   assert.equal(copiedProfile.sha256, profile.sha256);
+  // Replacing and restoring a native package leaves its files unchanged, but a
+  // worker started during that interval could have executed the replacement.
+  const nativeScopePath = join(copiedRoot, "node_modules", "@tsrs");
+  await fs.rename(nativeScopePath, `${nativeScopePath}-replaced`);
+  await fs.rename(`${nativeScopePath}-replaced`, nativeScopePath);
+  await assert.rejects(copiedProfile.verifyMaterials(), /changed after capture/u);
   await assert.rejects(
     buildConvexWasmCompileProfile({
       ...options,
@@ -205,12 +225,53 @@ test("builds a target profile using the explicit application package root", asyn
     }),
     /source configuration path is not a normalized repository-relative path/u
   );
-  const typescriptManifestPath = join(applicationRoot, "node_modules", "typescript", "package.json");
-  const typescriptManifest = JSON.parse(await fs.readFile(typescriptManifestPath, "utf8"));
-  typescriptManifest.version = "0.0.0";
-  await fs.writeFile(typescriptManifestPath, JSON.stringify(typescriptManifest));
+  const previousBinaryOverride = process.env.TSRS_BINARY;
+  try {
+    await assert.rejects(buildConvexWasmCompileProfile({
+      ...options,
+      onOperationalEvent({ stage, type }) {
+        if (stage === "initial-build" && type === "finish") {
+          process.env.TSRS_BINARY = process.execPath;
+        }
+      },
+    }), /TSRS_BINARY must be unset/u);
+  } finally {
+    if (previousBinaryOverride === undefined) delete process.env.TSRS_BINARY;
+    else process.env.TSRS_BINARY = previousBinaryOverride;
+  }
+  const tsrsAstPath = join(applicationRoot, "node_modules", "tsrs", "dist", "ast", "is.js");
+  const tsrsAstSource = await fs.readFile(tsrsAstPath);
+  await assert.rejects(buildConvexWasmCompileProfile({
+    ...options,
+    async onOperationalEvent({ stage, type }) {
+      if (stage === "initial-build" && type === "finish") {
+        await fs.appendFile(tsrsAstPath, "\n// intervening implementation\n");
+        await fs.writeFile(tsrsAstPath, tsrsAstSource);
+      }
+    },
+  }), /changed after capture/u);
   await assert.rejects(
     buildConvexWasmCompileProfile(options),
-    /resolved TypeScript runtime and package versions disagree/u
+    /Installed tsrs material changed after it was loaded/u
+  );
+  // Both callers import the same application API modules in this process. The
+  // flattener must inherit the profile builder's invalidated package lifetime.
+  await fs.writeFile(join(applicationRoot, "flattener.config.mjs"), "export default { unknown: true };\n");
+  await assert.rejects(flattenConvexApi([
+    "--check", "--project-root", applicationRoot, "--config", "flattener.config.mjs",
+  ]), /Installed tsrs material changed after it was loaded/u);
+  await fs.appendFile(tsrsAstPath, "\n// changed implementation with the same package version\n");
+  await assert.rejects(
+    buildConvexWasmCompileProfile(options),
+    /Installed tsrs material changed after it was loaded/u
+  );
+  await fs.writeFile(tsrsAstPath, tsrsAstSource);
+  const tsrsManifestPath = join(applicationRoot, "node_modules", "tsrs", "package.json");
+  const tsrsManifest = JSON.parse(await fs.readFile(tsrsManifestPath, "utf8"));
+  tsrsManifest.version = "0.0.0";
+  await fs.writeFile(tsrsManifestPath, JSON.stringify(tsrsManifest));
+  await assert.rejects(
+    buildConvexWasmCompileProfile(options),
+    /Installed tsrs material changed after it was loaded/u
   );
 });

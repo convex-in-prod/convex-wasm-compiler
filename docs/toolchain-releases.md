@@ -13,11 +13,14 @@ installed dependencies and Git checkout.
 Deployment authority and backend connection settings remain application inputs.
 The bundle does not install or configure a backend.
 
-API inventory generation resolves TypeScript and tsrs from the application's
-installed dependencies. The pinned tsrs version has Linux x64/arm64 and macOS
-arm64 binaries, but no macOS Intel binary. Native compiler and precompiler
-availability on Intel macOS does not establish API-generation support; that
-path also needs an installed tsrs release providing a matching platform package.
+API inventory generation and compile-profile registration analysis resolve tsrs
+from the application's installed dependencies. Producer source closure and
+runtime-surface checks use the compiler's bundled tsrs package. The pinned version
+has Linux x64/arm64 and macOS arm64 binaries, but no macOS Intel binary. Native
+compiler and precompiler availability on Intel macOS does not establish complete
+application build support: both tsrs installations need a matching platform
+package, which this pin does not provide. The native release smoke checks below
+do not exercise application inventory or compile-profile analysis.
 
 ## Install and run
 

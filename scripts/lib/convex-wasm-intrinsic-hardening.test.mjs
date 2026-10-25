@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import test from "node:test";
+import test, { after } from "node:test";
 import { runInNewContext } from "node:vm";
 
-import ts from "typescript";
+import { API, ModuleKind } from "tsrs/unstable/sync";
+import { ScriptTarget } from "tsrs/unstable/ast";
 
 import {
   convexWasmIntrinsicDescriptorStateValidatorBinding,
@@ -16,9 +17,12 @@ import {
   renderConvexWasmIntrinsicHardeningPrelude,
 } from "./convex-wasm-intrinsic-hardening.mjs";
 
+const tsrs = new API();
+after(() => tsrs.close());
+
 function executableSource(source) {
-  return ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  return tsrs.transpileModule(source, {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
 }
 

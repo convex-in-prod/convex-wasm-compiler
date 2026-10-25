@@ -1,13 +1,20 @@
 import { writeFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import ts from 'typescript';
+import { API, ModuleKind } from 'tsrs/unstable/sync';
+import { ScriptTarget } from 'tsrs/unstable/ast';
 import { renderConvexWasmIntrinsicHardeningPrelude } from '../../scripts/lib/convex-wasm-intrinsic-hardening.mjs';
 
 process.env.TZ = 'UTC';
 const root = new URL('./', process.env.INTL_EXPERIMENT_URL);
-const hardening = ts.transpileModule(renderConvexWasmIntrinsicHardeningPrelude(), {
-  compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
-}).outputText;
+const api = new API();
+let hardening;
+try {
+  hardening = api.transpileModule(renderConvexWasmIntrinsicHardeningPrelude(), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
+  }).outputText;
+} finally {
+  api.close();
+}
 const evaluate = String(function run() {
   const rows = [];
   const validate = globalThis.__convexWasmValidateIntrinsicDescriptorState;

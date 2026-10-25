@@ -14,6 +14,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -22,15 +23,19 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
+import { authenticateTsrsRuntimeMaterial, parseTsrsSource } from "./lib/tsrs-source.mjs";
+
+import { projectTsrsCacheRoot } from "./lib/tsrs-cache.mjs";
 import { readConvexWasmGitBlobMaterials } from "./lib/convex-wasm-git-blob-material.mjs";
 import {
+  captureConvexApiInstalledMaterial,
   convexApiCompilerMaterialPaths,
   convexApiFlattenerInputIdentity,
   convexApiInstalledLayoutSha256,
   convexApiInstalledMaterialIdentity,
   convexApiPathsIdentifySameFile,
   convexApiProgramMaterialPaths,
+  verifyConvexApiInstalledMaterial,
 } from "./lib/convex-api-flattener-material.mjs";
 import {
   createConvexApiStagedSurfaceManifest,
@@ -55,13 +60,17 @@ import {
 import { buildConvexWasmProducerIdentity } from "./lib/convex-wasm-producer-identity.mjs";
 
 export async function main(argumentsList = process.argv.slice(2)) {
+let sourceChangedError;
+try {
+let syntaxApi;
+let nativeApi;
+try {
 if (process.env.TSRS_BINARY !== undefined) {
   throw new Error(
     "Convex API generation requires the installed tsrs binary for compiler identity; unset TSRS_BINARY."
   );
 }
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const sourceChangedExitCode = 75;
 const [mode, ...modeArguments] = argumentsList;
 const routeInventoryOnly = mode === "--route-inventory-snapshot";
 const inventorySnapshotMode = routeInventoryOnly || mode === "--inventory-snapshot";
@@ -105,6 +114,23 @@ if (projectRootArgument === undefined) {
 }
 const rootDir = resolve(projectRootArgument);
 const projectRequire = createRequire(resolve(rootDir, "package.json"));
+// Capture compiler bytes before either syntax analysis or native program construction.
+const compilerMaterialPaths = convexApiCompilerMaterialPaths({
+  nodeModulesRoot: resolve(rootDir, "node_modules"),
+});
+const compilerMaterialCapture = captureConvexApiInstalledMaterial({
+  materialPaths: compilerMaterialPaths,
+  nodeModulesRoot: resolve(rootDir, "node_modules"),
+});
+// Node canonicalizes module imports. Share the same runtime lifetime identity
+// with profile analysis while retaining the application's symlink authority above.
+const canonicalNodeModulesRoot = realpathSync(resolve(rootDir, "node_modules"));
+const runtimeMaterialCapture = canonicalNodeModulesRoot === resolve(rootDir, "node_modules")
+  ? compilerMaterialCapture
+  : captureConvexApiInstalledMaterial({
+      materialPaths: compilerMaterialPaths,
+      nodeModulesRoot: canonicalNodeModulesRoot,
+    });
 const gitSourceSnapshotPath =
   gitSourceSnapshotArgument === undefined ? undefined : resolve(rootDir, gitSourceSnapshotArgument);
 const gitSourceSnapshot =
@@ -131,11 +157,22 @@ const normalizePathForHostComparison = (path) =>
   process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
 const pathsEqualForHost = (left, right) =>
   normalizePathForHostComparison(left) === normalizePathForHostComparison(right);
-let typeScriptPromise;
+let syntaxRuntimePromise;
 let ts;
-async function loadTypeScript() {
-  typeScriptPromise ??= import(projectRequire.resolve("typescript")).then((module) => module.default);
-  ts ??= await typeScriptPromise;
+async function loadTsrs() {
+  const runtimePath = projectRequire.resolve("tsrs/unstable/sync");
+  authenticateTsrsRuntimeMaterial(runtimePath, runtimeMaterialCapture);
+  syntaxRuntimePromise ??= Promise.all([
+    import(runtimePath),
+    import(projectRequire.resolve("tsrs/unstable/ast")),
+  ]);
+  const [{ API }, ast] = await syntaxRuntimePromise;
+  verifyConvexApiInstalledMaterial(compilerMaterialCapture);
+  if (process.env.TSRS_BINARY !== undefined) {
+    throw new Error("Convex API generation requires the installed tsrs binary; unset TSRS_BINARY.");
+  }
+  syntaxApi ??= new API({ cwd: rootDir });
+  ts ??= ast;
   return ts;
 }
 
@@ -149,28 +186,22 @@ if (userConfigPath !== undefined) {
     source = convexApiReadStableFile(userConfigPath, "Convex API flattener configuration");
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
-  const configTypeScript = await loadTypeScript();
-  const sourceFile = configTypeScript.createSourceFile(
-    userConfigPath,
-    source.toString("utf8"),
-    configTypeScript.ScriptTarget.Latest,
-    true,
-    configTypeScript.ScriptKind.JS
-  );
-  if (sourceFile.parseDiagnostics.length > 0) {
+  const configAst = await loadTsrs();
+  const sourceFile = parseTsrsSource(syntaxApi, ts, userConfigPath, source.toString("utf8"));
+  if (sourceFile === undefined) {
     throw new Error("The Convex API flattener configuration is not valid JavaScript.");
   }
   function rejectConfigDependency(node) {
     if (
-      configTypeScript.isImportDeclaration(node) ||
-      configTypeScript.isImportEqualsDeclaration(node) ||
-      (configTypeScript.isExportDeclaration(node) && node.moduleSpecifier !== undefined) ||
-      (configTypeScript.isCallExpression(node) &&
-        node.expression.kind === configTypeScript.SyntaxKind.ImportKeyword)
+      configAst.isImportDeclaration(node) ||
+      configAst.isImportEqualsDeclaration(node) ||
+      (configAst.isExportDeclaration(node) && node.moduleSpecifier !== undefined) ||
+      (configAst.isCallExpression(node) &&
+        node.expression.kind === configAst.SyntaxKind.ImportKeyword)
     ) {
       throw new Error(
         "The Convex API flattener configuration must not import another module; its complete material must remain in one file."
@@ -180,28 +211,28 @@ if (userConfigPath !== undefined) {
   }
   rejectConfigDependency(sourceFile);
   const statements = sourceFile.statements.filter(
-    (statement) => !configTypeScript.isEmptyStatement(statement)
+    (statement) => !configAst.isEmptyStatement(statement)
   );
   if (
     statements.length !== 1 ||
-    !configTypeScript.isExportAssignment(statements[0]) ||
+    !configAst.isExportAssignment(statements[0]) ||
     statements[0].isExportEquals
   ) {
     throw new Error("The Convex API flattener configuration must be one literal default export.");
   }
   function validateConfigLiteral(node) {
     if (
-      configTypeScript.isStringLiteral(node) ||
-      configTypeScript.isNumericLiteral(node) ||
-      node.kind === configTypeScript.SyntaxKind.TrueKeyword ||
-      node.kind === configTypeScript.SyntaxKind.FalseKeyword ||
-      node.kind === configTypeScript.SyntaxKind.NullKeyword
+      configAst.isStringLiteral(node) ||
+      configAst.isNumericLiteral(node) ||
+      node.kind === configAst.SyntaxKind.TrueKeyword ||
+      node.kind === configAst.SyntaxKind.FalseKeyword ||
+      node.kind === configAst.SyntaxKind.NullKeyword
     ) {
       return;
     }
-    if (configTypeScript.isArrayLiteralExpression(node)) {
+    if (configAst.isArrayLiteralExpression(node)) {
       for (const element of node.elements) {
-        if (configTypeScript.isSpreadElement(element)) {
+        if (configAst.isSpreadElement(element)) {
           throw new Error(
             "The Convex API flattener configuration must contain only literal values."
           );
@@ -210,12 +241,12 @@ if (userConfigPath !== undefined) {
       }
       return;
     }
-    if (configTypeScript.isObjectLiteralExpression(node)) {
+    if (configAst.isObjectLiteralExpression(node)) {
       for (const property of node.properties) {
         if (
-          !configTypeScript.isPropertyAssignment(property) ||
-          (!configTypeScript.isIdentifier(property.name) &&
-            !configTypeScript.isStringLiteral(property.name))
+          !configAst.isPropertyAssignment(property) ||
+          (!configAst.isIdentifier(property.name) &&
+            !configAst.isStringLiteral(property.name))
         ) {
           throw new Error(
             "The Convex API flattener configuration must contain only literal properties."
@@ -230,8 +261,10 @@ if (userConfigPath !== undefined) {
   validateConfigLiteral(statements[0].expression);
   userConfigSource = source;
 }
-const userConfig =
-  userConfigPath === undefined ? {} : (await import(pathToFileURL(userConfigPath).href)).default;
+// Evaluate the validated bytes, not a path whose ESM cache or contents may have changed.
+const userConfig = userConfigSource === undefined
+  ? {}
+  : (await import(`data:text/javascript;base64,${userConfigSource.toString("base64")}`)).default;
 if (userConfigPath !== undefined) {
   try {
     if (
@@ -243,7 +276,7 @@ if (userConfigPath !== undefined) {
     }
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
@@ -561,7 +594,8 @@ if (gitSourceSnapshot !== undefined) {
     );
   }
 }
-const sharedCacheDir = join(defaultConvexWasmCacheRoot(), "convex-api");
+const projectCacheDir = projectTsrsCacheRoot(rootDir);
+const sharedCacheDir = join(projectCacheDir, "convex-api", "compiler");
 const sharedInventoryCacheDir = join(sharedCacheDir, `inventory-${inventoryVersion}`);
 const privateJsonCacheMaxBytes = 8 * 1024 * 1024;
 const compressedCacheMaxBytes = 64 * 1024 * 1024;
@@ -584,15 +618,21 @@ const stagedSurfaceManifestPath =
 const stagedSurfaceManifestMaxBytes = 8 * 1024 * 1024;
 
 function ensurePrivateCacheDirectory(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const status = lstatSync(path, { bigint: true });
-  if (
-    !status.isDirectory() ||
-    status.isSymbolicLink() ||
-    (status.mode & 0o777n) !== 0o700n ||
-    (typeof process.getuid === "function" && status.uid !== BigInt(process.getuid()))
-  ) {
-    throw new Error(`Convex API cache directory is not private: ${path}`);
+  // The shared root and namespace can already exist for another tsrs format.
+  // Checking only the leaf would allow a writable or symlinked namespace to redirect it.
+  for (const directory of new Set([
+    dirname(projectCacheDir), projectCacheDir, dirname(sharedCacheDir), sharedCacheDir, path,
+  ])) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const status = lstatSync(directory, { bigint: true });
+    if (
+      !status.isDirectory() ||
+      status.isSymbolicLink() ||
+      (status.mode & 0o7777n) !== 0o700n ||
+      (typeof process.getuid === "function" && status.uid !== BigInt(process.getuid()))
+    ) {
+      throw new Error(`Convex API cache directory is not private: ${directory}`);
+    }
   }
 }
 
@@ -627,7 +667,16 @@ function readPrivateCacheFile(path, description, maximumBytes) {
   ) {
     throw new Error(`${description} is not a private bounded file: ${path}`);
   }
-  const source = convexApiReadStableFile(path, description);
+  let source;
+  try {
+    source = convexApiReadStableFile(path, description);
+  } catch (error) {
+    // Eviction can unlink an open cache file and change its descriptor's link count. Preserve
+    // the actual ENOENT as a cache miss; a file that remains present still fails authentication.
+    // Source and compiler-material reads retain their stricter stable-read contract.
+    lstatSync(path);
+    throw error;
+  }
   const after = lstatSync(path, { bigint: true });
   if (!sameCacheFileState(before, after) || BigInt(source.length) !== after.size) {
     throw new Error(`${description} changed across its authenticated read: ${path}`);
@@ -736,7 +785,7 @@ function combinedRepositoryInputHash(repositoryHash, producerSha256 = producerId
 
 const previousStagedSurfaceManifest = readStagedSurfaceManifest();
 let pendingStagedSurfaceManifest;
-// Surface projection and candidate discovery both need the same classic TypeScript AST. Keep
+// Surface projection and candidate discovery both need the same tsrs syntax tree. Keep
 // this handoff process-local; persisted identities continue to authenticate source bytes.
 const sourceFileCache = new Map();
 let repositoryInputMaterial;
@@ -750,7 +799,7 @@ try {
   });
 } catch (error) {
   if (isConcurrentInputError(error)) {
-    exitForConcurrentSourceChange();
+    failForConcurrentSourceChange();
   }
   throw error;
 }
@@ -763,7 +812,7 @@ if (userConfigSource !== undefined) {
     configInput.physicalSize !== userConfigSource.length ||
     configInput.physicalSha256 !== createHash("sha256").update(userConfigSource).digest("hex")
   ) {
-    exitForConcurrentSourceChange();
+    failForConcurrentSourceChange();
   }
 }
 const repositoryInputSha256 = combinedRepositoryInputHash(repositoryInputMaterial.inputSha256);
@@ -778,6 +827,66 @@ repositoryInputByAbsolutePath.set(
   repositoryInputMaterial.packageResolution
 );
 const repositorySourceTextByAbsolutePath = new Map();
+const installedSourceByAbsolutePath = new Map();
+const installedPathObservations = new Map();
+const installedDirectoryObservations = new Map();
+const normalizedNodeModulesRoots = [
+  resolve(rootDir, "node_modules"),
+  realpathSync(resolve(rootDir, "node_modules")),
+].map(normalizePathForHostComparison);
+
+function installedPathKind(path) {
+  const status = statSync(path, { throwIfNoEntry: false });
+  return status === undefined ? "missing"
+    : status.isFile() ? "file"
+      : status.isDirectory() ? "directory" : "other";
+}
+
+function installedDirectoryEntries(path) {
+  const entries = { files: [], directories: [], symlinks: [] };
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.isFile()) entries.files.push(entry.name);
+    else if (entry.isDirectory()) entries.directories.push(entry.name);
+    else if (entry.isSymbolicLink()) entries.symlinks.push(entry.name);
+    else throw new Error(`Unsupported installed source analysis entry: ${join(path, entry.name)}`);
+  }
+  for (const names of Object.values(entries)) names.sort(compareStrings);
+  return entries;
+}
+
+function retainedInstalledSource(path) {
+  const absolutePath = resolve(rootDir, path);
+  const normalizedPath = normalizePathForHostComparison(absolutePath);
+  const retained = installedSourceByAbsolutePath.get(normalizedPath);
+  if (retained !== undefined) return retained.text;
+  let source;
+  try {
+    source = convexApiReadStableFile(
+      realpathSync(absolutePath),
+      "Convex API installed source analysis input"
+    );
+  } catch (error) {
+    if (
+      error instanceof Error && "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      const previous = installedPathObservations.get(normalizedPath);
+      if (previous !== undefined && previous.kind !== "missing") failForConcurrentSourceChange();
+      installedPathObservations.set(normalizedPath, { path: absolutePath, kind: "missing" });
+      return undefined;
+    }
+    if (isConcurrentInputError(error)) failForConcurrentSourceChange();
+    throw error;
+  }
+  const text = source.toString("utf8");
+  installedSourceByAbsolutePath.set(normalizedPath, {
+    path: absolutePath,
+    sha256: createHash("sha256").update(source).digest("hex"),
+    size: source.length,
+    text,
+  });
+  return text;
+}
 
 function authenticatedRepositorySource(path) {
   const absolutePath = resolve(rootDir, path);
@@ -797,7 +906,7 @@ function authenticatedRepositorySource(path) {
       retainedSource ?? convexApiReadStableFile(absolutePath, "Convex API source analysis input");
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
@@ -806,7 +915,7 @@ function authenticatedRepositorySource(path) {
     source.length !== input.physicalSize ||
     createHash("sha256").update(source).digest("hex") !== input.physicalSha256
   ) {
-    exitForConcurrentSourceChange();
+    failForConcurrentSourceChange();
   }
   const text = source.toString("utf8");
   repositorySourceTextByAbsolutePath.set(normalizedPath, text);
@@ -825,10 +934,6 @@ const materialIndexKey = createHash("sha256")
   .update(JSON.stringify(materialIndexIdentity))
   .digest("hex");
 const materialIndexPath = join(sharedCacheDir, "material-index", `${materialIndexKey}.json`);
-const compilerMaterialPaths = convexApiCompilerMaterialPaths({
-  nodeModulesRoot: resolve(rootDir, "node_modules"),
-});
-
 function publishPendingStagedSurfaceManifest() {
   if (stagedSurfaceManifestPath !== undefined && pendingStagedSurfaceManifest !== undefined) {
     writePrivateJsonCacheFile(stagedSurfaceManifestPath, pendingStagedSurfaceManifest);
@@ -843,6 +948,7 @@ function computeRepositorySurfaceHash() {
         repositoryRoot: rootDir,
         sourceFileCache,
         sourcePaths: repositorySourcePaths,
+        syntaxApi,
         ts,
       });
     }
@@ -855,6 +961,7 @@ function computeRepositorySurfaceHash() {
         sourceFileCache,
         scopeIdentity: stagedSurfaceScopeIdentity,
         sourcePaths: repositorySourcePaths,
+        syntaxApi,
         ts,
       });
       if (reused.decision === "reuse") {
@@ -869,13 +976,14 @@ function computeRepositorySurfaceHash() {
       sourceFileCache,
       scopeIdentity: stagedSurfaceScopeIdentity,
       sourcePaths: repositorySourcePaths,
+      syntaxApi,
       ts,
     });
     pendingStagedSurfaceManifest = manifest;
     return manifest?.repositorySurfaceSha256;
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
@@ -898,7 +1006,7 @@ async function verifyInputsAtPublication({
     if (
       JSON.stringify(inputPathLayout(finalInputPaths)) !== JSON.stringify(initialInputPathLayout)
     ) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     finalRepositoryInputMaterial = convexApiRepositoryInputMaterial({
       inputPaths: finalInputPaths,
@@ -908,7 +1016,32 @@ async function verifyInputsAtPublication({
       nodeModulesRoot: resolve(rootDir, "node_modules"),
     });
     if (JSON.stringify(finalCompilerMaterialPaths) !== JSON.stringify(compilerMaterialPaths)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
+    }
+    verifyConvexApiInstalledMaterial(compilerMaterialCapture);
+    for (const observation of installedPathObservations.values()) {
+      if (installedPathKind(observation.path) !== observation.kind) {
+        failForConcurrentSourceChange();
+      }
+    }
+    for (const observation of installedDirectoryObservations.values()) {
+      if (JSON.stringify(installedDirectoryEntries(observation.path)) !== observation.entries) {
+        failForConcurrentSourceChange();
+      }
+    }
+    // Bind native dependency reads to publication too: a restored dependency must
+    // not label types inferred from intervening bytes with its original identity.
+    for (const retained of installedSourceByAbsolutePath.values()) {
+      const source = convexApiReadStableFile(
+        realpathSync(retained.path),
+        "Convex API installed source analysis input"
+      );
+      if (
+        source.length !== retained.size ||
+        createHash("sha256").update(source).digest("hex") !== retained.sha256
+      ) {
+        failForConcurrentSourceChange();
+      }
     }
     finalInstalledMaterialIdentity = convexApiInstalledMaterialIdentity({
       materialPaths,
@@ -919,7 +1052,7 @@ async function verifyInputsAtPublication({
     });
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
@@ -934,7 +1067,7 @@ async function verifyInputsAtPublication({
       JSON.stringify(expectedInstalledMaterialIdentity) ||
     finalInstalledLayoutSha256 !== installedLayoutSha256
   ) {
-    exitForConcurrentSourceChange();
+    failForConcurrentSourceChange();
   }
   const finalInput = convexApiFlattenerInputIdentity({
     configPath: relativeUserConfigPath,
@@ -942,7 +1075,7 @@ async function verifyInputsAtPublication({
     repositoryInputSha256: finalRepositoryInputSha256,
   });
   if (expectedInputSha256 !== undefined && finalInput.inputSha256 !== expectedInputSha256) {
-    exitForConcurrentSourceChange();
+    failForConcurrentSourceChange();
   }
   if (gitSourceSnapshot !== undefined && !routeInventoryOnly) {
     // Route declarations are owned by the captured tree; later index/worktree edits belong
@@ -1135,6 +1268,7 @@ async function publishInventorySnapshot(output, metadata) {
     inventory: metadata,
     output,
     routeInventoryOnly,
+    syntaxApi,
     ts,
   });
   const temporaryPath = `${finalPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
@@ -1198,6 +1332,7 @@ async function publishInventorySnapshot(output, metadata) {
           inventory: concurrentMetadata,
           output: concurrentOutput,
           routeInventoryOnly,
+          syntaxApi,
           ts,
         });
       } catch (validationError) {
@@ -1263,9 +1398,13 @@ function outputHashIsValid(output) {
   return createHash("sha256").update(normalized).digest("hex") === cachedOutputHash;
 }
 
-function exitForConcurrentSourceChange() {
-  console.error("Convex API inputs changed during generation; rerun after source changes settle.");
-  process.exit(sourceChangedExitCode);
+function failForConcurrentSourceChange() {
+  // tsrs wraps filesystem callback exceptions. Retain this outcome outside its
+  // RPC boundary so cleanup and the CLI still report the established retry code.
+  sourceChangedError ??= new ConvexApiSourceChangedError(
+    "Convex API inputs changed during generation; rerun after source changes settle."
+  );
+  throw sourceChangedError;
 }
 
 function isConcurrentInputError(error) {
@@ -1274,6 +1413,7 @@ function isConcurrentInputError(error) {
     (("code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) ||
       /changed while it was/u.test(error.message) ||
       /changed before projection/u.test(error.message) ||
+      /changed after capture/u.test(error.message) ||
       /is not a regular file/u.test(error.message) ||
       /source discovery does not support symbolic links/u.test(error.message) ||
       /source discovery requires a real directory/u.test(error.message))
@@ -1285,15 +1425,19 @@ function readSourceFileForAnalysis(path) {
   if (authenticatedSource !== undefined) {
     return authenticatedSource;
   }
+  const retainedInstalled = installedSourceByAbsolutePath.get(
+    normalizePathForHostComparison(resolve(rootDir, path))
+  );
+  if (retainedInstalled !== undefined) return retainedInstalled.text;
   try {
     // Candidate discovery can run after a retained staged-manifest hit, when no projection read
     // supplied bytes for this path. Keep that fallback under the same descriptor/path-state
     // boundary as initial input capture so a replacement cannot feed a partial source file into
-    // the TypeScript AST. Final publication still performs its complete fresh scan.
+    // the tsrs syntax tree. Final publication still performs its complete fresh scan.
     return convexApiReadStableFile(path, "Convex API source analysis input").toString("utf8");
   } catch (error) {
     if (isConcurrentInputError(error)) {
-      exitForConcurrentSourceChange();
+      failForConcurrentSourceChange();
     }
     throw error;
   }
@@ -1385,7 +1529,8 @@ async function useSharedCacheIfPresent() {
         inventory: metadata,
         output: cachedOutput,
         routeInventoryOnly,
-        ts: await loadTypeScript(),
+        ts: await loadTsrs(),
+        syntaxApi,
       });
     } catch (error) {
       throw new Error(
@@ -1398,7 +1543,7 @@ async function useSharedCacheIfPresent() {
     if (gitSourceSnapshot !== undefined && pendingStagedSurfaceManifest === undefined) {
       // Exact hits precede the surface lookup. Still advance the retained staged records after a
       // successful command so a reverted or mode-only staged change is not reread on every run.
-      await loadTypeScript();
+      await loadTsrs();
       computeRepositorySurfaceHash();
     }
     if (inventorySnapshotMode) {
@@ -1442,9 +1587,9 @@ async function useSharedCacheIfPresent() {
 }
 
 if (await useSharedCacheIfPresent()) {
-  process.exit(0);
+  return;
 }
-await loadTypeScript();
+await loadTsrs();
 
 const repositorySurfaceSha256 = combinedRepositoryInputHash(computeRepositorySurfaceHash());
 const fastReuseIdentity =
@@ -1588,6 +1733,7 @@ async function useFastReuseIfPresent() {
       inventory: cachedInventory,
       output: cachedOutput,
       routeInventoryOnly,
+      syntaxApi,
       ts,
     });
   } catch (error) {
@@ -1642,6 +1788,12 @@ async function useFastReuseIfPresent() {
     });
   }
   if (inventorySnapshotMode) {
+    // Shared entries can be reused by another process before snapshot publication finishes.
+    await verifyInputsAtPublication({
+      expectedInputSha256: inputHash,
+      expectedInstalledMaterialIdentity: flattenerInput.identity.installedMaterialIdentity,
+      materialPaths: [...compilerMaterialPaths, ...programMaterialPaths],
+    });
     const metadata = inventorySnapshotMetadata(cachedOutput, cachedInventory.functions);
     publishSharedInventoryCache(cachedOutput, metadata);
     writeMaterialIndex(programMaterialPaths);
@@ -1694,6 +1846,7 @@ function publishSharedInventoryCache(output, metadata) {
     inventory: metadata,
     output,
     routeInventoryOnly,
+    syntaxApi,
     ts,
   });
   const temporarySuffix = `${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
@@ -1743,11 +1896,12 @@ function publishSharedInventoryCache(output, metadata) {
 }
 
 if (await useFastReuseIfPresent()) {
-  process.exit(0);
+  return;
 }
 const {
-  API: NativeTypeScriptAPI,
+  API: TsrsAPI,
   ModifierFlags: NativeModifierFlags,
+  ElementFlags: NativeElementFlags,
   NodeBuilderFlags: NativeNodeBuilderFlags,
   SignatureKind: NativeSignatureKind,
   SymbolFlags: NativeSymbolFlags,
@@ -1759,13 +1913,10 @@ if (convexTypeScriptInputPaths.includes(componentConfigPath)) {
   if (retainedComponentConfigSource === undefined) {
     throw new Error("Convex API component configuration is missing from repository input material.");
   }
-  const componentConfigSource = ts.createSourceFile(
-    componentConfigPath,
-    retainedComponentConfigSource,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
+  const componentConfigSource = parseTsrsSource(syntaxApi, ts, componentConfigPath, retainedComponentConfigSource);
+  if (componentConfigSource === undefined) {
+    throw new Error("Convex component configuration is not valid TypeScript.");
+  }
   sourceFileCache.set(componentConfigPath, componentConfigSource);
   let usesComponents = false;
   function findComponentUse(node) {
@@ -1820,7 +1971,7 @@ export declare const components: {};
 }
 
 function hasExportModifier(node) {
-  return ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+  return node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
 }
 
 function addBindingCandidates(candidates, sourcePath, sourceFile, declaration, name) {
@@ -1835,7 +1986,7 @@ function addBindingCandidates(candidates, sourcePath, sourceFile, declaration, n
     return;
   }
   for (const element of name.elements) {
-    if (!ts.isOmittedExpression(element)) {
+    if (element.name !== undefined) {
       addBindingCandidates(candidates, sourcePath, sourceFile, element, element.name);
     }
   }
@@ -1847,8 +1998,7 @@ function collectReadonlyPropertyNames(sourceFile) {
   const names = new Set();
   function visit(node) {
     if (
-      ts.canHaveModifiers(node) &&
-      ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword) ===
+      node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword) ===
         true &&
       "name" in node
     ) {
@@ -1874,14 +2024,16 @@ function sourceMayDeclareReadonlyProperty(sourcePath, propertyName) {
       retainedSourceFile ??
       (() => {
         const retainedSource = authenticatedRepositorySource(sourcePath);
-        return ts.createSourceFile(
+        return parseTsrsSource(
+          syntaxApi,
+          ts,
           sourcePath,
-          retainedSource ?? readSourceFileForAnalysis(sourcePath),
-          ts.ScriptTarget.Latest,
-          true,
-          sourcePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+          retainedSource ?? readSourceFileForAnalysis(sourcePath)
         );
       })();
+    if (sourceFile === undefined) {
+      throw new Error(`Convex API source is not valid TypeScript: ${sourcePath}`);
+    }
     sourceFileCache.set(sourcePath, sourceFile);
     names = collectReadonlyPropertyNames(sourceFile);
     readonlyPropertyNamesBySourcePath.set(sourcePath, names);
@@ -1893,13 +2045,10 @@ const exportedCandidatesBySource = new Map();
 for (const sourcePath of convexSourcePaths) {
   const sourceFile =
     sourceFileCache.get(sourcePath) ??
-    ts.createSourceFile(
-      sourcePath,
-      readSourceFileForAnalysis(sourcePath),
-      ts.ScriptTarget.Latest,
-      true,
-      sourcePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-    );
+    parseTsrsSource(syntaxApi, ts, sourcePath, readSourceFileForAnalysis(sourcePath));
+  if (sourceFile === undefined) {
+    throw new Error(`Convex API source is not valid TypeScript: ${sourcePath}`);
+  }
   sourceFileCache.set(sourcePath, sourceFile);
   if (!routeInventoryOnly) {
     readonlyPropertyNamesBySourcePath.set(sourcePath, collectReadonlyPropertyNames(sourceFile));
@@ -1972,38 +2121,70 @@ ensurePrivateCacheDirectory(sharedCacheDir);
 const declaredRepositoryInputPaths = new Set(
   inputPaths.map((path) => normalizePathForHostComparison(resolve(path)))
 );
-const nativeApi = new NativeTypeScriptAPI({
+function observedInstalledPathExists(path, kind) {
+  const absolutePath = resolve(rootDir, path);
+  const normalizedPath = normalizePathForHostComparison(absolutePath);
+  if (!normalizedNodeModulesRoots.some((root) => normalizedPath.startsWith(`${root}${sep}`))) {
+    return serverFS.useOS;
+  }
+  const currentKind = installedPathKind(absolutePath);
+  const previous = installedPathObservations.get(normalizedPath);
+  if (previous !== undefined && previous.kind !== currentKind) failForConcurrentSourceChange();
+  installedPathObservations.set(normalizedPath, { path: absolutePath, kind: currentKind });
+  return currentKind === kind;
+}
+if (process.env.TSRS_BINARY !== undefined) {
+  throw new Error("Convex API generation requires the installed tsrs binary; unset TSRS_BINARY.");
+}
+nativeApi = new TsrsAPI({
   collectTiming: profileGeneration,
   cwd: rootDir,
   fs: {
-    fileExists: serverFS.useOS,
-    directoryExists: serverFS.useOS,
-    getAccessibleEntries: serverFS.useOS,
+    // Missing dependencies affect resolution too. Restoring them after snapshot
+    // creation cannot make the resulting incomplete types safe to publish.
+    fileExists: (path) => observedInstalledPathExists(path, "file"),
+    directoryExists: (path) => observedInstalledPathExists(path, "directory"),
+    getAccessibleEntries(path) {
+      const absolutePath = resolve(rootDir, path);
+      const normalizedPath = normalizePathForHostComparison(absolutePath);
+      if (!normalizedNodeModulesRoots.some((root) => normalizedPath.startsWith(`${root}${sep}`))) {
+        return serverFS.useOS;
+      }
+      if (!observedInstalledPathExists(absolutePath, "directory")) {
+        return { files: [], directories: [], symlinks: [] };
+      }
+      // Declaration discovery depends on directory listings even when no file
+      // is read. Return the captured listing and reject a restored package later.
+      const entries = installedDirectoryEntries(absolutePath);
+      const serialized = JSON.stringify(entries);
+      const previous = installedDirectoryObservations.get(normalizedPath);
+      if (previous !== undefined && previous.entries !== serialized) failForConcurrentSourceChange();
+      installedDirectoryObservations.set(normalizedPath, { path: absolutePath, entries: serialized });
+      return entries;
+    },
     realpath: serverFS.useOS,
     stat: serverFS.useOS,
     writeFile: serverFS.error,
     removeFile: serverFS.error,
     readFile(fileName) {
-      // A full semantic miss must infer from the same authenticated repository bytes captured
-      // above; a transient worktree edit cannot be allowed to reach tsrs and then be
-      // hidden by restoring the file before final publication verification.
-      // tsrs treats undefined as missing; installed dependencies explicitly delegate to disk.
-      return pathsEqualForHost(resolve(rootDir, fileName), apiPath)
-        ? analysisApi
-        : (authenticatedRepositorySource(fileName) ?? serverFS.useOS);
+      // Both syntax and semantics use retained bytes. Publication authenticates the
+      // repository capture and every installed file supplied to this snapshot.
+      const absolutePath = resolve(rootDir, fileName);
+      if (pathsEqualForHost(absolutePath, apiPath)) return analysisApi;
+      const repositorySource = authenticatedRepositorySource(absolutePath);
+      if (repositorySource !== undefined) return repositorySource;
+      const normalizedPath = normalizePathForHostComparison(absolutePath);
+      return normalizedNodeModulesRoots.some((root) => normalizedPath.startsWith(`${root}${sep}`))
+        ? retainedInstalledSource(absolutePath)
+        : serverFS.useOS;
     },
   },
 });
 const snapshot = nativeApi.createSnapshot({ openProjects: [configPath] });
 const project = snapshot.getConfiguredProject(configPath);
 if (project === undefined) {
-  nativeApi.close();
-  throw new Error(`Native TypeScript did not load ${toPosixPath(relative(rootDir, configPath))}.`);
+  throw new Error(`tsrs did not load ${toPosixPath(relative(rootDir, configPath))}.`);
 }
-const normalizedNodeModulesRoots = [
-  resolve(rootDir, "node_modules"),
-  realpathSync(resolve(rootDir, "node_modules")),
-].map(normalizePathForHostComparison);
 const programSourceFileNames = project.program
   .getSourceFileNames()
   .map((path) => resolve(rootDir, path));
@@ -2020,30 +2201,36 @@ const unexpectedRepositoryProgramPaths = programSourceFileNames
   })
   .sort(compareStrings);
 if (unexpectedRepositoryProgramPaths.length > 0) {
-  nativeApi.close();
   throw new Error(
-    `Native TypeScript loaded repository inputs outside the Convex API material set: ${unexpectedRepositoryProgramPaths
+    `tsrs loaded repository inputs outside the Convex API material set: ${unexpectedRepositoryProgramPaths
       .map((path) => toPosixPath(relative(rootDir, path)))
       .join(", ")}`
   );
 }
 const resolvedProgramMaterialPaths = convexApiProgramMaterialPaths({
+  missingPaths: [...installedPathObservations.values()]
+    .filter(({ kind }) => kind === "missing")
+    .map(({ path }) => path),
   nodeModulesRoot: resolve(rootDir, "node_modules"),
-  sourceFileNames: programSourceFileNames,
+  sourceFileNames: [
+    ...programSourceFileNames,
+    ...[...installedSourceByAbsolutePath.values()].map(({ path }) => path),
+    ...[...installedPathObservations.values()]
+      .filter(({ kind }) => kind === "file" || kind === "directory")
+      .map(({ path }) => path),
+  ],
 });
 const previousInputHash = inputHash;
 setFlattenerInput(resolvedProgramMaterialPaths);
 if (inputHash !== previousInputHash && (await useSharedCacheIfPresent())) {
   writeMaterialIndex(resolvedProgramMaterialPaths);
-  nativeApi.close();
-  process.exit(0);
+  return;
 }
 const checker = project.checker;
 const typePrintContext = project.program.getSourceFile(generatedServerPath);
 if (typePrintContext === undefined) {
-  nativeApi.close();
   throw new Error(
-    `Native TypeScript did not load ${toPosixPath(relative(rootDir, generatedServerPath))}.`
+    `tsrs did not load ${toPosixPath(relative(rootDir, generatedServerPath))}.`
   );
 }
 
@@ -2249,12 +2436,12 @@ function serializeTuple(type, declaration, exportName, partName, active) {
   const elements = checker.getTypeArguments(type);
   const elementFlags = target.elementFlags ?? [];
   const values = elements.map((element, index) => {
-    const flag = elementFlags[index] ?? ts.ElementFlags.Required;
+    const flag = elementFlags[index] ?? NativeElementFlags.Required;
     const elementText = serializeType(element, declaration, exportName, partName, active);
-    if ((flag & (ts.ElementFlags.Rest | ts.ElementFlags.Variadic)) !== 0) {
+    if ((flag & (NativeElementFlags.Rest | NativeElementFlags.Variadic)) !== 0) {
       return `...Array<${elementText}>`;
     }
-    if ((flag & ts.ElementFlags.Optional) !== 0) {
+    if ((flag & NativeElementFlags.Optional) !== 0) {
       return `(${elementText})?`;
     }
     return elementText;
@@ -2278,7 +2465,7 @@ function serializeObject(type, declaration, exportName, partName, active) {
     const propertyType = propertyTypes[index];
     if (propertyType === undefined) {
       throw new Error(
-        `Native TypeScript did not resolve property ${property.name} in the ${partName} type for ${exportName} at ${sourceLocation(declaration)}.`
+        `tsrs did not resolve property ${property.name} in the ${partName} type for ${exportName} at ${sourceLocation(declaration)}.`
       );
     }
     if (property.name.startsWith("__@")) {
@@ -2334,7 +2521,7 @@ function serializeType(type, declaration, exportName, partName, active = new Set
   }
   active.add(type);
 
-  // TypeScript normally preserves exported aliases as imports. Expand local
+  // tsrs normally preserves exported aliases as imports. Expand local
   // data shapes so consumers do not load the backend modules that own them.
   let text;
   if (type.isUnionType()) {
@@ -2367,7 +2554,7 @@ function serializeType(type, declaration, exportName, partName, active = new Set
     }
   } else {
     throw new Error(
-      `Cannot flatten ${partName} type for ${exportName} at ${sourceLocation(declaration)}. TypeScript emitted ${emitted}. Move this contract to a standalone exported data type.`
+      `Cannot flatten ${partName} type for ${exportName} at ${sourceLocation(declaration)}. tsrs emitted ${emitted}. Move this contract to a standalone exported data type.`
     );
   }
 
@@ -2412,7 +2599,7 @@ for (const sourcePath of convexSourcePaths) {
     if (parts === null) {
       if (expectedDirectRegistration || expectedGeneratedRegistryRegistration) {
         throw new Error(
-          `Native TypeScript did not infer a registered Convex function for ${exportName} at ${sourceLocation(declaration)}.`
+          `tsrs did not infer a registered Convex function for ${exportName} at ${sourceLocation(declaration)}.`
         );
       }
       continue;
@@ -2444,6 +2631,7 @@ if (profileGeneration) {
   console.error(JSON.stringify(nativeApi.getTimingInfo(), null, 2));
 }
 nativeApi.close();
+nativeApi = undefined;
 
 functions.sort((left, right) => {
   const moduleOrder = compareStrings(left.modulePath, right.modulePath);
@@ -2532,13 +2720,12 @@ export declare const components: {};
 const finalizedOutput = routeInventoryOnly
   ? convexApiRouteOutput(functions)
   : flattenedDeclarationOutput();
-if (!inventorySnapshotMode) {
-  await verifyInputsAtPublication({
-    expectedInputSha256: inputHash,
-    expectedInstalledMaterialIdentity: flattenerInput.identity.installedMaterialIdentity,
-    materialPaths: [...compilerMaterialPaths, ...programMaterialPaths],
-  });
-}
+// Authenticate before publishing reusable cache entries as well as the final snapshot.
+await verifyInputsAtPublication({
+  expectedInputSha256: inputHash,
+  expectedInstalledMaterialIdentity: flattenerInput.identity.installedMaterialIdentity,
+  materialPaths: [...compilerMaterialPaths, ...programMaterialPaths],
+});
 writeMaterialIndex(programMaterialPaths);
 const inventoryMetadata = inventorySnapshotMetadata(finalizedOutput, functions);
 publishSharedInventoryCache(finalizedOutput, inventoryMetadata);
@@ -2568,8 +2755,26 @@ if (inventorySnapshotMode) {
   );
 }
 publishPendingStagedSurfaceManifest();
+} finally {
+  try {
+    syntaxApi?.close();
+  } finally {
+    nativeApi?.close();
+  }
+}
+} catch (error) {
+  throw sourceChangedError ?? error;
+}
 }
 
+class ConvexApiSourceChangedError extends Error {}
+
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    if (!(error instanceof ConvexApiSourceChangedError)) throw error;
+    console.error(error.message);
+    process.exitCode = 75;
+  }
 }

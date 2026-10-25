@@ -143,10 +143,23 @@ test("the compiler producer manifest covers its owned source files", async () =>
 
 test("discovers production relative imports from the declared roots", async (t) => {
   const root = await producerFixture(t, "discovered-import");
+  const dependencies = ["amd", "common", "dynamic", "exported", "property"];
+  await Promise.all(dependencies.map((name) =>
+    fs.writeFile(join(root, "scripts", `${name}.mjs`), "export const value = 1;\n")
+  ));
+  await fs.appendFile(join(root, "scripts", "root.mjs"), `
+export { value as other } from "./exported.mjs";
+const lazy = import(\`./dynamic.mjs\`);
+const common = require("./common.mjs");
+const property = module.require("./property.mjs");
+define("named", ["./amd.mjs"], (dependency) => dependency);
+/** @type {import("./missing-type.mjs").Value} */
+const annotation = 1;
+`);
   const identity = await buildConvexWasmProducerIdentity(root);
-  assert.notEqual(
-    identity.sources.find(({ path }) => path === "scripts/helper.mjs"),
-    undefined
+  assert.deepEqual(
+    identity.sources.map(({ path }) => path),
+    [...dependencies, "helper", "root"].map((name) => `scripts/${name}.mjs`).sort()
   );
 });
 

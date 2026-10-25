@@ -6,12 +6,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { buildSync } from "esbuild";
-import test from "node:test";
+import test, { after } from "node:test";
 import { runInNewContext } from "node:vm";
 import { nodeUrlService } from "../test-fixtures/native-url/node-service.mjs";
 import { version as convexSdkVersion } from "convex";
 import { CommitTsPlaceholder, compareValues, convexToJson, jsonToConvex } from "convex/values";
-import ts from "typescript";
+import { API, ModuleKind } from "tsrs/unstable/sync";
+import { ScriptTarget } from "tsrs/unstable/ast";
 
 import {
   assertNativeCapabilityHelperDefinitions,
@@ -35,6 +36,9 @@ import {
   convexWasmApplicationGlobalThisBinding,
   convexWasmApplicationInstallRuntimeSupportBinding,
 } from "./convex-wasm-runtime-surface.mjs";
+
+const tsrs = new API();
+after(() => tsrs.close());
 
 const sourceFingerprint = "a".repeat(64);
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -420,14 +424,14 @@ function nativeCapabilityHarness({
     },
   };
   sandbox.__convexTargetGlobal = sandbox;
-  const javascript = ts.transpileModule(
+  const javascript = tsrs.transpileModule(
     `${rendered.slice(requestStart, requestEnd)}\n${
       typedQueryArgs
         ? rendered.slice(facadeStart, facadeEnd)
         : rendered.slice(facadeStart, facadeEnd).replace("  typedQueryArgs: true,\n", "")
     }\n${rendered.slice(runtimeStart, end)}`,
     {
-      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+      compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
     }
   ).outputText;
   runInNewContext(javascript, sandbox);
@@ -729,8 +733,8 @@ function nativeDatabaseUdfTimerHarness() {
   };
   const source = `${rendered.slice(start, end)}
 globalThis.__convexTimerHarness = {clearInterval, clearTimeout, setInterval, setTimeout};`;
-  const javascript = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(source, {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(javascript, sandbox);
   return {
@@ -773,8 +777,8 @@ function nativeConsoleHarness({
   };
   sandbox.__convexTargetGlobal = sandbox;
   sandbox.__convexWasmApplicationGlobalThis = Object.create(null);
-  const javascript = ts.transpileModule(renderNativeRuntimeSupportAdapter(), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(renderNativeRuntimeSupportAdapter(), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(javascript, sandbox);
   const installRuntimeSupport = sandbox[convexWasmApplicationInstallRuntimeSupportBinding];
@@ -814,8 +818,8 @@ function nativePerformanceHarness({ capabilityIdentity = 7, result = 12.3 } = {}
     },
   };
   sandbox.__convexTargetGlobal = sandbox;
-  const javascript = ts.transpileModule(rendered.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(rendered.slice(start, end), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(javascript, sandbox);
   return {
@@ -931,10 +935,10 @@ function nativeCryptoHarness({ capabilityIdentity = 7 } = {}) {
     },
   };
   sandbox.__convexTargetGlobal = sandbox;
-  const javascript = ts.transpileModule(
+  const javascript = tsrs.transpileModule(
     `${rendered.slice(mathStart, mathEnd)}\n${rendered.slice(cryptoStart, cryptoEnd)}`,
     {
-      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+      compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
     }
   ).outputText;
   runInNewContext(javascript, sandbox);
@@ -948,8 +952,8 @@ function nativeCryptoHarness({ capabilityIdentity = 7 } = {}) {
       const source = readFileSync(new URL("../../shared/sha256.ts", import.meta.url), "utf8");
       const exports = {};
       sandbox.exports = exports;
-      const compiled = ts.transpileModule(source, {
-        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      const compiled = tsrs.transpileModule(source, {
+        compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 },
       }).outputText;
       runInNewContext(compiled, sandbox);
       return exports.sha256Hex;
@@ -973,10 +977,10 @@ function executableIndexQueryBuilder(code, overrides = {}) {
   const end = code.indexOf("const __convexContext = {", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
-  const source = ts.transpileModule(code.slice(start, end), {
+  const source = tsrs.transpileModule(code.slice(start, end), {
     compilerOptions: {
-      module: ts.ModuleKind.None,
-      target: ts.ScriptTarget.ES2020,
+      module: ModuleKind.None,
+      target: ScriptTarget.ES2020,
     },
   }).outputText;
   return runInNewContext(`${source}; __convexCreateQuery`, {
@@ -1245,9 +1249,9 @@ function executableGuestPromiseEffectRuntime(code) {
     "\n" +
     code.slice(start, end)
   ).replace("Array<?number>", "Array<number | undefined>");
-  return ts.transpileModule(source, {
+  return tsrs.transpileModule(source, {
     compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
+      target: ScriptTarget.ES2022,
     },
   }).outputText;
 }
@@ -1278,8 +1282,8 @@ function executableFunctionHandleRuntime(code, { guest = false } = {}) {
     extractedFunction(code, "__convexFunctionHandleAddress"),
     extractedFunction(code, "__convexCreateFunctionHandle"),
   ].join("\n");
-  return ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  return tsrs.transpileModule(source, {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
 }
 
@@ -3656,8 +3660,8 @@ test("native results use one binary boundary for value and legacy SDK wrappers",
       results.push(value);
     },
   };
-  const javascript = ts.transpileModule(bridgeJavascript.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(bridgeJavascript.slice(start, end), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(
     `${javascript}\nglobalThis.writeValue = __convexSetGuestFunctionResult;\nglobalThis.writeTagged = __convexSetGuestFunctionTaggedJsonResult;`,
@@ -3700,8 +3704,8 @@ test("official wrapper request reader preserves tagged JSON for the SDK to parse
     },
     __convexHostGuestRequestLen: () => Buffer.byteLength(source),
   };
-  const javascript = ts.transpileModule(bridgeJavascript.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(bridgeJavascript.slice(start, end), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(`${javascript}\nglobalThis.readTagged = __convexReadGuestRequestTaggedJson;`, sandbox);
   assert.equal(sandbox.readTagged(), source);

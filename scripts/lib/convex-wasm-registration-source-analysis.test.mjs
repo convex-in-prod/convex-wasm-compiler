@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 
-import ts from "typescript";
+import * as ts from "tsrs/unstable/ast";
+import { API } from "tsrs/unstable/sync";
 
 import { createConvexWasmRegistrationSourceAnalyzer } from "./convex-wasm-registration-source-analysis.mjs";
 
-const analyze = createConvexWasmRegistrationSourceAnalyzer(ts);
+const api = new API();
+after(() => api.close());
+
+const analyze = createConvexWasmRegistrationSourceAnalyzer({ api, ts });
 
 function analyzeSource(source) {
   return analyze({
@@ -25,7 +29,7 @@ function analyzeSource(source) {
 }
 
 test("records imports, immutable aliases, exports, and declarative registrations", () => {
-  const source = `
+  const source = `// UTF-16 registration offset: 🌍
 import { queryGeneric as query } from "convex/server";
 const register = query;
 export const read = register({ args: {}, handler: () => 42 });
@@ -57,10 +61,10 @@ test("rejects registration calls whose definition can invoke inherited or access
   }
 });
 
-test("requires an injected TypeScript runtime", () => {
+test("requires an injected tsrs API and AST helpers", () => {
   assert.throws(
-    () => createConvexWasmRegistrationSourceAnalyzer(undefined),
-    /requires a TypeScript runtime/u
+    () => createConvexWasmRegistrationSourceAnalyzer({}),
+    /requires a tsrs API and AST helpers/u
   );
 });
 

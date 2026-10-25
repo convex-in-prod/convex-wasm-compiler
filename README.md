@@ -94,9 +94,9 @@ The repository currently provides:
 - verified Static Hermes gate configuration from a caller-supplied runtime and
   platform policy, with the runtime source taken from this package;
 - application-root package resolvers that record installed Convex and esbuild
-  identities, plus TypeScript for profile analysis;
-- TypeScript-driven registration source analysis that accepts the adopting
-  application's resolved TypeScript runtime;
+  identities, plus tsrs for profile analysis;
+- tsrs registration source analysis that accepts the adopting
+  application's resolved tsrs API;
 - source-level compile-profile construction with explicit application root,
   package root, and configuration file paths;
 - authenticated source-envelope selection and owner-private publication from
@@ -637,20 +637,56 @@ Install the repository-local JavaScript dependencies before checking the
 source-graph tooling. The lowering tests pin one public Convex SDK fixture;
 guest generation takes the adopting application's SDK version explicitly.
 Source-graph construction resolves Convex and esbuild from the application
-whose source graph is being built. Profile analysis also resolves TypeScript
+whose source graph is being built. Profile analysis also resolves tsrs
 from that application. The package identities record manifest SHA-256 digests
 without checkout paths, so identical installed inputs retain the same identity
 across checkouts.
 `loadConvexGeneratedApiInventory` now runs the bundled route flattener against
 the application's `convex.json` functions directory. The application supplies
-TypeScript for syntax analysis and `tsrs` for semantic analysis in its installed
+`tsrs` for syntax and semantic analysis in its installed
 package set (the example pins `tsrs` to `0.18.0-ts7.1.0-dev.20260929`). Compiler
-identity includes the installed tsrs API, platform binaries, and libraries;
+identity includes the installed tsrs API, platform binaries, and libraries,
+including native packages nested by npm;
 `TSRS_BINARY` overrides are rejected, including when reusing cached results.
-The pinned tsrs release provides Linux x64/arm64 (GNU and musl) and macOS arm64
-binaries. It has no macOS x64 binary, so bundled API generation on Intel macOS
-requires an installed tsrs release with that platform package before the complete
-source-to-artifact path is supported there. Windows uses Linux through WSL2.
+The compiler also uses its own pinned tsrs package for producer source closure and
+runtime-surface checks. Both installations need a matching native package. The
+pinned release provides Linux x64/arm64 (GNU and musl) and macOS arm64 binaries;
+it has no macOS x64 binary. Intel macOS native compiler/precompiler packages remain
+separate from complete application build support, which is unavailable with this
+tsrs pin. Windows uses Linux through WSL2. Long-lived callers must restart after
+changing installed tsrs material; Node retains previously imported API modules.
+Fresh API analysis retains dependency text and directory listings, and rejects
+changes to those bytes, listings, or observed dependency presence before publishing
+an inventory. Cache reuse also authenticates the parent directories of missing
+dependency probes, so a newly available declaration invalidates the earlier result.
+API result caches live at `TSRS_CACHE_DIR/<project>/convex-api/compiler`, separate
+from Wasm artifacts. `TSRS_CACHE_DIR` defaults to `tsrs` under `XDG_CACHE_HOME` or
+the platform user cache directory. The project namespace comes from the application's normalized
+package name, or `project` for an unnamed private manifest; `TSRS_CACHE_NAMESPACE`
+overrides it. The general root, project namespace, and generator directories must be
+owned by the current user with mode `0700`. Compatible application checkouts
+reuse authenticated results, with producer, configuration, source, and installed
+compiler identities still checked. Application-owned generators use separate producer
+directories when their formats or inputs differ.
+These are semantic result caches: the pinned tsrs API does not load CLI
+`.tsbuildinfo` files. Registration sessions already reuse per-file analysis results;
+the one-shot flattener has no live snapshot-update loop. CLI incremental state and
+SDK declaration archives can use the same general cache root under their own formats.
+The compiler's `cache:maintain` command accounts for Wasm artifacts only; tsrs does
+not automatically prune these result caches. Applications can include tsrs cleanup
+in their maintenance workflow with separate retention and accounting. Completed
+entries are the hash-named JSON files in `material-index`,
+`staged-surface-manifest`, `fast-reuse-index`, and `route-fast-reuse-index-v1`,
+and gzip files in `inventory-v3` and `inventory-routes-v1`. Retention can use their
+publication modification time; cache hits do not update it. Cleanup can remove
+completed files while generators run: readers treat concurrent eviction as a
+cache miss. Preserve every directory, `.tmp` file or directory, unknown format,
+and inventory snapshot outside the result cache so active publication can finish.
+CLI build info and SDK declaration archives have their own retention formats.
+Existing caches at the former Wasm cache location are not moved automatically.
+An unused project or format directory, including a former cache location, can be
+removed after its compiler and generator processes stop; the next invocation
+reconstructs it.
 An optional project-owned flattener config lists additional registration builders, exact
 generated-registry exports, additional `sourceRoots`, and `inputFiles` such as
 the application's lockfile or base TypeScript configuration. `patchFiles`
@@ -669,15 +705,15 @@ a source envelope. The caller supplies the functions root and sorted source
 roots for that source-text capture.
 Artifact adapters take the installed Convex version as a separate
 `sdkPackageVersion` argument when generating the guest bridge.
-The registration analyzer accepts that resolved TypeScript runtime as an input;
-it does not load TypeScript from the compiler checkout.
+The registration analyzer accepts that resolved tsrs API and AST helpers as inputs;
+it does not load them from the compiler checkout.
 Source-graph snapshots take an explicit application root and selected Git
 pathspecs. A deployment snapshot rejects unstaged or untracked changes within
 those paths, while unrelated staged files may change. The snapshot cache binds
 the selected paths, graph assumptions, installed package identities, and staged
 source identities before reusing a graph.
 Producer identity reads the toolchain's own source manifest and uses a pinned
-TypeScript parser to include relative imports. Adding a toolchain source file
+tsrs parser to include relative imports. Adding a toolchain source file
 requires updating `scripts/convex-wasm-artifact-producer-source-manifest.json`.
 The manifest currently covers the source modules present here; it will expand
 as build and publication modules move into this repository.
@@ -778,12 +814,14 @@ and superseded certificates. Each pass preserves the dependencies of every
 physical authority root: certificates pin their packages, and packages pin
 their artifacts. Newly unreachable dependencies become eligible on later
 passes. One maintenance invocation continues through those passes under the cache
-lock until measured occupancy reaches the high watermark or no eligible entries
-remain. There is no entry-count or reclaimed-byte ceiling. Roots take priority
-over independent artifacts, and each plan stops selecting entries at the high
-watermark. Maintenance preserves eight recent successful snapshots and a 24-hour
-reuse grace, including their complete closure; retained data can keep occupancy
-above the target. The report includes all removals, the last plan, and measured
+lock until measured occupancy reaches the high watermark or a pass removes no
+entries. The low-level `sweepConvexWasmImmutableGc` executes one plan. There is no
+entry-count or reclaimed-byte ceiling. Roots take priority over independent
+artifacts, and each plan stops selecting entries when estimated reclaim covers
+the excess above the high watermark. Maintenance preserves eight recent successful
+snapshots and a 24-hour reuse grace, including their complete closure; retained
+data can keep occupancy above the target. The report includes all removals, the
+last plan before its removals, and measured
 `immutable.sweep.remainingAllocatedBytes`; the automatic summary reports that
 remaining occupancy when a sweep ran.
 Unknown invalid certificate roots conservatively prevent package retirement.
@@ -801,8 +839,9 @@ candidate; category allocation totals can include those shared blocks.
 Use the same cache root for builds and maintenance. A caller assembling a build
 from the exported modules must acquire `acquireConvexWasmCacheLock`, create a work lease with
 `createConvexWasmBuildWorkLease`, and hold the lock through the build and the
-lease's `complete` or `fail` transition. The library builders do not acquire
-the lock for the caller. `verify:source-to-aot` acquires it around its own build.
+lease's `complete` or `fail` transition. The low-level artifact builders do not
+acquire the lock for the caller. `convex-wasm-build` and `verify:source-to-aot`
+acquire it around their builds.
 Hosts that serialize compilation with a broader lock can pass a `cacheLock`
 object to the lease, successful-use, maintenance, and immutable-GC functions.
 It supplies `acquire({ environment })`, `requireAuthority(environment)`, and

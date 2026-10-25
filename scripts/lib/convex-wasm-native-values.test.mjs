@@ -6,7 +6,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import test from "node:test";
-import ts from "typescript";
+import { API } from "tsrs/unstable/sync";
+import { ScriptTarget } from "tsrs/unstable/ast";
+
 import { buildSync } from "esbuild";
 
 import { renderConvexWasmIntrinsicHardeningPrelude } from "./convex-wasm-intrinsic-hardening.mjs";
@@ -25,6 +27,9 @@ test("native adapter validates packed values, intrinsics and retained chunks", a
     );
     return;
   }
+  // Skipping the optional native fixture must not require an installed parser binary.
+  const tsrs = new API();
+  context.after(() => tsrs.close());
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const sdkRoot =
     process.env.CONVEX_SDK_TEST_SOURCE_ROOT ??
@@ -59,7 +64,7 @@ test("native adapter validates packed values, intrinsics and retained chunks", a
     );
     writeFileSync(
       join(temporary, "hardening.js"),
-      ts.transpileModule(
+      tsrs.transpileModule(
         [
           "globalThis.__convexTestHostImports = {extern_c: () => () => 1};",
           // The host evaluator cannot compile Static Hermes extern_c syntax;
@@ -72,7 +77,7 @@ test("native adapter validates packed values, intrinsics and retained chunks", a
             nativeDescriptorValidation: true,
           }),
         ].join("\n"),
-        { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+        { compilerOptions: { target: ScriptTarget.ES2022 } },
       ).outputText,
     );
     const executable = join(temporary, "native-values");

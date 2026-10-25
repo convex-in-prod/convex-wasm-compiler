@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { runInNewContext } from "node:vm";
 
-import ts from "typescript";
+import { API, ModuleKind } from "tsrs/unstable/sync";
+import { ScriptTarget } from "tsrs/unstable/ast";
 
 import { renderConvexWasmIntrinsicHardeningPrelude } from "./convex-wasm-intrinsic-hardening.mjs";
 import {
@@ -15,6 +16,9 @@ import {
   renderConvexWasmApplicationGlobalFacade,
   renderConvexWasmTargetRuntimeGlobalPrelude,
 } from "./convex-wasm-runtime-surface.mjs";
+
+const tsrs = new API();
+after(() => tsrs.close());
 
 test("application source cannot capture host-owned initialization handoffs", () => {
   for (const source of [
@@ -86,13 +90,13 @@ globalThis.__convexTestNativeDateGlobalDescriptor =
 `,
     sandbox
   );
-  const javascript = ts.transpileModule(prelude.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  const javascript = tsrs.transpileModule(prelude.slice(start, end), {
+    compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
   }).outputText;
   runInNewContext(javascript, sandbox);
   if (harden) {
-    const hardeningJavascript = ts.transpileModule(renderConvexWasmIntrinsicHardeningPrelude(), {
-      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    const hardeningJavascript = tsrs.transpileModule(renderConvexWasmIntrinsicHardeningPrelude(), {
+      compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
     }).outputText;
     runInNewContext(hardeningJavascript, sandbox);
   }
@@ -100,8 +104,8 @@ globalThis.__convexTestNativeDateGlobalDescriptor =
   return {
     evaluate: (source) => runInNewContext(source, sandbox),
     evaluateTypeScript(source) {
-      const output = ts.transpileModule(source, {
-        compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+      const output = tsrs.transpileModule(source, {
+        compilerOptions: { module: ModuleKind.None, target: ScriptTarget.ES2022 },
       }).outputText;
       return runInNewContext(output, sandbox);
     },
@@ -634,4 +638,40 @@ test("admits shared deterministic runtime globals through every ordinary read sh
   assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.data.timeZoneVersion, "2025c");
   assert.match(convexWasmTargetRuntimeSurfacePolicy.intl.data.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(convexWasmTargetRuntimeSurfacePolicy.intl.state, "implemented");
+});
+
+
+test("runtime surface uses semantic scope for shorthand reads and ambient writes", () => {
+  for (const source of [
+    "function local(fetch) { return {fetch}; }",
+    "function local() { return {fetch}; var fetch; }",
+    "try { throw 1; } catch (fetch) { void {fetch}; }",
+    "const [,,fetch] = [1, 2, 3]; void {fetch};",
+    "function local(globalThis, Math) { return [globalThis, Math]; }",
+    "function local() { return arguments; }",
+    "function local() { return () => arguments; }",
+  ]) assert.doesNotThrow(() => assertConvexWasmTargetRuntimeSurface(source), source);
+  for (const source of [
+    "void {fetch};",
+    "function local(fetch) { return fetch; } void {fetch};",
+  ]) assert.throws(
+    () => assertConvexWasmTargetRuntimeSurface(source),
+    (error) => error.code === "ambient-global-unavailable" && error.surface === "fetch",
+    source
+  );
+  for (const source of ["void arguments;", "const local = () => arguments;"]) {
+    assert.throws(
+      () => assertConvexWasmTargetRuntimeSurface(source),
+      (error) => error.code === "ambient-global-unavailable" && error.surface === "arguments",
+      source
+    );
+  }
+  assert.throws(
+    () => assertConvexWasmTargetRuntimeSurface("({Object} = {});"),
+    (error) => error.code === "ambient-global-write"
+  );
+  assert.throws(
+    () => assertConvexWasmTargetRuntimeSurface("const broken = ;"),
+    /must be valid JavaScript/u
+  );
 });

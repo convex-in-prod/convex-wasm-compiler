@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import ts from "typescript";
+import * as ts from "tsrs/unstable/ast";
+import { API, SymbolFlags } from "tsrs/unstable/sync";
+import { createFileSystem } from "tsrs/unstable/fs";
 
 import {
   assertConvexWasmQueryMutationVisibleDeterministicGlobals,
@@ -395,20 +397,6 @@ export class ConvexWasmTargetRuntimeSurfaceGap extends Error {
   }
 }
 
-function compilerHost(sourceFile, source) {
-  return {
-    fileExists: (path) => path === VIRTUAL_SOURCE_PATH,
-    getCanonicalFileName: (path) => path,
-    getCurrentDirectory: () => "/",
-    getDefaultLibFileName: () => "",
-    getNewLine: () => "\n",
-    getSourceFile: (path) => (path === VIRTUAL_SOURCE_PATH ? sourceFile : undefined),
-    readFile: (path) => (path === VIRTUAL_SOURCE_PATH ? source : undefined),
-    useCaseSensitiveFileNames: () => true,
-    writeFile() {},
-  };
-}
-
 function identifierIsPropertyName(identifier) {
   const parent = identifier.parent;
   return (
@@ -418,8 +406,8 @@ function identifierIsPropertyName(identifier) {
       ts.isGetAccessorDeclaration(parent) ||
       ts.isSetAccessorDeclaration(parent) ||
       ts.isPropertyDeclaration(parent) ||
-      ts.isPropertySignature(parent) ||
-      ts.isMethodSignature(parent)) &&
+      ts.isPropertySignatureDeclaration(parent) ||
+      ts.isMethodSignatureDeclaration(parent)) &&
       parent.name === identifier) ||
     ((ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) &&
       parent.label === identifier) ||
@@ -427,7 +415,7 @@ function identifierIsPropertyName(identifier) {
     (ts.isBindingElement(parent) &&
       (parent.name === identifier || parent.propertyName === identifier)) ||
     ((ts.isVariableDeclaration(parent) ||
-      ts.isParameter(parent) ||
+      ts.isParameterDeclaration(parent) ||
       ts.isFunctionDeclaration(parent) ||
       ts.isFunctionExpression(parent) ||
       ts.isClassDeclaration(parent) ||
@@ -442,13 +430,16 @@ function identifierIsPropertyName(identifier) {
 
 function unshadowedAmbientIdentifier(identifier, checker) {
   if (identifierIsPropertyName(identifier)) return false;
-  const symbol = checker.resolveName(identifier.text, identifier, ts.SymbolFlags.Value, false);
+  const symbol = checker.resolveName(identifier.text, SymbolFlags.Value, identifier, false);
   if (symbol === undefined) return true;
-  return !(symbol.declarations ?? []).some(
+  // The implicit function arguments symbol has no declaration node. Its presence
+  // still proves a binding; top-level and unbound arrow references have no symbol.
+  if (identifier.text === "arguments") return false;
+  return !symbol.declarations.some(
     (declaration) =>
       ts.isVariableDeclaration(declaration) ||
       ts.isBindingElement(declaration) ||
-      ts.isParameter(declaration) ||
+      ts.isParameterDeclaration(declaration) ||
       ts.isFunctionDeclaration(declaration) ||
       ts.isFunctionExpression(declaration) ||
       ts.isClassDeclaration(declaration) ||
@@ -551,77 +542,78 @@ export function assertConvexWasmTargetRuntimeSurface(compileProfileJavascript) {
   if (!SHA256_PATTERN.test(convexWasmTargetRuntimeSurfacePolicySha256)) {
     throw new Error("Convex Wasm target runtime surface policy identity is invalid.");
   }
-  const options = {
-    allowJs: true,
-    noLib: true,
-    target: ts.ScriptTarget.ESNext,
-  };
-  const sourceFile = ts.createSourceFile(
-    VIRTUAL_SOURCE_PATH,
-    javascript,
-    options.target,
-    true,
-    ts.ScriptKind.JS
-  );
-  const program = ts.createProgram(
-    [VIRTUAL_SOURCE_PATH],
-    options,
-    compilerHost(sourceFile, javascript)
-  );
-  const parseDiagnostics = program.getSyntacticDiagnostics(sourceFile);
-  if (parseDiagnostics.length !== 0) {
-    throw new Error("compileProfileJavascript must be valid JavaScript before runtime checks.");
+  if (process.env.TSRS_BINARY !== undefined) {
+    throw new Error("Source analysis requires the installed tsrs binary; unset TSRS_BINARY.");
   }
-  const checker = program.getTypeChecker();
-  const visit = (node) => {
-    if (ts.isIdentifier(node)) {
-      const name = node.text;
-      if (
-        applicationInitializationHandoffBindings.has(name) &&
-        (name !== convexWasmApplicationGlobalThisBinding ||
-          !unshadowedAmbientIdentifier(node, checker))
-      ) {
-        throw new ConvexWasmTargetRuntimeSurfaceGap("reserved-initialization-handoff", name);
-      }
-      if (!unshadowedAmbientIdentifier(node, checker)) {
-        ts.forEachChild(node, visit);
-        return;
-      }
-      if (name === "arguments") {
-        // TypeScript does not bind the implicit function arguments object without library input.
-      } else if (name === "globalThis") {
-        rejectRawGlobalThisUse(node);
-      } else if (name === convexWasmApplicationGlobalThisBinding) {
-        if (ambientGlobalWrite(node)) {
-          throw new ConvexWasmTargetRuntimeSurfaceGap("ambient-global-write", "globalThis");
+  const api = new API();
+  try {
+    const snapshot = api.createSnapshot({
+      fileSystem: createFileSystem([[VIRTUAL_SOURCE_PATH, javascript]]),
+      createPrograms: [{
+        rootFiles: [VIRTUAL_SOURCE_PATH],
+        compilerOptions: { allowJs: true, noLib: true, target: ts.ScriptTarget.ESNext },
+      }],
+    });
+    const program = snapshot.operation.createdPrograms[0];
+    const sourceFile = program.getSourceFile(VIRTUAL_SOURCE_PATH);
+    if (sourceFile === undefined) {
+      throw new Error("tsrs did not load the compile-profile JavaScript.");
+    }
+    const parseDiagnostics = program.getSyntacticDiagnostics(VIRTUAL_SOURCE_PATH);
+    if (parseDiagnostics.length !== 0) {
+      throw new Error("compileProfileJavascript must be valid JavaScript before runtime checks.");
+    }
+    const checker = snapshot.getProject(program.id).checker;
+    const visit = (node) => {
+      if (ts.isIdentifier(node)) {
+        const name = node.text;
+        if (
+          applicationInitializationHandoffBindings.has(name) &&
+          (name !== convexWasmApplicationGlobalThisBinding ||
+            !unshadowedAmbientIdentifier(node, checker))
+        ) {
+          throw new ConvexWasmTargetRuntimeSurfaceGap("reserved-initialization-handoff", name);
         }
-      } else if (implementedAmbientGlobalSet.has(name) && ambientGlobalWrite(node)) {
-        throw new ConvexWasmTargetRuntimeSurfaceGap("ambient-global-write", name);
-      } else if (implementedAmbientGlobalSet.has(name)) {
-        if (name === "Math") {
-          rejectMathUse(node);
+        if (!unshadowedAmbientIdentifier(node, checker)) {
+          node.forEachChild(visit);
+          return;
+        }
+        if (name === "globalThis") {
+          rejectRawGlobalThisUse(node);
+        } else if (name === convexWasmApplicationGlobalThisBinding) {
+          if (ambientGlobalWrite(node)) {
+            throw new ConvexWasmTargetRuntimeSurfaceGap("ambient-global-write", "globalThis");
+          }
+        } else if (implementedAmbientGlobalSet.has(name) && ambientGlobalWrite(node)) {
+          throw new ConvexWasmTargetRuntimeSurfaceGap("ambient-global-write", name);
+        } else if (implementedAmbientGlobalSet.has(name)) {
+          if (name === "Math") {
+            rejectMathUse(node);
+          } else if (name === "Date") {
+            // Date is implemented by the invocation-capability facade rendered below.
+          } else {
+            // These names are implemented by the pinned engine and authenticated as policy inputs.
+          }
         } else if (name === "Date") {
           // Date is implemented by the invocation-capability facade rendered below.
+        } else if (name === "Math") {
+          rejectMathUse(node);
         } else {
-          // These names are implemented by the pinned engine and authenticated as policy inputs.
+          const namedGap = namedGlobalGaps.get(name);
+          throw new ConvexWasmTargetRuntimeSurfaceGap(namedGap ?? "ambient-global-unavailable", name);
         }
-      } else if (name === "Date") {
-        // Date is implemented by the invocation-capability facade rendered below.
-      } else if (name === "Math") {
-        rejectMathUse(node);
-      } else {
-        const namedGap = namedGlobalGaps.get(name);
-        throw new ConvexWasmTargetRuntimeSurfaceGap(namedGap ?? "ambient-global-unavailable", name);
       }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return {
-    javascript,
-    kind: POLICY_KIND,
-    policySha256: convexWasmTargetRuntimeSurfacePolicySha256,
-  };
+      node.forEachChild(visit);
+    };
+    visit(sourceFile);
+    return {
+      javascript,
+      kind: POLICY_KIND,
+      policySha256: convexWasmTargetRuntimeSurfacePolicySha256,
+    };
+  } finally {
+    api.close();
+  }
 }
 
 export function renderConvexWasmTargetRuntimeGlobalPrelude() {

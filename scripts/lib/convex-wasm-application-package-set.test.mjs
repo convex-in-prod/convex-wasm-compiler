@@ -22,7 +22,7 @@ test("resolves package identities from each explicit application root", async (c
     await writePackage(root, name, `1.0.${suffix}`);
     await writePackage(join(root, "node_modules", "convex"), "convex", `1.45.${suffix}`);
     await writePackage(join(root, "node_modules", "esbuild"), "esbuild", `0.27.${suffix}`);
-    await writePackage(join(root, "node_modules", "typescript"), "typescript", `6.0.${suffix}`);
+    await writePackage(join(root, "node_modules", "tsrs"), "tsrs", `6.0.${suffix}`);
   }
   await writePackage(
     join(parent, "first", "node_modules", "convex", "node_modules", "esbuild"),
@@ -33,7 +33,7 @@ test("resolves package identities from each explicit application root", async (c
   await writePackage(copyRoot, "first", "1.0.1");
   await writePackage(join(copyRoot, "node_modules", "convex"), "convex", "1.45.1");
   await writePackage(join(copyRoot, "node_modules", "esbuild"), "esbuild", "0.27.1");
-  await writePackage(join(copyRoot, "node_modules", "typescript"), "typescript", "6.0.1");
+  await writePackage(join(copyRoot, "node_modules", "tsrs"), "tsrs", "6.0.1");
   await writePackage(
     join(copyRoot, "node_modules", "convex", "node_modules", "esbuild"),
     "esbuild",
@@ -45,7 +45,7 @@ test("resolves package identities from each explicit application root", async (c
   assert.equal(second.convex.version, "1.45.2");
   assert.equal(first.esbuild.version, "0.28.1");
   assert.equal(second.esbuild.version, "0.27.2");
-  assert.equal(second.typescript.version, "6.0.2");
+  assert.equal(second.tsrs.version, "6.0.2");
   assert.notEqual(first.convex.sha256, second.convex.sha256);
   assert.notEqual(first.applicationManifestSha256, second.applicationManifestSha256);
   assert.deepEqual(first, resolveConvexWasmApplicationPackageSet(copyRoot));
@@ -60,7 +60,7 @@ test("resolves package identities from each explicit application root", async (c
   assert.equal(Object.isFrozen(first.convex), true);
 });
 
-test("source graph package resolution does not require TypeScript", async (context) => {
+test("source graph package resolution does not require tsrs", async (context) => {
   const parent = await fs.mkdtemp(join(tmpdir(), "convex-wasm-application-packages-"));
   context.after(() => fs.rm(parent, { force: true, recursive: true }));
   await writePackage(parent, "fixture", "1.0.0");
@@ -69,7 +69,7 @@ test("source graph package resolution does not require TypeScript", async (conte
   assert.equal(resolveConvexWasmApplicationBundlerPackageSet(parent).convex.version, "1.45.1");
   assert.throws(
     () => resolveConvexWasmApplicationPackageSet(parent),
-    /typescript package is unavailable from the application root/u
+    /tsrs package is unavailable from the application root/u
   );
 });
 
