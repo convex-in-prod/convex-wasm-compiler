@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.50",
+  "version": "0.2.51",
   "private": true,
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
     "convex-wasm-transfer-registry": "scripts/transfer-registry.sh"
   },
   "files": [
+    "CHANGELOG.md",
     "docs/toolchain-releases.md",
     "docs/guest-memory-maintenance.md",
     "docs/memory-reclamation.md",

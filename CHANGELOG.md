@@ -1,0 +1,53 @@
+# Changelog
+
+Release changes and upgrade notes. For the complete history, see
+[GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
+
+## 0.2.51
+
+- Use tsrs throughout source analysis, removing the classic TypeScript compiler
+  dependency. Authenticate installed compiler material and dependency observations
+  before publishing API inventories, including missing dependencies and symlinked
+  or nested native packages.
+- Put API result caches under the shared, project-scoped `TSRS_CACHE_DIR` root.
+  These store analysis results; they do not add incremental semantic snapshots
+  or consume CLI `.tsbuildinfo` files. See
+  [source analysis and tsrs caches](README.md#source-analysis-and-tsrs-caches)
+  for dependency, platform, and retention requirements. The pinned tsrs package
+  has no macOS x64 binary, so full application builds on Intel macOS are unsupported.
+- Continue immutable cache cleanup until measured occupancy reaches the
+  configured high watermark or no more entries can be reclaimed. Remove the
+  entry-count and reclaimed-byte ceilings and align pressure with reported occupancy.
+- Hold the cache lock during binding and registry publication, including all
+  pending reads and artifact copies on failure, so cleanup cannot evict their inputs.
+- Clarify the compiler/backend boundary and link the build, runtime, and
+  context-reuse documentation.
+
+Native compiler and precompiler sources, Wasmtime artifact compatibility, and
+the backend ABI are unchanged from 0.2.50.
+
+## 0.2.45
+
+Extend bounded Static Hermes RegExp matchers to non-Unicode case-insensitive
+UTF-16 literals and capture-free forward alternatives. Ordered backtracking and
+existing matcher budgets are preserved. Unsupported patterns retain ordinary
+execution. The Rust compiler and precompiler packages, Wasmtime artifact format,
+and backend ABI are unchanged; native packages from 0.2.44 are reused.
+
+## 0.2.44
+
+Adopt guarded whole-operation RegExp specialization and bounded AOT matchers in
+Static Hermes. Eligible literals avoid repeated interpreter work and intermediate
+match/replacement allocations; unsupported operands and observable builtin
+overrides retain ordinary execution. The Wasmtime artifact format and backend
+ABI are unchanged.
+
+## 0.2.43
+
+Refresh Hermes, Oxc, and Wasmtime from upstream. Wasmtime's changed tunables and
+builtin layout require new native artifact metadata. The precompiler and matching
+backend use Wasmtime `ba13bdffaa34c4cfa6af8ceb58275e761593a885`; native artifacts
+from the previous engine must be regenerated before activating the backend with
+those application generations. Portable Core Wasm remains compatible. Retain the
+previous backend and its native artifacts together for rollback; changing a
+package version or manifest cannot convert old AOT bytes.

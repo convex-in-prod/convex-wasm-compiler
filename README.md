@@ -1,8 +1,28 @@
 # Convex Wasm Compiler
 
-This repository contains native tooling for compiling selected Convex query and
-mutation modules for Static Hermes execution in a Wasmtime-backed self-hosted
-Convex runtime.
+This repository compiles selected Convex query and mutation modules for execution
+in a self-hosted backend with the
+[Static Hermes Wasm UDF patch](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs).
+It bundles application code with esbuild, compiles it through Static Hermes to
+C, links the generated code and guest runtime into Core WebAssembly, and uses
+Wasmtime to precompile native artifacts. Static Hermes supplies the JavaScript
+runtime inside Wasm; the patched Convex backend supplies database operations,
+transactions, authorization, and execution limits.
+
+Start with [Project artifact build](#project-artifact-build) to produce artifacts.
+The backend's [operations guide](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/operations.md)
+covers installing and activating them. The compiler owns the build and local
+registry publication; the backend owns which deployed functions run in Wasm.
+Release changes and upgrade notes are in the [changelog](CHANGELOG.md).
+
+## Backend integration and compatibility
+
+Core Wasm (`.wasm`) is the portable compiled module. AOT (`.cwasm`) is Wasmtime's
+serialized native code for a particular target and engine configuration. A module
+graph combines a base module, shared modules, and a leaf for a selected group of
+entry modules, called a cohort. The backend's
+[compiler and artifact contract](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/compiler_and_artifact_contract.md)
+defines how these files, source identities, and route permissions fit together.
 
 The source compiler and Core Wasm guest must not require a specific Wasmtime
 revision. The maintained Wasmtime precompiler is a separate native target: its
@@ -33,6 +53,8 @@ complete Core-only CLI/package workflow remains to be implemented. Convex Cloud
 compatibility is a project objective, not a supported or verified deployment
 mode today; its host ABI, supported Wasm features and delivery format still
 need to be established.
+
+## Tooling
 
 The repository currently provides:
 
@@ -117,6 +139,8 @@ The repository currently provides:
   with operational files reported separately from artifact semantics; and
 - compiler regression and invariant-validation corpora.
 
+## Guest runtime
+
 The guest runtime is not a byte-for-byte V8 replacement. Its native ICU provider
 supports DateTimeFormat, NumberFormat and Collator, with pinned locale data and
 documented differences. See [runtime compatibility](docs/runtime-compatibility.md) for the exact
@@ -147,6 +171,16 @@ lowering. Split C exception emission preserves the ordinary exception behavior.
 Experimental record forwarding and late materialization remain outside these
 defaults. Builds authenticate the complete compiler/runtime support sources and
 retain normal fuel and epoch checks.
+
+## Context reuse analysis
+
+Context reuse keeps initialized module state between invocations. The analyzer
+checks whether selected module graphs can retain that state without retaining
+request-owned data or allowing mutations to affect later calls. Its results
+support Wasm cohort construction and the separate
+[V8 context-reuse patch](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse),
+which defines backend opt-in, grouped initialization, and invalidation. Selecting
+an action for V8 context reuse does not compile it to Wasm.
 
 The context-reuse analyzer embeds reusable reviewed dispositions for public
 dependencies. Its optional `--third-party-policy <path>` input lets a downstream
@@ -253,12 +287,11 @@ the existing equivalent-output mechanism and can be disabled with
 `actions.grouping: false`. Actions remain separate from database
 Wasm compilation selection.
 
-The corresponding self-hosted Convex runtime patch is maintained separately.
 Downstream applications remain responsible for selecting eligible modules,
 supplying dependency and registration adapter descriptors, and transferring
 artifacts to their patched backend. The project commands below build an
-authenticated package and deployment manifest. They do not transfer or activate
-that manifest.
+authenticated package and deployment manifest. Registry transfer has a separate
+command; activation uses the backend's deployment protocol.
 
 The matrix runners use the installed Convex SDK package to construct canonical
 vectors and identify the SDK source files they exercised. The project command
@@ -273,6 +306,8 @@ limits remain with the caller.
 
 ## Project artifact build
 
+### Installation
+
 The [bundled toolchain](docs/toolchain-releases.md) is the installation path for
 releases that include `convex-wasm-toolchain-*.tar.gz`. It contains the compiler,
 Static Hermes, runtime archives, Emscripten/LLVM, Binaryen and the validation
@@ -285,10 +320,10 @@ The npm/source-build path below remains available for compiler development and
 callers that explicitly manage their own tool inputs.
 
 Install the JavaScript package from the matching tagged release into a project
-that already depends on a compatible Convex SDK. For `v0.2.47`:
+that already depends on a compatible Convex SDK. For `v0.2.51`:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.47/convex-wasm-compiler-0.2.47.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.51/convex-wasm-compiler-0.2.51.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed
@@ -314,32 +349,12 @@ The development runner pins a reproducible Wasmtime revision. Artifact builds
 use the revision authenticated by the caller-selected precompiler package;
 it need not match the development runner. Setup does not need a second Wasmtime
 source checkout.
-The pinned [shared Wasmtime source](https://github.com/convex-in-prod/wasmtime/blob/ba13bdffaa34c4cfa6af8ceb58275e761593a885/DOWNSTREAM.md)
+The [shared Wasmtime fork](https://github.com/convex-in-prod/wasmtime/blob/fuel-epoch-polling/DOWNSTREAM.md)
 owns compiler and runtime metering changes, including register preservation in
 fuel and epoch handlers and exception fuel accounting. Compiler package identities
 separate AOT cache entries when generated-code policy changes; runtime ABI
 compatibility stays separate. Fuel charges and cancellation remain enabled.
 
-Release v0.2.45 extends bounded Static Hermes RegExp matchers to non-Unicode
-case-insensitive UTF-16 literals and capture-free forward alternatives. Ordered
-backtracking and existing matcher budgets are preserved. Unsupported patterns
-retain ordinary execution. The Rust compiler and precompiler packages, Wasmtime
-artifact format and backend ABI are unchanged; native packages from v0.2.44 are
-reused.
-
-Release v0.2.44 adopts guarded whole-operation RegExp specialization and bounded
-AOT matchers in Static Hermes. Eligible literals avoid repeated interpreter
-work and intermediate match/replacement allocations; unsupported operands and
-observable builtin overrides retain ordinary execution. This does not change
-the Wasmtime artifact format or backend ABI.
-
-Release v0.2.43 refreshes Hermes, Oxc and Wasmtime from upstream. Wasmtime's
-changed tunables and builtin layout require new native artifact metadata. Its precompiler and
-the matching backend use Wasmtime `ba13bdffaa34c4cfa6af8ceb58275e761593a885`;
-native artifacts from the previous engine must be regenerated before activating
-the backend with those application generations. Portable Core Wasm remains
-compatible. Retain the previous backend and its native artifacts together for
-rollback; changing a package version or manifest cannot convert old AOT bytes.
 Gate setup requires Git, CMake, Ninja, Python 3, a native C++ compiler, and the pinned
 Rust toolchain named by the packaged runner source. It targets the supported
 Linux and macOS hosts; the first run builds substantial native code. A later
@@ -348,6 +363,9 @@ verifies an existing gate without
 downloading or building. Use the same `gateRoot` in the project config. The
 project's gate policy and matching precompiler package are verified during the
 build.
+
+### Project configuration
+
 The project config selects complete query and mutation entry namespaces,
 staged Git paths, a verified native release or local native packages, the pinned
 Static Hermes gate, and private work/cache directories. The
@@ -397,7 +415,19 @@ or set both `compilerPackage` and `precompilerPackage` to use local verified
 packages. `nativePackageCacheRoot` overrides the default cache location.
 The gate policy has the exact shape accepted by `create-gate-config.mjs`.
 `memoryMaxMiB` controls native scheduling, not an operating-system memory cap.
-The command writes an artifact report naming verified module-graph packages,
+
+### Bind artifacts to deployed source
+
+Binding ties compiled routes to the exact Convex runtime source they implement.
+The source-package runtime-content digest identifies deployed modules, external
+dependencies, and the selected Node version; it is independent of source ZIP
+compression and metadata. A source-authority file records these identities so
+the backend can reject artifacts that do not match the selected deployment.
+The [complete source authority contract](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/compiler_and_artifact_contract.md#complete-source-authority)
+defines the required inputs. The workflow below freezes that source before
+activation, using a helper from the matching patched backend image.
+
+The build command writes an artifact report naming verified module-graph packages,
 the authenticated cohort schedule, its route contracts, and the context-reuse
 policy. It also records the installed Convex CLI's complete source request in
 the private build directory. The CLI writes this request locally without
@@ -496,8 +526,18 @@ configured. An operator may instead name an existing private
 Binding checks the selected runtime modules against that authority, constructs
 the deployment from the authenticated source envelope, checks the complete
 source request against the frozen-graph binding, verifies each package,
-and writes an authenticated deployment-v8 manifest. Publish that manifest and
-its reachable Core Wasm and AOT packages into a **new** local registry directory:
+and writes an authenticated deployment-v8 manifest. Here `deployment-v8` names
+version 8 of the deployment manifest, not the V8 JavaScript engine.
+
+### Publish and transfer a registry
+
+A runtime registry is a directory of verified artifacts and immutable generation
+manifests. Each generation binds one deployment to its complete artifact set and
+publication mode. A source catalog lists the available source/generation pairs;
+the backend selects an exact pair when activating a source package.
+
+Publish the bound deployment manifest and its reachable Core Wasm and AOT
+packages into a **new** local registry directory:
 
 ```sh
 install -d -m 700 .private
@@ -518,9 +558,12 @@ the preflight output parent must also be owned by the current user and mode
 `0700`. The output describes the selected
 generation for transfer planning. This command currently creates fresh local
 registries only; it does not append a generation to an existing local registry.
-Run the patched backend's registry preflight against the published directory
-before treating it as backend-accepted. Transfer, backend readiness, and
-activation remain separate steps.
+Run the patched backend's
+[registry preflight](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/operations.md#registry-preflight)
+against the published directory before treating it as backend-accepted. After
+transfer, follow [readiness and paired activation](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/operations.md#readiness-and-paired-activation):
+readiness loads and prepares the selected artifacts; paired activation commits
+the source package and its exact Wasm generation together.
 
 Registry publishers share `prepareRuntimeRegistryArtifactPublication` in
 `scripts/lib/runtime-registry-publication.mjs`. It removes cache-local physical
@@ -581,6 +624,8 @@ report cannot stand in for it.
 
 ## Development
 
+### Guest and host ABI
+
 When updating the pinned Hermes revision, run
 `scripts/generate-convex-wasm-static-hermes-global-probe.mjs` against its host and
 Wasm builds with `--output scripts/convex-wasm-static-hermes-global-probe-report.json`
@@ -601,7 +646,7 @@ host ABI/import and value-format compatibility remain separate contracts.
 
 The native guest receives invocation arguments through
 `convex_guest_value_request_binary_v1` and the existing request-copy import.
-These arguments use the same `CVA1` value representation as database results;
+These arguments use the same `CVA1` binary value representation as database results;
 the SDK's value invocation entry point receives the decoded object directly.
 The backend must advertise that import, `convex_observe_object_layouts`,
 `convex_execution_observation_enabled`, and `convex_observe_gc`
@@ -620,7 +665,9 @@ constructed. The numeric operation/tuple contract lives in the SDK's
 `ValueSyscall` definition and `renderNativeConvexSdkFacade` in
 [`convex-wasm-lowering.mjs`](scripts/lib/convex-wasm-lowering.mjs). Operation
 codes and tuple positions are stable; future incompatible changes need a new
-hook contract. Ordinary V8 and older SDK callers retain their supported
+hook contract. The backend's [typed value and packed document contract](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/value_abi.md)
+defines `CVA1`, `CQR1`, and ownership across the guest/host boundary.
+Ordinary V8 and older SDK callers retain their supported
 adapters. New records retain the original literal snapshot timing, limits and
 host authorization. Composing records can copy child bytes; it does not claim
 zero-copy construction.
@@ -631,6 +678,8 @@ also takes `CONVEX_HERMES_TEST_SOURCE_ROOT` and
 `CONVEX_HERMES_TEST_BUILD_ROOT`; it links the actual adapter and compares SDK
 query bytes through the host Hermes runtime. This does not replace a selected
 application build or deployment measurement.
+
+### Source analysis and tsrs caches
 
 The compiler and precompiler use their own pinned Rust toolchains and lockfiles.
 Install the repository-local JavaScript dependencies before checking the
@@ -722,6 +771,9 @@ and its root lock entry. The adopting application supplies
 `sourceConfigurationPaths` for the files that affect its source build. The
 source-preparation test builds a profile from a separate synthetic application
 whose function directory is `functions/`.
+
+### Native tools and artifact caches
+
 Cache layouts share immutable artifacts across application checkouts while
 keeping checkout state and build work separate. The default root is
 `convex-wasm-compiler` under the platform cache directory; callers can supply
@@ -805,6 +857,13 @@ boundary. A separate application test builds and verifies a module-graph
 package from an official SDK query through the public graph and artifact
 builders using those synthetic tools. Publication and backend execution are
 still separate steps.
+
+### Cache maintenance
+
+This section covers the compiler's local build cache. The backend separately
+owns [runtime registry retention](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/operations.md#publication-reload-and-retention),
+where removing a serving generation has different lifetime constraints.
+
 Cache maintenance defaults to a dry run. It authenticates recent-success
 snapshots and referenced packages before planning immutable eviction. Above
 the caller's high watermark, explicit and automatic sweeps remove old,
@@ -867,6 +926,8 @@ occupancy scans and sweeps for 15 minutes. Explicit sweeps, policy changes and
 clock rollback bypass that interval; failed maintenance does not advance it.
 The interval does not replace build-time disk admission or live disk limits.
 
+### Verification and native precompilation
+
 ```sh
 npm ci
 npm run check:js
@@ -903,7 +964,8 @@ verify the native manifest and binary hashes before placing the package in its
 content-addressed cache. A release can be consumed without this source checkout.
 
 The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
-artifacts up to 1 GiB, matching the self-hosted runtime artifact contract.
+artifacts up to 1 GiB, matching the backend's
+[artifact identity and size limits](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/compiler_and_artifact_contract.md#artifact-identity).
 Its AOT and engine-identity output paths must not already exist.
 
 The shared Wasmtime revision also owns the Cranelift frontend changes.
