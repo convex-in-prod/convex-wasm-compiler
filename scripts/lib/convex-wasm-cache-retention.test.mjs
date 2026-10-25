@@ -1775,10 +1775,11 @@ test("schema-5 compiler-output compact authority corruption cannot retain depend
   }
 });
 
-test("immutable sweep retires an old package before its artifacts and preserves published hardlinks", async (t) => {
+test("maintenance removes an old certificate and package closure while preserving published and recent data", async (t) => {
   const value = await fixture(t);
-  const { cacheLayout, graphManifestSha256, packageMaterial } =
-    await materializeModuleGraphPackageFixture(value);
+  const material = await materializeModuleGraphPackageFixture(value);
+  const { cacheLayout, graphManifestSha256, packageMaterial } = material;
+  const certificate = await writeLegacyDeploymentResultCertificate(material);
   const packagePath = join(cacheLayout.immutable.packages, graphManifestSha256);
   const publishedManifest = join(value.root, "published-graph-manifest.json");
   const manifestBytes = await fs.readFile(join(packagePath, "graph-manifest.json"));
@@ -1788,53 +1789,50 @@ test("immutable sweep retires an old package before its artifacts and preserves 
   const publishedAot = join(value.root, "published-module.cwasm");
   const aotBytes = await fs.readFile(aotPath);
   await fs.link(aotPath, publishedAot);
+  await ageTree(cacheLayout.immutable.root);
+  const retained = await writeGenericArtifact({
+    cacheLayout,
+    extension: "wasm",
+    metadata: {},
+    payload: "recently-used",
+    stage: "retained",
+  });
 
   const report = await maintainConvexWasmCache(
     maintenanceOptions(value, {
       apply: true,
+      automaticImmutableSweep: true,
       immutableHighWatermarkAllocatedBytes: 1,
-      immutableSweep: true,
-      nowMs: Date.now() + 15 * 24 * 60 * 60 * 1_000,
     })
   );
 
   assert.deepEqual(report.immutable.plan.retained.packages, []);
-  assert.deepEqual(report.immutable.sweep.removed.map(({ key, type }) => ({ key, type })), [
-    { key: graphManifestSha256, type: "package" },
-  ]);
-  assert.equal(report.immutable.plan.incomplete, true);
-  assert.equal(report.immutable.plan.categories.planningOnlyCandidates.count, 0);
-  assert.equal(report.immutable.plan.categories.sweepableCandidates.count, 1);
   assert.deepEqual(
-    report.immutable.plan.retained.artifacts,
-    packageMaterial.artifactReferences
-      .flatMap((reference) => [
-        `${reference.aot.artifact.stage}\0${reference.aot.artifact.cacheKey}`,
-        `${reference.coreWasm.artifact.stage}\0${reference.coreWasm.artifact.cacheKey}`,
-      ])
-      .sort()
+    report.immutable.sweep.removed.slice(0, 2).map(({ key, type }) => ({ key, type })),
+    [
+      { key: fingerprintJson(certificate.lookupIdentity), type: "certificate-root" },
+      { key: graphManifestSha256, type: "package" },
+    ]
   );
+  assert.equal(report.immutable.plan.incomplete, true);
+  assert.equal(report.immutable.plan.candidates, 0);
+  assert.deepEqual(report.immutable.plan.retained.artifacts, [`${retained.stage}\0${retained.key}`]);
   await assert.rejects(fs.lstat(packagePath), { code: "ENOENT" });
-  await fs.lstat(aotPath);
-  const next = await maintainConvexWasmCache(
-    maintenanceOptions(value, {
-      apply: true,
-      immutableHighWatermarkAllocatedBytes: 1,
-      immutableSweep: true,
-      nowMs: report.nowMs + 1_000,
-    })
-  );
-  assert.equal(next.immutable.plan.authenticated.invalid, 0);
-  assert.equal(next.immutable.sweep.removed.length, report.immutable.plan.retained.artifacts.length);
-  const aotRemoval = next.immutable.sweep.removed.find(({ key }) => key === aot.cacheKey);
+  assert.equal(report.immutable.plan.authenticated.invalid, 0);
+  assert.equal(report.immutable.sweep.removed.length, 2 + packageMaterial.artifactReferences.length * 2);
+  const aotRemoval = report.immutable.sweep.removed.find(({ key }) => key === aot.cacheKey);
   const survivingAllocation = (await fs.lstat(publishedAot)).blocks * 512;
   assert.equal(aotRemoval.estimatedReclaimBytes, aotRemoval.allocationBytes - survivingAllocation);
   await assert.rejects(fs.lstat(aotPath), { code: "ENOENT" });
   assert.deepEqual(await fs.readFile(publishedAot), aotBytes);
   assert.deepEqual(await fs.readFile(publishedManifest), manifestBytes);
+  await fs.lstat(join(cacheLayout.immutable.artifacts, retained.stage, retained.key));
+  assert.ok(report.immutable.sweep.remainingAllocatedBytes > 1);
+  assert.equal(report.immutable.sweep.remainingAllocatedBytes,
+    (await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes);
 });
 
-test("bounded immutable sweeps retire certificate roots, packages, then artifacts across certificate schemas", async (t) => {
+test("immutable plans retire certificate roots before packages and artifacts across certificate schemas", async (t) => {
   for (const schemaVersion of [1, 2, 3, 4]) {
     await t.test(`certificate schema ${String(schemaVersion)}`, async (t) => {
       const value = await fixture(t);
@@ -1860,16 +1858,11 @@ test("bounded immutable sweeps retire certificate roots, packages, then artifact
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxPlannedEvictions: 1,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 0,
       };
-      const noBudget = await withHeavyLock(value.environment, () =>
-        sweepConvexWasmImmutableGc({ ...options, maxEstimatedReclaimBytes: 1 })
-      );
-      assert.deepEqual(noBudget.removed, []);
       const first = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
-      assert.deepEqual(first.removed.map(({ type }) => type), ["certificate-root"]);
+      assert.deepEqual(first.removed.map(({ type }) => type), ["certificate-root", "artifact"]);
       await assert.rejects(fs.lstat(certificateRoot), { code: "ENOENT" });
       await loadAndVerifyConvexWasmModuleGraphPackage({
         cacheLayout,
@@ -1880,17 +1873,19 @@ test("bounded immutable sweeps retire certificate roots, packages, then artifact
       const second = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
       assert.equal(second.plan.authenticated.invalid, 0);
       assert.deepEqual(second.removed.map(({ type }) => type), ["package"]);
-      await fs.lstat(join(cacheLayout.immutable.artifacts, unrelated.stage, unrelated.key));
+      await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts, unrelated.stage, unrelated.key)), {
+        code: "ENOENT",
+      });
       for (const reference of material.packageMaterial.artifactReferences) {
         for (const { artifact } of [reference.aot, reference.coreWasm]) {
           await fs.lstat(join(cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey));
         }
       }
       const third = await withHeavyLock(value.environment, () =>
-        sweepConvexWasmImmutableGc({ ...options, maxPlannedEvictions: 100 })
+        sweepConvexWasmImmutableGc(options)
       );
       assert.equal(third.plan.authenticated.invalid, 0);
-      assert.equal(third.removed.length, second.plan.retained.artifacts.length + 1);
+      assert.equal(third.removed.length, second.plan.retained.artifacts.length);
       assert.ok(third.removed.every(({ type }) => type === "artifact"));
     });
   }
@@ -2025,8 +2020,6 @@ test("artifact-only sweep removes a compiler-output root before its strict depen
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -2070,8 +2063,6 @@ test("artifact-only sweep removes a topology certificate before its full-record 
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -2343,7 +2334,6 @@ test("immutable GC rejects a compiler-output closure with a disagreeing stage en
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 0,
       })
@@ -2378,7 +2368,6 @@ test("immutable GC rejects compiler-output retention authority for a different a
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -2469,8 +2458,6 @@ test("artifact-only sweep removes a cohort capsule before its strict compiler cl
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 5_000,
     })
@@ -2487,8 +2474,6 @@ test("artifact-only sweep removes a cohort capsule before its strict compiler cl
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -2528,8 +2513,6 @@ test("immutable GC removes an old capsule whose compiler-output record is alread
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: Date.now() + 1_000,
     })
   );
@@ -2572,7 +2555,6 @@ test("immutable GC treats rotated v2 through v5 cohort capsules as age-bounded a
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -2685,7 +2667,6 @@ test("immutable GC rejects a corrupted rotated v3 capsule before legacy classifi
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 0,
       })
@@ -2709,7 +2690,6 @@ test("immutable GC fails closed for a non-JSON artifact in the cohort capsule st
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 0,
       })
@@ -2743,7 +2723,6 @@ test("immutable GC rejects a capsule bound to a rotated compiler-output schema",
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 60_000,
       })
@@ -2932,7 +2911,6 @@ test("immutable GC rejects a capsule topology certificate that disagrees with it
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 60_000,
       })
@@ -2986,7 +2964,6 @@ test("immutable GC rejects a capsule topology descriptor that disagrees with its
         cacheLayout,
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
-        maxEstimatedReclaimBytes: 1_000_000,
         nowMs: Date.now() + 1_000,
         recentRetentionMilliseconds: 60_000,
       })
@@ -3044,8 +3021,6 @@ test("immutable GC authenticates every generic artifact extension before listing
     planConvexWasmImmutableGc({
       cacheLayout: layout,
       environment: value.environment,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: extensions.length,
       nowMs: 2_000_000_000,
     })
   );
@@ -3056,8 +3031,6 @@ test("immutable GC authenticates every generic artifact extension before listing
     planConvexWasmImmutableGc({
       cacheLayout: layout,
       environment: value.environment,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: extensions.length,
       highWatermarkAllocatedBytes: 1,
       nowMs: 2_000_000_000,
     })
@@ -3091,8 +3064,6 @@ test("immutable GC authenticates maintained JavaScript transform entries", async
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
-      maxPlannedEvictions: 1,
       nowMs: 2_000_000_000,
     })
   );
@@ -3144,7 +3115,6 @@ test("immutable GC authenticates and evicts only valid runtime header snapshots"
     cacheLayout,
     environment: value.environment,
     highWatermarkAllocatedBytes: 1,
-    maxEstimatedReclaimBytes: 1_000_000,
     nowMs: Date.now() + 60_000,
     recentRetentionMilliseconds: 0,
   };
@@ -3315,7 +3285,6 @@ test("immutable GC does not claim blocks held by a surviving hardlink as reclaim
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 1_000_000,
       nowMs: Date.now() + 1_000,
       recentRetentionMilliseconds: 0,
     })
@@ -3680,7 +3649,7 @@ test("host lock ownership covers leases, immutable planning and sweeping", async
   assert.deepEqual(report.immutable.sweep.removed.map(({ key }) => key), [artifact.key]);
 });
 
-test("immutable sweep uses remaining byte budget after an oversized candidate", async (t) => {
+test("maintenance stops at the high watermark after removing the largest eligible artifact", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("bounded-sweep");
   const large = await writeGenericArtifact({
@@ -3704,24 +3673,22 @@ test("immutable sweep uses remaining byte budget after an oversized candidate", 
     ageGenericArtifact(cacheLayout, small),
   ]);
 
-  const result = await withHeavyLock(value.environment, () =>
-    sweepConvexWasmImmutableGc({
-      cacheLayout,
-      environment: value.environment,
-      highWatermarkAllocatedBytes: 1,
-      maxEstimatedReclaimBytes: 128 * 1024,
-      maxPlannedEvictions: 2,
+  const result = await maintainConvexWasmCache(
+    maintenanceOptions(value, {
+      apply: true,
+      immutableSweep: true,
+      immutableHighWatermarkAllocatedBytes: 128 * 1024,
       nowMs: 2_000_000_000_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
   assert.deepEqual(
-    result.removed.map(({ key }) => key),
-    [small.key]
+    result.immutable.sweep.removed.map(({ key }) => key),
+    [large.key]
   );
-  await fs.lstat(join(cacheLayout.immutable.artifacts, large.stage, large.key));
-  await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts, small.stage, small.key)), {
+  assert.ok(result.immutable.sweep.remainingAllocatedBytes <= 128 * 1024);
+  await fs.lstat(join(cacheLayout.immutable.artifacts, small.stage, small.key));
+  await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts, large.stage, large.key)), {
     code: "ENOENT",
   });
 });
@@ -3957,7 +3924,6 @@ test("immutable sweep recovers interrupted package and certificate retirement", 
           cacheLayout,
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
-          maxPlannedEvictions: 1,
           nowMs: Date.now() + 1_000,
           recentRetentionMilliseconds: 0,
         };

@@ -147,6 +147,7 @@ export async function main(argumentsList) {
             0
           ) ?? 0,
         immutableUniqueAllocatedBytes:
+          report.immutable.sweep?.remainingAllocatedBytes ??
           report.immutable.automaticSweep.occupancy.uniqueAllocatedBytes,
         immutableSweepTriggered: report.immutable.automaticSweep.triggered,
         removed: report.immutable.sweep?.removed.length ?? 0,

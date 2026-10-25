@@ -1185,10 +1185,26 @@ export async function maintainConvexWasmCache({
         : { highWatermarkAllocatedBytes: normalizedImmutableHighWatermarkAllocatedBytes }),
       nowMs: normalizedNowMs,
     };
-    const immutableSweepResult =
-      immutableSweepRequested && immutableSweepBlockers.length === 0
-        ? await sweepConvexWasmImmutableGc(immutableGcOptions)
-        : undefined;
+    let immutableSweepResult;
+    if (immutableSweepRequested && immutableSweepBlockers.length === 0) {
+      const removed = [];
+      const recovered = [];
+      // Removing authority roots makes their dependencies eligible in the next plan.
+      // Keep the cache lock across those passes and stop on measured occupancy or no removals,
+      // rather than requiring another invocation or trusting hardlink reclaim estimates.
+      for (;;) {
+        const pass = await sweepConvexWasmImmutableGc(immutableGcOptions);
+        for (const candidate of pass.removed) removed.push(candidate);
+        for (const candidate of pass.recovered) recovered.push(candidate);
+        const remainingAllocatedBytes =
+          (await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes;
+        immutableSweepResult = { ...pass, removed, recovered, remainingAllocatedBytes };
+        if (
+          remainingAllocatedBytes <= normalizedImmutableHighWatermarkAllocatedBytes ||
+          pass.removed.length === 0
+        ) break;
+      }
+    }
     const shouldPlanImmutableGc =
       immutablePlanOutput !== undefined ||
       (immutableSweepRequested && (immutableSweep || immutableSweepBlockers.length === 0));
@@ -1249,6 +1265,9 @@ export async function maintainConvexWasmCache({
                     ? "above-high-watermark"
                     : "interrupted-sweep",
                 skipped: immutableSweepResult?.skipped ?? 0,
+                ...(immutableSweepResult === undefined
+                  ? {}
+                  : { remainingAllocatedBytes: immutableSweepResult.remainingAllocatedBytes }),
               },
             }
           : {}),

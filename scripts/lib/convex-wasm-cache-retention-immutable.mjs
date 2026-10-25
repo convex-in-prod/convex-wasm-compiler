@@ -46,8 +46,6 @@ import {
 } from "./convex-wasm-runtime-header-snapshot-cache.mjs";
 
 export const defaultConvexWasmImmutableRecentRetentionMilliseconds = 24 * 60 * 60 * 1_000;
-export const defaultConvexWasmImmutableMaxPlannedEvictions = 4_096;
-export const defaultConvexWasmImmutableMaxEstimatedReclaimBytes = 8 * 1024 ** 3;
 export const defaultConvexWasmImmutableMaxRetainedPackages = 512;
 // An unconfigured plan can inspect the cache but cannot authorize pressure-based eviction.
 // The caller chooses a high watermark for any sweep.
@@ -2975,8 +2973,6 @@ export async function planConvexWasmImmutableGc({
   cacheLock = convexWasmCacheLock,
   environment = process.env,
   highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
-  maxEstimatedReclaimBytes = defaultConvexWasmImmutableMaxEstimatedReclaimBytes,
-  maxPlannedEvictions = defaultConvexWasmImmutableMaxPlannedEvictions,
   maxRetainedPackages = defaultConvexWasmImmutableMaxRetainedPackages,
   nowMs = Date.now(),
   recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
@@ -2984,8 +2980,6 @@ export async function planConvexWasmImmutableGc({
   cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
   requireLimit(nowMs, "GC planning time", false);
-  requireLimit(maxEstimatedReclaimBytes, "maximum estimated reclaim bytes");
-  requireLimit(maxPlannedEvictions, "maximum planned evictions");
   requireLimit(maxRetainedPackages, "maximum retained packages");
   requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
   requireLimit(recentRetentionMilliseconds, "recent retention period", false);
@@ -3144,7 +3138,7 @@ export async function planConvexWasmImmutableGc({
   }
   // A lookup root is removed as a whole, including PREFERRED and superseded certificates. Pin
   // every package its reader can select for this pass, even if the root itself is removable.
-  // Budget limits and interrupted removal then cannot leave an extant certificate without its
+  // Interrupted removal then cannot leave an extant certificate without its
   // package. Unknown corrupt roots cannot authorize deletion of any potentially referenced package.
   for (const certificateRoot of certificates) {
     const keys = certificateRoot.packageKeys ?? packagesByKey.keys();
@@ -3302,7 +3296,7 @@ export async function planConvexWasmImmutableGc({
       type: record.type,
     });
   }
-  // Retire roots before spending the bounded eviction count on independent artifacts. Their
+  // Retire roots before independent artifacts. Their
   // dependencies stay pinned for this pass; later passes can reclaim the newly unreachable data.
   const removalPriority = { "certificate-root": 0, package: 1, artifact: 2, "c-bundle": 2 };
   candidates.sort(
@@ -3317,19 +3311,12 @@ export async function planConvexWasmImmutableGc({
   const reclaimToHighWatermarkBytes = diskPressure
     ? immutableAllocatedBytes - highWatermarkAllocatedBytes
     : 0;
-  let incomplete = diskPressure && reclaimToHighWatermarkBytes > maxEstimatedReclaimBytes;
   if (diskPressure) {
     for (const candidate of candidates) {
-      if (evictions.length >= maxPlannedEvictions) break;
-      // A large entry may not fit in the remaining per-pass budget, while
-      // smaller entries later in this list still do.
-      if (estimatedReclaimBytes + candidate.estimatedReclaimBytes > maxEstimatedReclaimBytes)
-        continue;
       evictions.push(candidate);
       estimatedReclaimBytes += candidate.estimatedReclaimBytes;
       if (estimatedReclaimBytes >= reclaimToHighWatermarkBytes) break;
     }
-    if (estimatedReclaimBytes < reclaimToHighWatermarkBytes) incomplete = true;
   }
   const payload = {
     authenticated: {
@@ -3351,8 +3338,6 @@ export async function planConvexWasmImmutableGc({
     },
     bounds: {
       highWatermarkAllocatedBytes,
-      maxEstimatedReclaimBytes,
-      maxPlannedEvictions,
       maxRetainedPackages,
     },
     candidates: candidates.length,
@@ -3399,7 +3384,7 @@ export async function planConvexWasmImmutableGc({
     createdAtMs: nowMs,
     evictions,
     estimatedReclaimBytes,
-    incomplete,
+    incomplete: estimatedReclaimBytes < reclaimToHighWatermarkBytes,
     kind: "convex-wasm-immutable-gc-plan-v1",
     pressure: {
       active: diskPressure,
@@ -3422,8 +3407,6 @@ export async function sweepConvexWasmImmutableGc({
   cacheLock = convexWasmCacheLock,
   environment = process.env,
   highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
-  maxEstimatedReclaimBytes = defaultConvexWasmImmutableMaxEstimatedReclaimBytes,
-  maxPlannedEvictions = defaultConvexWasmImmutableMaxPlannedEvictions,
   maxRetainedPackages = defaultConvexWasmImmutableMaxRetainedPackages,
   nowMs = Date.now(),
   recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
@@ -3436,8 +3419,6 @@ export async function sweepConvexWasmImmutableGc({
     cacheLock,
     environment,
     highWatermarkAllocatedBytes,
-    maxEstimatedReclaimBytes,
-    maxPlannedEvictions,
     maxRetainedPackages,
     nowMs,
     recentRetentionMilliseconds,
@@ -3461,7 +3442,7 @@ export async function sweepConvexWasmImmutableGc({
   }
   // Deletion starts a fresh scope, independent of planning. Selected roots still reopen and
   // check their current physical state; unchanged shared dependencies need not be rehashed for
-  // every root. Quarantine and verify the whole bounded batch before unlinking any file:
+  // every root. Quarantine and verify the whole selected batch before unlinking any file:
   // deleting a shared payload link changes nlink/ctime in otherwise unchanged later candidates.
   const validation = { packages: new Map(), artifacts: new Map() };
   const quarantined = [];
