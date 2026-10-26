@@ -424,6 +424,12 @@ async function loadGraphToolchain(repoRoot) {
     cliDirectory,
   });
   const groupingPath = bundlerMaterialPaths.get("contextReuseGroups.js");
+  const groupingMaterial = groupingPath === undefined ? undefined : await hashFile(groupingPath);
+  const groupingUrl = groupingPath === undefined ? undefined : pathToFileURL(groupingPath);
+  // Node caches ESM by URL, independently of the material hashes below. An SDK
+  // replacement in this process must not authenticate new bytes while running
+  // a previously imported helper with different initializer semantics.
+  if (groupingUrl !== undefined) groupingUrl.searchParams.set("sha256", groupingMaterial.sha256);
   const [{ serverOnlyPlugin }, { wasmPlugin }, { contextReuseGroups }] =
     await settleParallelVerification([
       () => import(pathToFileURL(join(bundlerDirectory, "serverOnly.js")).href),
@@ -431,12 +437,16 @@ async function loadGraphToolchain(repoRoot) {
       () =>
         groupingPath === undefined
           ? { contextReuseGroups: undefined }
-          : import(pathToFileURL(groupingPath).href),
+          : import(groupingUrl.href),
     ]);
+  if (groupingPath !== undefined && typeof contextReuseGroups !== "function") {
+    fail("installed Convex grouping material does not export contextReuseGroups");
+  }
   return {
     bundlerDirectory,
     cliDirectory,
     contextReuseGroups,
+    groupingMaterial,
     esbuild,
     inputMaterialPaths: Object.freeze([
       convexPackageJson,
@@ -473,15 +483,21 @@ async function convexBundlerMaterialPaths({ bundlerDirectory, cliDirectory }) {
   return materials;
 }
 
-async function authenticateConvexBundlerMaterials({ bundlerDirectory, cliDirectory }) {
+async function authenticateConvexBundlerMaterials({ bundlerDirectory, cliDirectory, groupingMaterial }) {
   const materialPaths = await convexBundlerMaterialPaths({
     bundlerDirectory,
     cliDirectory,
   });
+  if (materialPaths.has("contextReuseGroups.js") !== (groupingMaterial !== undefined)) {
+    fail("installed Convex grouping material changed while its helper was loaded");
+  }
   return Object.fromEntries(
     await settleParallelVerification(
       [...materialPaths].map(([name, materialPath]) => async () => {
         const sha256 = (await hashFile(materialPath)).sha256;
+        if (name === "contextReuseGroups.js" && sha256 !== groupingMaterial?.sha256) {
+          fail("installed Convex grouping material changed while its helper was loaded");
+        }
         return [name, { sha256 }];
       })
     )
@@ -1959,7 +1975,7 @@ function freezeAuthenticatedJsonTree(value) {
   return value;
 }
 
-async function bundledModulesFromResult({
+export async function bundledModulesFromResult({
   contextReuseGroups,
   entryPoints,
   environment = "isolate",
@@ -2018,7 +2034,17 @@ async function bundledModulesFromResult({
       }
     }
   }
-  if (contextReuse !== undefined && contextReuseGroups !== undefined) {
+  if (environment === "isolate" && contextReuse !== undefined && contextReuseGroups !== undefined) {
+    // The authenticated SDK material has two fixed helper signatures. Both can
+    // ship under the same base package version, so semver cannot select the ABI.
+    // Never call a legacy helper with broader database membership: its single
+    // initializer would also become the action initializer.
+    if (typeof contextReuseGroups !== "function" || ![5, 6].includes(contextReuseGroups.length)) {
+      fail(
+        "installed Convex contextReuseGroups has an unsupported signature; expected the legacy five-argument or separate six-argument SDK contract"
+      );
+    }
+    const separateInitializers = contextReuseGroups.length === 6;
     // The SDK helper resolves labels against cwd. Rebase labels only so a graph
     // for another application can use the installed helper without changing cwd.
     const sdkOutputPath = (path) => resolve(relative(repoRoot, path));
@@ -2033,14 +2059,26 @@ async function bundledModulesFromResult({
         metafile,
         new Set(
           [...contextReuseOutputPolicy]
-            .filter(([, policy]) => policy.enabled && (policy.actions === true) === actions)
+            .filter(([, policy]) =>
+              policy.enabled &&
+              (separateInitializers
+                ? !actions || policy.actions === true
+                : (policy.actions === true) === actions)
+            )
             .map(([path]) => sdkOutputPath(path))
         ),
-        "_deps"
+        "_deps",
+        ...(separateInitializers ? [actions ? "action" : "database"] : [])
       );
       for (const [output, initializationModule] of initializerByOutput) {
         const outputPath = resolve(repoRoot, relative(process.cwd(), output));
-        contextReuseOutputPolicy.get(outputPath).initializationModule = initializationModule;
+        const policy = contextReuseOutputPolicy.get(outputPath);
+        if (separateInitializers) {
+          policy.initializationModule ??= { version: 2 };
+          policy.initializationModule[actions ? "action" : "database"] = initializationModule;
+        } else {
+          policy.initializationModule = initializationModule;
+        }
       }
       for (const module of initializers) {
         const outputPath = resolve(repoRoot, "out", module.path);
@@ -3128,7 +3166,7 @@ async function buildConvexWasmDeploymentGraphSessionImplementation({
   }
   const [bundlerMaterials, entryPointsByRuntime, expectedDeploymentConfigurationEntryPath] =
     await settleParallelVerification([
-      () => authenticateConvexBundlerMaterials({ bundlerDirectory, cliDirectory }),
+      () => authenticateConvexBundlerMaterials(graphToolchain),
       () => convexEntryPointsByEnvironment(functionsDirectory),
       () =>
         normalizedGitSourceSnapshot === undefined

@@ -5,10 +5,14 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 
 import { deriveConvexWasmCacheLayout } from "./convex-wasm-cache-layout.mjs";
 import { buildConvexWasmOfficialOutputModuleGraphInputs } from "./convex-wasm-official-output-artifact-adapter.mjs";
-import { buildSyntheticDeploymentApplication } from "../test-fixtures/deployment-application.mjs";
+import {
+  buildSyntheticDeploymentApplication,
+  readSyntheticCliDeploymentModules,
+} from "../test-fixtures/deployment-application.mjs";
 import {
   bindConvexWasmContextReuseAnalysisGraphSession,
   buildConvexWasmDeploymentGraphSession,
@@ -19,37 +23,7 @@ import { captureConvexWasmGitSourceSnapshot } from "./convex-wasm-git-source-sna
 import { publishConvexWasmSourceGraphSnapshot } from "./convex-wasm-source-graph-snapshot-cache.mjs";
 
 async function compareCliModules(applicationRoot, graph, requestPath) {
-  await promisify(execFile)(
-    process.execPath,
-    [
-      join(applicationRoot, "node_modules/convex/bin/main.js"),
-      "deploy",
-      "--yes",
-      "--codegen",
-      "disable",
-      "--typecheck",
-      "disable",
-      "--push-all-modules",
-      "--write-push-request",
-      requestPath,
-    ],
-    {
-      cwd: applicationRoot,
-      env: {
-        ...process.env,
-        CONVEX_DEPLOYMENT: "",
-        CONVEX_DEPLOY_KEY: "",
-        CONVEX_DEPLOYMENT_TOKEN: "",
-        CONVEX_SELF_HOSTED_URL: "http://127.0.0.1:1",
-        CONVEX_SELF_HOSTED_ADMIN_KEY: "local-request-only-placeholder",
-      },
-      timeout: 30_000,
-    }
-  );
-  const request = JSON.parse(await fs.readFile(`${requestPath}.json`, "utf8"));
-  const official = request.appDefinition.changedModules.filter(
-    (module) => module.environment === "isolate"
-  );
+  const official = await readSyntheticCliDeploymentModules(applicationRoot, requestPath);
   assert.equal(official.length, graph.deploymentOutputModulesByPath.size);
   for (const { path, source, sourceMap } of official) {
     assert.deepEqual(graph.deploymentOutputModulesByPath.get(path), {
@@ -60,6 +34,33 @@ async function compareCliModules(applicationRoot, graph, requestPath) {
   }
   return official;
 }
+
+test("an SDK helper replacement cannot reuse the previously imported initializer contract", async (context) => {
+  const { applicationRoot, inventory } = await buildSyntheticDeploymentApplication(context);
+  const entry = await fs.readFile(join(applicationRoot, "functions/read.ts"), "utf8");
+  await fs.writeFile(
+    join(applicationRoot, "shared/registered.ts"),
+    entry.replaceAll('"./_generated/', '"../functions/_generated/').replace('"../shared/helper"', '"./helper"')
+  );
+  for (const name of ["read", "second"]) {
+    await fs.writeFile(join(applicationRoot, `functions/${name}.ts`), 'export { read } from "../shared/registered";\n');
+  }
+  inventory.functions.push({ ...inventory.functions[0], entryPath: "functions/second.ts", modulePath: "second" });
+  const options = { inventory, materialVerificationConcurrency: 2, repoRoot: applicationRoot };
+  const before = await buildConvexWasmDeploymentGraphSession(options);
+  const helperPath = join(applicationRoot, "node_modules/convex/dist/esm/bundler/contextReuseGroups.js");
+  // Retain the same package version and path; only the authenticated helper changes.
+  const replacement = await fs.readFile(new URL("../test-fixtures/context-reuse-groups-v2.mjs", import.meta.url), "utf8");
+  await fs.writeFile(helperPath, replacement.replace("[kind, imports, members]", '["replacement", kind, imports, members]'));
+  await assert.rejects(before.verifyInputMaterials(), /bundler materials changed/u);
+  const after = await buildConvexWasmDeploymentGraphSession(options);
+  assert.match(after.deploymentOutputModulesByPath.get("read.js").source, /initializationModule: \{"version":2,"database":/u);
+  assert.notEqual(
+    before.deploymentOutputModulesByPath.get("read.js").source,
+    after.deploymentOutputModulesByPath.get("read.js").source
+  );
+  await after.verifyInputMaterials();
+});
 
 test("matches the installed CLI for grouped forwarding entries and exclusions", async (context) => {
   const { applicationRoot, inventory } = await buildSyntheticDeploymentApplication(context);
@@ -165,6 +166,10 @@ test("builds and selects an official SDK query from a separate application", asy
 
 test("action groups match the CLI and exclude unselected entries", async (context) => {
   const { applicationRoot, inventory } = await buildSyntheticDeploymentApplication(context);
+  const { contextReuseGroups } = await import(pathToFileURL(
+    join(applicationRoot, "node_modules/convex/dist/esm/bundler/contextReuseGroups.js")
+  ));
+  const separateInitializers = contextReuseGroups.length === 6;
   await fs.writeFile(
     join(applicationRoot, "package.json"),
     JSON.stringify({
@@ -224,8 +229,8 @@ test("action groups match the CLI and exclude unselected entries", async (contex
       join(applicationRoot, `actions-${grouping}`)
     );
     const initializers = official.filter(({ path }) => path.includes("context_init_"));
-    assert.equal(initializers.length, grouping ? 1 : 0);
-    if (grouping) {
+    assert.equal(initializers.length, separateInitializers ? (grouping ? 2 : 1) : (grouping ? 1 : 0));
+    if (grouping && !separateInitializers) {
       assert.match(initializers[0].source, /import "\.\.\/first.js"/u);
       assert.match(initializers[0].source, /import "\.\.\/second.js"/u);
       assert.doesNotMatch(initializers[0].source, /unselected/u);

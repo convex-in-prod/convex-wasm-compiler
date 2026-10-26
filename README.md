@@ -282,10 +282,18 @@ inside the eventual handler or method remain local to that call. A bounded local
 does not by itself make that helper escape. The unshadowed built-in `Array.from` mapper runs
 synchronously and does not escape; any function returned by that mapper is checked separately.
 
-Action grouping uses
-the existing equivalent-output mechanism and can be disabled with
-`actions.grouping: false`. Actions remain separate from database
-Wasm compilation selection.
+The deployment graph uses the installed SDK's authenticated grouping helper.
+With the six-argument helper, database groups include all eligible equivalent
+forwarding entries and action groups include only selected action entries.
+The emitted version 2 initializer policy selects each group independently;
+`actions.grouping: false` leaves actions per-entry without splitting database
+groups. The five-argument legacy helper retains its original disjoint groups and
+string-valued policy. Unknown helper signatures are rejected. Helper imports are
+keyed by their source digest so replacing an SDK in a running process cannot
+authenticate new material while executing cached legacy grouping code. Upgrade
+the backend before deploying version 2 grouped output; see the backend's
+[compatibility contract](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse#grouped-initialization).
+Action reuse selection remains separate from database Wasm compilation selection.
 
 Downstream applications remain responsible for selecting eligible modules,
 supplying dependency and registration adapter descriptors, and transferring
@@ -320,10 +328,10 @@ The npm/source-build path below remains available for compiler development and
 callers that explicitly manage their own tool inputs.
 
 Install the JavaScript package from the matching tagged release into a project
-that already depends on a compatible Convex SDK. For `v0.2.51`:
+that already depends on a compatible Convex SDK. For `v0.2.52`:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.51/convex-wasm-compiler-0.2.51.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.52/convex-wasm-compiler-0.2.52.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed

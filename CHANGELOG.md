@@ -3,6 +3,22 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.52
+
+- Support the SDK's separate database and action initializer groups. Database
+  groups retain all eligible forwarding entries; action groups include only
+  selected actions. Disabling action grouping preserves database grouping.
+- Preserve the legacy SDK helper's disjoint groups and string initializer policy.
+  Reject unknown helper signatures and authenticate imported helper code by its
+  source digest when an SDK is replaced in a running process.
+- Pin the development and example SDK to the compatible split-initializer producer.
+- Cover initializer membership, exclusions, SDK replacement, and exact deployment
+  source and source-map parity with generic regression fixtures.
+
+Upgrade the backend before deploying version 2 grouped initializer metadata.
+Native compiler and precompiler sources, Wasmtime artifact compatibility, and
+the backend ABI are unchanged from 0.2.51.
+
 ## 0.2.51
 
 - Use tsrs throughout source analysis, removing the classic TypeScript compiler

@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/be3d48eee74ed48a533e56e108fff7611e65ef5f/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/2582167f6286c1222c87bc6d6c60e8866c9e940d/convex.tgz"
   },
   "devDependencies": {
     "esbuild": "0.27.0",

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { resolveConvexWasmApplicationBundlerPackageSet } from "../lib/convex-wasm-application-package-set.mjs";
 import { createConvexContextReuseAnalysisInputGraphSha256 } from "../lib/convex-context-reuse-analysis-input.mjs";
@@ -26,6 +27,31 @@ import {
 import { createConvexWasmSourceEnvelope } from "../lib/convex-wasm-source-envelope.mjs";
 
 const compilerRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+export async function readSyntheticCliDeploymentModules(applicationRoot, requestPath) {
+  await promisify(execFile)(
+    process.execPath,
+    [
+      join(applicationRoot, "node_modules/convex/bin/main.js"),
+      "deploy", "--yes", "--codegen", "disable", "--typecheck", "disable",
+      "--push-all-modules", "--write-push-request", requestPath,
+    ],
+    {
+      cwd: applicationRoot,
+      env: {
+        ...process.env,
+        CONVEX_DEPLOYMENT: "",
+        CONVEX_DEPLOY_KEY: "",
+        CONVEX_DEPLOYMENT_TOKEN: "",
+        CONVEX_SELF_HOSTED_URL: "http://127.0.0.1:1",
+        CONVEX_SELF_HOSTED_ADMIN_KEY: "local-request-only-placeholder",
+      },
+      timeout: 30_000,
+    }
+  );
+  const request = JSON.parse(await fs.readFile(`${requestPath}.json`, "utf8"));
+  return request.appDefinition.changedModules.filter((module) => module.environment === "isolate");
+}
 
 export async function buildSyntheticDeploymentApplication(
   context,
