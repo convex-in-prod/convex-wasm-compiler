@@ -1,5 +1,6 @@
 import { authenticateConvexWasmModuleGraphCompilerDescriptor as authenticateModuleGraphCompilerDescriptor } from "./convex-wasm-module-graph-compiler-descriptor.mjs";
 import { normalizeConvexWasmCapabilityChunkApplicationDescriptor } from "./convex-wasm-capability-application-descriptor.mjs";
+import { parseConvexWasmOfficialOutputExecutableDependencySpecifier } from "./convex-wasm-official-output-chunk-contract.mjs";
 import {
   assertExactKeys,
   assertPlainObject,
@@ -553,18 +554,26 @@ export function renderConvexWasmCapabilityChunkApplicationSelector({
   const factoryCases = descriptor.units
     .map(({ entrySymbol }, unitSlot) => `    case ${String(unitSlot)}: return ${entrySymbol};`)
     .join("\n");
-  const dependencyCases = descriptor.units
+  const dependencyRows = [];
+  const dependencyRanges = descriptor.units
     .slice(0, descriptor.initialization.chunkSlotCount)
-    .filter(({ dependencies }) => dependencies.length > 0)
-    .map(
-      ({ applicationUnitSlot, dependencies }) =>
-        `    case ${String(applicationUnitSlot)}:\n${dependencies
-          .map(
-            ({ executableSpecifier, slot }) =>
-              `      if (strcmp(specifier, ${JSON.stringify(executableSpecifier)}) == 0) return ${String(slot)};`
-          )
-          .join("\n")}\n      return -1;`
-    )
+    .map(({ dependencies }) => {
+      const offset = dependencyRows.length;
+      // Authentication guarantees dense per-unit occurrences. Keep the complete
+      // specifier as the authority; its occurrence only selects a candidate.
+      const ordered = dependencies
+        .map((dependency) => ({
+          ...dependency,
+          occurrence: parseConvexWasmOfficialOutputExecutableDependencySpecifier(
+            dependency.executableSpecifier
+          ).occurrence,
+        }))
+        .sort((left, right) => left.occurrence - right.occurrence);
+      for (const { executableSpecifier, slot } of ordered) {
+        dependencyRows.push(`  { ${JSON.stringify(executableSpecifier)}, ${String(slot)} },`);
+      }
+      return `  { ${String(offset)}, ${String(dependencies.length)} },`;
+    })
     .join("\n");
   const entryChunkCases = descriptor.entries
     .map(
@@ -624,12 +633,39 @@ ${factoryCases}
     default: return (ConvexWasmApplicationFactory)0;
   }
 }
+static const struct {
+  const char *specifier;
+  int32_t slot;
+} convex_wasm_application_dependencies[] = {
+${dependencyRows.length === 0 ? "  { (const char *)0, -1 }," : dependencyRows.join("\n")}
+};
+static const struct {
+  uint32_t offset;
+  uint32_t count;
+} convex_wasm_application_dependency_ranges[] = {
+${dependencyRanges}
+};
 int32_t convex_wasm_application_chunk_dependency_by_specifier(int32_t unit_slot, const char *specifier) {
-  if (specifier == (const char *)0) return -1;
-  switch (unit_slot) {
-${dependencyCases}
-    default: return -1;
+  if (specifier == (const char *)0 || unit_slot < 0 ||
+      (uint32_t)unit_slot >= ${String(descriptor.initialization.chunkSlotCount)}) return -1;
+  uint32_t count = convex_wasm_application_dependency_ranges[unit_slot].count;
+  if (count == 0) return -1;
+  uint32_t occurrence = 0;
+  if (count > 1) {
+    size_t length = strlen(specifier);
+    if (length < 11) return -1;
+    /* The eight-digit occurrence precedes ".js". It selects a candidate only:
+       the full comparison below also rejects malformed or foreign specifiers. */
+    for (size_t index = length - 11; index < length - 3; ++index) {
+      uint32_t digit = (uint32_t)(unsigned char)specifier[index] - (uint32_t)'0';
+      if (digit > 9) return -1;
+      occurrence = occurrence * 10 + digit;
+    }
+    if (occurrence >= count) return -1;
   }
+  uint32_t index = convex_wasm_application_dependency_ranges[unit_slot].offset + occurrence;
+  return strcmp(specifier, convex_wasm_application_dependencies[index].specifier) == 0
+    ? convex_wasm_application_dependencies[index].slot : -1;
 }
 int32_t convex_wasm_application_entry_chunk_slot_by_handoff_slot(int32_t entry_slot) {
   switch (entry_slot) {

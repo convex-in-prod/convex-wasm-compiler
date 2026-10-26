@@ -3,6 +3,16 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.53
+
+- Generate dependency dispatch as static tables indexed by the authenticated
+  per-module occurrence, followed by an exact specifier comparison. This avoids
+  optimizing large chains of string comparisons when compiling application
+  selectors and bounds runtime lookup to one candidate, without allocations.
+- Preserve function selection, dependency authorization, and the backend ABI.
+  Existing native toolchain packages remain compatible; the generated selector
+  source and compiler producer identities invalidate affected cached artifacts.
+
 ## 0.2.52
 
 - Support the SDK's separate database and action initializer groups. Database

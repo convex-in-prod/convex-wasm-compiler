@@ -58,6 +58,28 @@ Compilation does not fetch or reconstruct Hermes, and does not write into the
 installation. Moving the installation can cause existing path-sensitive artifact
 caches to miss; it does not require rebuilding the compiler itself.
 
+### Direct compiler diagnostics
+
+Benchmarks and probes that invoke bundled `emcc` directly must use the same
+environment as the launcher. Verify the installation with
+`verifyToolchainPackage`, then obtain its environment with
+`toolchainEnvironment(toolchainRoot, manifest, cacheRoot)` from
+`scripts/lib/convex-wasm-toolchain-package.mjs`. Pass
+`{ ...process.env, ...environment }` to every compiler subprocess, and verify
+the installation again after the diagnostic. Use the application's selected
+cache root or `defaultConvexWasmCacheRoot()` from
+`scripts/lib/convex-wasm-cache-layout.mjs`; do not reconstruct the package ID or
+cache path in the caller.
+
+Bare `emcc` defaults to the cache inside the installation and can erase its
+shipped contents when its sanity identity changes. It also defaults to ordinary
+Python, which writes bytecode beside the installed modules.
+`PYTHONDONTWRITEBYTECODE=1` alone does not prevent this: the driver invokes Python
+with `-E`, which ignores Python environment variables. The environment helper
+sets both the external `EM_CACHE` and `EMSDK_PYTHON`, whose packaged wrapper uses
+`-B` to disable bytecode writes, including recursive compiler invocations.
+Resource-admission wrappers do not select this toolchain environment.
+
 ## Windows with WSL2
 
 Download `convex-wasm-toolchain-VERSION-windows-x64-wsl2.zip` and verify its
