@@ -331,7 +331,7 @@ Install the JavaScript package from the matching tagged release into a project
 that already depends on a compatible Convex SDK. For `v0.2.52`:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.52/convex-wasm-compiler-0.2.52.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.54/convex-wasm-compiler-0.2.54.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed
@@ -423,6 +423,9 @@ or set both `compilerPackage` and `precompilerPackage` to use local verified
 packages. `nativePackageCacheRoot` overrides the default cache location.
 The gate policy has the exact shape accepted by `create-gate-config.mjs`.
 `memoryMaxMiB` controls native scheduling, not an operating-system memory cap.
+`aotWorkers` is a ceiling: shared-library and leaf-selector AOT jobs reserve fewer
+workers for smaller estimated working sets, and pass that same count to the
+precompiler. Independent jobs can use the remaining slots subject to memory admission.
 
 ### Bind artifacts to deployed source
 

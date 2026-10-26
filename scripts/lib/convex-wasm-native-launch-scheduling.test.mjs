@@ -825,7 +825,7 @@ test("input-sized AOT work uses matching proportional scheduler and process work
   );
 });
 
-test("small leaf AOT uses configured workers and reserves them against concurrent commands", async () => {
+test("small leaf AOT uses proportional workers alongside independent commands", async () => {
   const launchPolicy = createLaunchPolicy({
     aggregateMemoryMaxBytes: 5 * GIBIBYTE,
     aotWorkers: 6,
@@ -838,7 +838,7 @@ test("small leaf AOT uses configured workers and reserves them against concurren
   const leaf = scheduler.run(
     "module-graph-leaf-wasmtime-aot",
     () => {
-      assert.equal(convexWasmNativeCommandArguments(command, launchPolicy).at(-1), "6");
+      assert.equal(convexWasmNativeCommandArguments(command, launchPolicy).at(-1), "1");
       return new Promise((resolve) => {
         releaseLeaf = () => resolve(timing());
       });
@@ -852,14 +852,14 @@ test("small leaf AOT uses configured workers and reserves them against concurren
     objectStarted = true;
     return timing();
   });
-  assert.equal(scheduler.activeWorkerSlots, 6);
-  assert.equal(scheduler.activeWorkingSetEstimateBytes, 512 * MEBIBYTE);
-  assert.equal(objectStarted, false);
+  assert.equal(scheduler.activeWorkerSlots, 2);
+  assert.equal(scheduler.activeWorkingSetEstimateBytes, 768 * MEBIBYTE);
+  assert.equal(objectStarted, true);
   releaseLeaf();
   await Promise.all([leaf, object]);
   assert.equal(objectStarted, true);
   assert.equal(scheduler.activeWorkerSlots, 0);
-  assert.equal(scheduler.report().maximumActiveWorkerSlots, 6);
+  assert.equal(scheduler.report().maximumActiveWorkerSlots, 2);
 });
 
 test("AOT admission uses conservative Core Wasm estimates and isolates oversize work", async () => {

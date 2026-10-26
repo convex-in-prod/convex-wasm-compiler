@@ -106,12 +106,8 @@ function effectiveNativePhaseWorkerSlots(
   if (inputWorkingSetEstimateBytes === undefined || !stagePolicy.schedulingClass.endsWith("aot")) {
     return requestedWorkerSlots;
   }
-  // Leaf compilation reserves its requested CPU slots; memory admission remains input-sized.
-  // Shared shards retain proportional workers so broad builds can run independent shards.
-  if (stagePolicy.schedulingClass === "module-graph-leaf-wasmtime-aot") {
-    return requestedWorkerSlots;
-  }
-  // Scale shared AOT workers with the authenticated input-sized estimate while retaining the
+  // Small selectors must leave workers for independent links and shared shards too.
+  // Scale AOT workers with the authenticated input-sized estimate while retaining the
   // caller's configured AOT ceiling.
   return Math.min(
     requestedWorkerSlots,

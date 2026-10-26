@@ -3,6 +3,18 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.54
+
+- Scale leaf-selector AOT worker reservations with the authenticated input working
+  set, matching shared-library AOT scheduling. Small selectors leave worker slots
+  available for independent compilation and linking jobs.
+- Pass the reserved worker count to the precompiler while preserving configured
+  ceilings, memory admission, and oversized-job isolation.
+
+This JavaScript-only release reuses the native compiler and precompiler package
+selection from 0.2.53. Native binaries, backend ABI, and generated runtime behavior
+are unchanged.
+
 ## 0.2.53
 
 - Generate dependency dispatch as static tables indexed by the authenticated
