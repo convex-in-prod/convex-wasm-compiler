@@ -3,6 +3,19 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.55
+
+- Add an optional awaited `onPackageReady` observer for completed immutable module
+  graph packages. Consumers can transfer new payloads while sibling native work
+  continues, without granting deployment or publication authority.
+- Report package identity, newly built payloads, and pending native work. Observe
+  callback failures immediately and drain already-started work before rejection,
+  including builds that mix package receipt hits and misses.
+
+This JavaScript-only release reuses the native compiler and precompiler package
+selection from 0.2.54. Native binaries, backend ABI, and generated runtime behavior
+are unchanged.
+
 ## 0.2.54
 
 - Scale leaf-selector AOT worker reservations with the authenticated input working

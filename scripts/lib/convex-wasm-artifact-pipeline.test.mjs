@@ -1597,6 +1597,7 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   await fs.rename(packageDirectory, hiddenPackageDirectory);
   const entries = scheduledCohortEntriesForCompilerOutput(compilerOutput);
   const cohort = { cohortId: fingerprintJson({ entries }), entries };
+  const readyPackages = [];
   const packageOptions = {
     artifactConfig: {
       cacheLayout: fixture.options.cacheLayout,
@@ -1611,8 +1612,17 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
     compilerOutputs: [compilerOutput],
     nativePhaseScheduler,
     async verifyDeploymentMaterials() {},
+    async onPackageReady({ graphManifestSha256, nativeWorkPending, hasNewPayloads }) {
+      assert.equal(typeof nativeWorkPending, "boolean");
+      assert.equal(typeof hasNewPayloads, "boolean");
+      if (readyPackages.length === 1) assert.equal(hasNewPayloads, false);
+      const complete = await fs.readFile(join(fixture.options.cacheLayout.immutable.packages, graphManifestSha256, "COMPLETE"), "utf8");
+      assert.equal(complete, `${graphManifestSha256}\n`);
+      readyPackages.push(graphManifestSha256);
+    },
   };
   const artifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts(packageOptions);
+  assert.deepEqual(readyPackages, [artifact.graphManifest.graphManifestSha256]);
   assert.equal(artifact.buildReport.package.cache, "miss");
   assert.ok(artifact.package.path);
   await artifact.verifyMaterials();
@@ -1646,6 +1656,11 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   }
   const normalizationsAfterConstruction = normalizedHashes.length;
   const repeatedArtifact = await buildConvexWasmOfficialOutputModuleGraphArtifacts(packageOptions);
+  assert.deepEqual(readyPackages, [artifact.graphManifest.graphManifestSha256, artifact.graphManifest.graphManifestSha256]);
+  await assert.rejects(() => buildConvexWasmOfficialOutputModuleGraphArtifacts({
+    ...packageOptions,
+    async onPackageReady() { throw new Error("package observation failed"); },
+  }), /package observation failed/u);
   assert.equal(repeatedArtifact.buildReport.package.cache, "hit");
   assert.equal(normalizedHashes.length, normalizationsAfterConstruction);
   await fs.rename(hiddenPackageDirectory, packageDirectory);
@@ -1713,6 +1728,85 @@ test("public artifact pipeline constructs a module-graph package with Core Wasm 
   assert.notEqual(updatedBasePrelink.cacheKey, previousBasePrelink.cacheKey);
   assert.equal(updatedBasePrelink.cache, "miss");
   assert.notDeepEqual(updatedArtifact.graphManifest.toolchain.core.normalization, artifact.graphManifest.toolchain.core.normalization);
+});
+
+test("mixed receipt-hit observer rejection drains sibling package construction", async (t) => {
+  const fixture = await createFixture(t, { moduleGraphWasm: true });
+  const launchPolicy = { aggregateMemoryMaxBytes: 2 * 1024 * 1024 * 1024, aotWorkers: 1, jobs: 2 };
+  fixture.options.resourceGuard = {
+    kind: convexWasmBuildResourceGuardKind,
+    launchPolicy,
+    released: false,
+    runCommand: runBoundedNativeCommand,
+    describeTermination: describeNativeCommandTermination,
+  };
+  const inputs = await Promise.all(["first", "second", "retained"].map((name) =>
+    moduleGraphMaterialSessionInputFixture(fixture, `functions/${name}.ts`)
+  ));
+  const outputs = [];
+  const session = await createConvexWasmCapabilityArtifactMaterialSession(inputs[0], {
+    launchPolicy,
+    nativePhaseScheduler: createConvexWasmNativePhaseScheduler(launchPolicy),
+  });
+  try {
+    for (const input of inputs) {
+      outputs.push(await compileConvexWasmOfficialOutputModuleGraphInputsInMaterialSession(
+        session, [input], { packageReceiptTopologyOnly: true }
+      ));
+    }
+  } finally {
+    await finalizeConvexWasmArtifactMaterialSession(session);
+  }
+  const cohorts = outputs.map((output) => {
+    const entries = scheduledCohortEntriesForCompilerOutput(output);
+    return { cohortId: fingerprintJson({ entries }), entries };
+  });
+  const options = {
+    artifactConfig: fixture.options,
+    cohortSchedule: { cohorts, identity: { sha256: fingerprintJson(cohorts) } },
+    compilerOutputs: outputs,
+    async verifyDeploymentMaterials() {},
+  };
+  const seed = await buildConvexWasmOfficialOutputModuleGraphArtifacts(options);
+  const retainedIdentity = seed.artifacts[2].graphManifest.graphManifestSha256;
+  // Removing only owned receipt entries forces sibling construction while preserving one exact
+  // hit. Payload bytes remain intact and reusable by the reconstruction.
+  const receiptsRoot = join(fixture.options.cacheLayout.immutable.artifacts, "module-graph-package-receipt");
+  for (const key of await fs.readdir(receiptsRoot)) {
+    const receipt = JSON.parse(await fs.readFile(join(receiptsRoot, key, "artifact.json"), "utf8"));
+    if (!receipt.packages.some((entry) => entry.graphManifestSha256 === retainedIdentity)) {
+      await fs.rm(join(receiptsRoot, key), { recursive: true });
+    }
+  }
+  let retainedObserved = false;
+  const observed = [];
+  const siblingObserver = Promise.withResolvers();
+  const failure = new Error("retained package observer rejected");
+  const compilation = buildConvexWasmOfficialOutputModuleGraphArtifacts({
+    ...options,
+    onPackageReady({ graphManifestSha256 }) {
+      observed.push(graphManifestSha256);
+      if (graphManifestSha256 === retainedIdentity) {
+        retainedObserved = true;
+        throw failure;
+      }
+      return siblingObserver.promise;
+    },
+  });
+  let settled = false;
+  void compilation.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    for (let attempt = 0; attempt < 500 && (!retainedObserved || observed.length < 2); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(retainedObserved, true);
+    assert.ok(observed.length >= 2, "a sibling still owns its package observer");
+    assert.equal(settled, false);
+  } finally {
+    siblingObserver.resolve();
+  }
+  await assert.rejects(compilation, (error) => error === failure);
+  assert.equal(new Set(observed).size, observed.length);
 });
 
 test("builds a module-graph package from a separate application's source graph", async (t) => {

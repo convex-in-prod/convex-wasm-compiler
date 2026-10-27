@@ -21720,7 +21720,26 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
   receiptTopologyPreparations,
   supportObjectPreactivations,
   verifyDeploymentMaterials,
+  onPackageReady,
 }) {
+  if (onPackageReady !== undefined && typeof onPackageReady !== "function") {
+    fail("module graph package observer must be a function");
+  }
+  const observedPackages = new Set();
+  const observePackage = async (artifact) => {
+    const graphManifestSha256 = artifact.graphManifest.graphManifestSha256;
+    if (onPackageReady === undefined || observedPackages.has(graphManifestSha256)) return;
+    observedPackages.add(graphManifestSha256);
+    // Completed immutable payloads can be copied while sibling cohorts finish. This notification
+    // grants no deployment authority; the collection still authenticates every final input.
+    await onPackageReady({
+      graphManifestSha256,
+      nativeWorkPending: nativePhaseScheduler.activeCount > 0 || nativePhaseScheduler.queuedCount > 0,
+      hasNewPayloads: artifact.buildReport.modules.some(
+        (module) => module.coreWasm.cache === "miss" || module.aot.cache === "miss"
+      ),
+    });
+  };
   if (
     !Array.isArray(compilerOutputs) ||
     compilerOutputs.length === 0 ||
@@ -22292,6 +22311,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
           fail("official-output module graph compiler authority changed during support readiness");
         }
         receiptArtifacts = materializeModuleGraphPackageReceiptHitArtifacts(receiptHitProjections);
+        await settleConcurrentWork(receiptArtifacts.map(observePackage));
         // The shared-phase claim below can still await producer-owned preactivation. Defer the
         // archival report until final scheduler idle, as on the receipt-miss path.
         const receiptScheduling = {};
@@ -24518,6 +24538,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
             cohortTopology: shardTopology.cohorts[cohortIndex],
           }),
         });
+        await observePackage(artifact);
         return artifact;
       })();
       speculativeConstructionPromises.push(constructionPromise);
@@ -24831,6 +24852,7 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
       const receiptHitValidationScope = createConvexWasmModuleGraphPackageValidationScope();
       receiptHitPhysicalVerificationPromise = settleConcurrentWork(
         receiptHitArtifacts.map(async (artifact) => {
+          await observePackage(artifact);
           const finalVerificationCandidate =
             await beginConvexWasmModuleGraphArtifactFinalVerification(artifact);
           if (finalVerificationCandidate === undefined) return false;
@@ -24849,6 +24871,9 @@ export async function buildConvexWasmOfficialOutputModuleGraphArtifacts({
           );
         })
       );
+      // A hit observer can reject while the miss dispatcher still owns native work. Observe the
+      // rejection now; the authoritative settle-all join below still propagates it after drainage.
+      void receiptHitPhysicalVerificationPromise.then(undefined, () => undefined);
       speculativeConstructionPromises.push(receiptHitPhysicalVerificationPromise);
     }
     await waitForReceiptMissDispatcherIdle();

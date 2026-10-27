@@ -1082,6 +1082,14 @@ work. Each successful project build writes `build-report.json` beside
 stage timings, cache results and scheduling report. These reports distinguish
 unchanged warm builds from builds that invalidate source or native artifacts.
 
+The JavaScript `buildConvexWasmOfficialOutputModuleGraphArtifacts` API accepts an optional
+`onPackageReady` observer. Each completed immutable package reports `graphManifestSha256`,
+`hasNewPayloads`, and `nativeWorkPending`. A consumer can copy new payloads while sibling native
+work continues, and skip extra transfer work on warm builds. The observer is awaited and its
+failure drains already-started compiler work before rejection. Notifications do not grant
+deployment authority: consumers authenticate the package, and final collection verification
+still precedes deployment publication.
+
 This is not an official Convex project.
 
 ## Standalone Wasm runner
