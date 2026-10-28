@@ -45,6 +45,19 @@ when an entry changes. More interchangeable entries within a group can reduce
 fragmented runtime capacity, but grouping alone does not initialize instances
 before traffic or choose a prepared-pool size.
 
+Modules with multiple static imports to distinct targets use stable dependency tokens and
+canonical declaration order before identifier minification. Imported function specialization
+also breaks equal-benefit ties by local binding name. Source evaluation order is held separately
+in authenticated `import-initialization` aliases in the dependency selector. These aliases form
+a complete, unique permutation of the static bindings. The runtime initializes each dependency
+in source order and immediately assigns its namespace, preserving side effects and partially
+initialized bindings through cycles. When dependency native-symbol locators stay unchanged,
+import order and emitted dependency filenames can change without recompiling an unchanged
+module body. Source bindings and selector topology still change with evaluation order.
+Repeated static targets retain their ordinary lowering; dynamic imports retain their deferred
+evaluation. Source-less or equal-membership chunks still use occurrence-based binding paths
+to distinguish their native-symbol locators.
+
 ## Measure actual preparation
 
 The optional Cargo `capability-replay` feature provides the

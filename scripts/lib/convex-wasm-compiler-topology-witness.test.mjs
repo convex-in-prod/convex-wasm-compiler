@@ -153,6 +153,63 @@ function cacheIdentity({ engine = "d", material = "e", producer = "f" } = {}) {
   };
 }
 
+test("compiler topology witnesses retain ordered import initialization bindings", () => {
+  const original = descriptor({
+    executableSpecifier: `./__convex_wasm_dependency_import_statement_${sha256("e")}_00000002.js`,
+  });
+  const unit = original.applicationIdentity.units[0];
+  const first = unit.dependencies[0];
+  const second = {
+    ...first,
+    executableSpecifier: `./__convex_wasm_dependency_import_statement_${sha256("f")}_00000003.js`,
+    path: "second.js",
+    slot: 2,
+    specifier: "./second.js",
+  };
+  const secondUnit = structuredClone(original.chunkUnitsIdentity.units[1]);
+  secondUnit.slot = second.slot;
+  secondUnit.module.path = second.path;
+  secondUnit.module.sourceMembershipSha256 = sha256("9");
+  secondUnit.nativeSymbolLocator.sourceMembershipSha256 = sha256("9");
+  secondUnit.nativeSymbolLocator.bindingPath.entryPath = `source-membership:${sha256("9")}`;
+  original.chunkUnitsIdentity.units.push(secondUnit);
+  original.applicationIdentity.units.splice(2, 0, secondUnit);
+  original.applicationIdentity.units[3].slot = 3;
+  original.applicationIdentity.entries[0].entryPublicationUnitSlot = 3;
+  original.applicationIdentity.initialization.chunkSlotCount = 3;
+  original.applicationIdentity.initialization.namespaceSlotCount = 3;
+  original.applicationIdentity.initialization.entryPublicationUnitSlots = [3];
+  original.applicationIdentity.unitCount = 4;
+  unit.dependencies = [
+    first,
+    second,
+    ...[first, second].map((binding, occurrence) => ({
+      ...binding,
+      executableSpecifier: `./__convex_wasm_import_initialization_0000000${occurrence}.js`,
+      kind: "import-initialization",
+    })),
+  ];
+  const topology = projectConvexWasmCompilerDescriptorTopology(original);
+  assert.deepEqual(
+    topology.application.units[0].dependencies.slice(2),
+    [first, second].map(({ path, slot, specifier }, executableOccurrence) => ({
+      executableOccurrence,
+      kind: "import-initialization",
+      path,
+      slot,
+      specifier,
+    }))
+  );
+  const reordered = structuredClone(original);
+  const reorderedDependencies = reordered.applicationIdentity.units[0].dependencies;
+  [reorderedDependencies[2].executableSpecifier, reorderedDependencies[3].executableSpecifier] =
+    [reorderedDependencies[3].executableSpecifier, reorderedDependencies[2].executableSpecifier];
+  assert.notEqual(
+    fingerprintJson(projectConvexWasmCompilerDescriptorTopology(reordered)),
+    fingerprintJson(topology)
+  );
+});
+
 test("compiler topology witness ignores producer rotation but binds physical topology, material, and engine", () => {
   const originalDescriptor = descriptor();
   const sourceMapChangedDescriptor = structuredClone(originalDescriptor);

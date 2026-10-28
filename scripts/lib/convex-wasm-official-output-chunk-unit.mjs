@@ -23,6 +23,8 @@ import {
   projectConvexWasmOfficialOutputSourceChunkGraph,
 } from "./convex-wasm-official-output-prototype.mjs";
 import {
+  convexWasmImportInitializationRequest,
+  validateConvexWasmImportInitializationDependencies,
   createConvexWasmOfficialOutputExecutableDependencySpecifier,
   parseConvexWasmOfficialOutputExecutableDependencySpecifier,
 } from "./convex-wasm-official-output-chunk-contract.mjs";
@@ -479,6 +481,7 @@ async function transformChunkModule({
   sourceIdentity,
   sourcefile,
   transform,
+  initializeImports,
 }) {
   const transformSource = async () => {
     const result = await transform.call(esbuild, source, {
@@ -487,7 +490,12 @@ async function transformChunkModule({
     });
     return {
       ...result,
-      code: lowerModuleExportForwarding(result.code, source, module.identity.path),
+      code: initializeImports
+        ? lowerOrderedImportInitialization(
+            lowerModuleExportForwarding(result.code, source, module.identity.path),
+            module.identity.path
+          )
+        : lowerModuleExportForwarding(result.code, source, module.identity.path),
     };
   };
   if (persistentCache === undefined) {
@@ -1351,11 +1359,13 @@ function moduleTransformInputForSession({
   );
   const canonicalSource = renderConvexWasmSpecializedModuleSource(
     module.source,
-    dependencies,
+    dependencies.filter(({ kind }) => kind !== "import-initialization"),
     preparation.functionImports
   );
   const source = snapshotImmutableImports(
-    canonicalSource,
+    dependencies.some(({ kind }) => kind === "import-initialization")
+      ? canonicalizeStaticImports(canonicalSource, module.identity.path)
+      : canonicalSource,
     dependencies,
     preparation.immutableImports,
     module.identity.path
@@ -1386,23 +1396,61 @@ function moduleTransformInputForSession({
 }
 
 function moduleExecutableDependencies(preparation, nativeSymbolLocatorsByPath, module) {
-  return Object.freeze(
-    preparation.dependencies.map((dependency) =>
-      Object.freeze({
-        ...dependency,
-        executableSpecifier: createConvexWasmOfficialOutputExecutableDependencySpecifier({
-          kind: dependency.kind,
-          nativeSymbolIdentitySha256: convexWasmOfficialOutputNativeSymbolIdentitySha256({
-            entryPublication: false,
-            nativeSymbolLocator:
-              nativeSymbolLocatorsByPath.get(dependency.path) ??
-              fail(`chunk ${module.identity.path} dependency has no native symbol locator`),
-          }),
-          occurrence: dependency.occurrence,
-        }),
-      })
-    )
+  const staticImports = preparation.dependencies.filter(({ kind }) => kind === "import-statement");
+  // Repeated imports can have separate interop/forwarding operations. Keep their existing
+  // lowering until those operations have a single ordered binding contract.
+  const initializeImports =
+    staticImports.length > 1 &&
+    new Set(staticImports.map(({ path }) => path)).size === staticImports.length;
+  const nativeIdentities = new Map(
+    preparation.dependencies.map((dependency) => [
+      dependency,
+      convexWasmOfficialOutputNativeSymbolIdentitySha256({
+        entryPublication: false,
+        nativeSymbolLocator:
+          nativeSymbolLocatorsByPath.get(dependency.path) ??
+          fail(`chunk ${module.identity.path} dependency has no native symbol locator`),
+      }),
+    ])
   );
+  const canonicalOccurrences = new Map(
+    [...preparation.dependencies]
+      .sort((left, right) =>
+        compareStrings(
+          `${left.kind}:${nativeIdentities.get(left)}`,
+          `${right.kind}:${nativeIdentities.get(right)}`
+        )
+      )
+      .map((dependency, index) => [dependency, staticImports.length + index])
+  );
+  const dependencies = preparation.dependencies.map((dependency) =>
+    Object.freeze({
+      ...dependency,
+      executableSpecifier: createConvexWasmOfficialOutputExecutableDependencySpecifier({
+        kind: dependency.kind,
+        nativeSymbolIdentitySha256: nativeIdentities.get(dependency),
+        occurrence: initializeImports
+          ? canonicalOccurrences.get(dependency)
+          : dependency.occurrence,
+      }),
+    })
+  );
+  if (initializeImports) {
+    for (const [occurrence, dependency] of staticImports.entries()) {
+      dependencies.push(
+        Object.freeze({
+          ...dependency,
+          kind: "import-initialization",
+          executableSpecifier: createConvexWasmOfficialOutputExecutableDependencySpecifier({
+            kind: "import-initialization",
+            nativeSymbolIdentitySha256: nativeIdentities.get(dependency),
+            occurrence,
+          }),
+        })
+      );
+    }
+  }
+  return Object.freeze(dependencies);
 }
 
 function chunkPreparationCacheIdentity({
@@ -1711,12 +1759,134 @@ function transformedRequireSpecifiers(javascript, modulePath) {
     ) {
       return;
     }
+    if (node.arguments[0]?.value === convexWasmImportInitializationRequest) {
+      if (node.arguments.length !== 2 || node.arguments[1]?.type !== "ArrayExpression") {
+        fail(`chunk ${modulePath} has an invalid import initializer`);
+      }
+      for (const binding of node.arguments[1].elements) {
+        if (
+          binding?.type !== "ArrayExpression" ||
+          binding.elements.length !== 2 ||
+          binding.elements[0]?.type !== "StringLiteral" ||
+          binding.elements[1]?.type !== "ArrowFunctionExpression"
+        ) {
+          fail(`chunk ${modulePath} has an invalid import binding`);
+        }
+        specifiers.add(binding.elements[0].value);
+      }
+      return;
+    }
     if (node.arguments.length !== 1 || node.arguments[0]?.type !== "StringLiteral") {
       fail(`chunk ${modulePath} has a computed require after the pinned transform`);
     }
     specifiers.add(node.arguments[0].value);
   });
   return [...specifiers].sort(compareStrings);
+}
+
+function canonicalizeStaticImports(source, modulePath) {
+  const ast = parseChunkJavascript(source, modulePath, "static import bindings", "module");
+  const imports = ast.program.body.filter(
+    (node) =>
+      node.type === "ImportDeclaration" ||
+      ((node.type === "ExportNamedDeclaration" || node.type === "ExportAllDeclaration") &&
+        node.source)
+  );
+  const declarations = [...imports]
+    .sort((left, right) => compareStrings(left.source.value, right.source.value))
+    .map((node) => source.slice(node.start, node.end));
+  const body = [];
+  let offset = 0;
+  for (const node of imports) {
+    body.push(source.slice(offset, node.start));
+    offset = node.end;
+  }
+  body.push(source.slice(offset));
+  return `${declarations.join("\n")}\n${body.join("")}`;
+}
+
+function lowerOrderedImportInitialization(code, modulePath) {
+  const ast = parseChunkJavascript(code, modulePath, "static import initialization", "script");
+  const bindings = [];
+  const declarations = [];
+  const edits = [];
+  const names = new Set();
+  visitAst(ast.program, (node) => {
+    if (node.type === "Identifier") names.add(node.name);
+  });
+  let parameter = "__convexImportNamespace";
+  while (names.has(parameter)) parameter += "_";
+  for (const statement of ast.program.body) {
+    const parts =
+      statement.type === "VariableDeclaration"
+        ? statement.declarations
+        : statement.type === "ExpressionStatement"
+          ? statement.expression.type === "SequenceExpression"
+            ? statement.expression.expressions
+            : [statement.expression]
+          : [statement];
+    const retained = [];
+    for (const part of parts) {
+      const calls = [];
+      visitAst(part, (node) => {
+        if (
+          node.type === "CallExpression" &&
+          node.callee.type === "Identifier" &&
+          node.callee.name === "require" &&
+          node.arguments.length === 1 &&
+          node.arguments[0].type === "StringLiteral" &&
+          parseConvexWasmOfficialOutputExecutableDependencySpecifier(node.arguments[0].value)
+            .kind === "import-statement"
+        ) {
+          calls.push(node);
+        }
+      });
+      if (calls.length === 0) {
+        retained.push(part);
+        continue;
+      }
+      if (
+        calls.length !== 1 ||
+        (part.type !== "VariableDeclarator" && statement.type !== "ExpressionStatement") ||
+        (part.type === "VariableDeclarator" &&
+          (statement.kind !== "var" || part.id.type !== "Identifier"))
+      ) {
+        fail(`chunk ${modulePath} has unsupported static import lowering`);
+      }
+      const call = calls[0];
+      const expression =
+        code.slice(part.start, call.start) + parameter + code.slice(call.end, part.end);
+      bindings.push(
+        `[${JSON.stringify(call.arguments[0].value)}, (${parameter}) => { ${expression}; }]`
+      );
+      if (part.type === "VariableDeclarator") declarations.push(part.id.name);
+    }
+    if (retained.length !== parts.length) {
+      edits.push({
+        start: statement.start,
+        end: statement.end,
+        text:
+          retained.length === 0
+            ? ""
+            : `${statement.type === "VariableDeclaration" ? `${statement.kind} ` : ""}${retained.map((part) => code.slice(part.start, part.end)).join(", ")};`,
+      });
+    }
+  }
+  if (bindings.length === 0) fail(`chunk ${modulePath} lost its static imports`);
+  // Each callback assigns its namespace immediately after that dependency initializes. This
+  // preserves partially initialized bindings observed through cycles, unlike eager preloading.
+  edits[0].text =
+    `${declarations.length === 0 ? "" : `var ${declarations.join(", ")};\n`}` +
+    `require(${JSON.stringify(convexWasmImportInitializationRequest)}, [${bindings.join(",\n")}]);\n` +
+    edits[0].text;
+  const output = [];
+  let offset = 0;
+  for (const edit of edits) {
+    output.push(code.slice(offset, edit.start), edit.text);
+    offset = edit.end;
+  }
+  output.push(code.slice(offset));
+  return output.join("");
 }
 
 // Only the pinned transform's private ESM export table qualifies. Copy its
@@ -2048,6 +2218,7 @@ async function transformedModuleBaseForInput({
       sourceIdentity: transformInput.sourceIdentity,
       sourcefile: transformInput.sourcefile,
       transform: record?.transform ?? esbuild.transform,
+      initializeImports: transformInput.dependencies.some(({ kind }) => kind === "import-initialization"),
     });
     if (transformKey !== undefined) {
       record.transforms.set(transformKey, transform);
@@ -2068,6 +2239,7 @@ async function transformedModuleBaseForInput({
     transformedModuleBase = (async () => {
       const { cacheReference, code, persistentCacheMiss, requireSpecifiers } = await transform;
       const expectedRequireSpecifiers = transformInput.dependencies
+        .filter(({ kind }) => kind !== "import-initialization")
         .map(({ executableSpecifier }) => executableSpecifier)
         .sort(compareStrings);
       if (canonicalJson(requireSpecifiers) !== canonicalJson(expectedRequireSpecifiers)) {
@@ -2496,7 +2668,7 @@ function normalizedUnitIdentity(unit, index) {
           `chunk unit ${index} dependency ${dependencyIndex}`
         );
         if (
-          !supportedImportKinds.has(normalized.kind) ||
+          (!supportedImportKinds.has(normalized.kind) && normalized.kind !== "import-initialization") ||
           !Number.isSafeInteger(normalized.slot) ||
           normalized.slot < 0 ||
           normalized.slot === index
@@ -2564,6 +2736,7 @@ function normalizedUnitIdentity(unit, index) {
   if (executableOccurrences.some((occurrence, occurrenceIndex) => occurrence !== occurrenceIndex)) {
     fail(`chunk unit ${index} executable dependency occurrences are invalid`);
   }
+  validateConvexWasmImportInitializationDependencies(dependencies, `chunk unit ${index}`);
   const normalizedIdentity = Object.freeze({
     dependencies,
     javascript: Object.freeze({ ...javascriptIdentity }),
@@ -2615,7 +2788,8 @@ export function authenticateConvexWasmOfficialOutputChunkUnits(chunkUnits) {
         entryPublication: false,
         nativeSymbolLocator: targetUnit.identity.nativeSymbolLocator,
       });
-      if (executableIdentity.nativeSymbolIdentitySha256 !== targetNativeSymbolIdentitySha256) {
+      if (executableIdentity.kind !== "import-initialization" &&
+          executableIdentity.nativeSymbolIdentitySha256 !== targetNativeSymbolIdentitySha256) {
         fail("official-output chunk unit executable dependency does not match its chunk slot");
       }
     }
@@ -3305,7 +3479,31 @@ export function createConvexWasmOfficialOutputChunkUnitInitializer({
           state.published = true;
         },
         reportThrown() {},
-        require(specifier) {
+        require(specifier, bindings) {
+          if (specifier === convexWasmImportInitializationRequest) {
+            if (!Array.isArray(bindings)) fail("chunk import bindings must be an array");
+            const callbacks = new Map();
+            for (const [bindingSpecifier, callback] of bindings) {
+              const dependency = artifact.units[slot].identity.dependencies.find(
+                (candidate) => candidate.kind === "import-statement" && candidate.executableSpecifier === bindingSpecifier
+              );
+              if (dependency === undefined || typeof callback !== "function" || callbacks.has(dependency.slot)) {
+                fail("chunk import callback has an invalid or repeated dependency");
+              }
+              callbacks.set(dependency.slot, callback);
+            }
+            const initialization = artifact.units[slot].identity.dependencies
+              .filter(({ kind }) => kind === "import-initialization")
+              .sort((left, right) => compareStrings(left.executableSpecifier, right.executableSpecifier));
+            if (initialization.length !== callbacks.size) fail("chunk import initialization is incomplete");
+            for (const dependency of initialization) {
+              const callback = callbacks.get(dependency.slot);
+              if (callback === undefined) fail("chunk import initialization has no binding");
+              callback(requireNamespace(slot, dependency.executableSpecifier));
+            }
+            return undefined;
+          }
+          if (bindings !== undefined) fail("chunk namespace lookup has unexpected arguments");
           return requireNamespace(slot, specifier);
         },
         slot,

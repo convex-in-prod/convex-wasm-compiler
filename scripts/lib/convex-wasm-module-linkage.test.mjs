@@ -8,6 +8,7 @@ import test from "node:test";
 import vm from "node:vm";
 import * as esbuild from "esbuild";
 import { parse } from "@babel/parser";
+import { deriveConvexWasmOfficialOutputReusableCodeIdentitySha256s } from "./convex-wasm-official-output-chunk-contract.mjs";
 import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import { buildConvexWasmProducerIdentity } from "./convex-wasm-producer-identity.mjs";
 import { convexWasmOfficialOutputSourceMembershipIdentitySha256 } from "./convex-wasm-native-symbol-identity.mjs";
@@ -1014,6 +1015,134 @@ test("installed chunk transforms require their exact semantic implementation sou
   );
 });
 
+async function chunkSelections(sources) {
+  const modules = Object.entries(sources).map(([path, source]) => {
+    const sources = [`fixture:///${path.replace(/-[a-z0-9]+(?=\.js$)/u, "")}`];
+    const sourceMap = JSON.stringify({ sources, version: 3 });
+    const byteHash = (value) => createHash("sha256").update(value).digest("hex");
+    return {
+      source,
+      sourceMap,
+      identity: {
+        path,
+        environment: "isolate",
+        sourceMembershipSha256: convexWasmOfficialOutputSourceMembershipIdentitySha256({
+          sources,
+        }),
+        sourceSha256: byteHash(source),
+        sourceSize: Buffer.byteLength(source),
+        sourceMap: {
+          sha256: byteHash(sourceMap),
+          size: Buffer.byteLength(sourceMap),
+          sourcesCount: 1,
+          sourcesContentCount: 0,
+        },
+        moduleSha256: byteHash(source + sourceMap),
+      },
+    };
+  });
+  const closure = {
+    entryModulePath: "entry.js",
+    kind: "fixture-closure-v1",
+    imports: Object.entries(sources).flatMap(([importerPath, source]) => {
+      const imports = [];
+      const visit = (node) => {
+        if (node === null || typeof node !== "object") return;
+        const specifier =
+          node.type === "ImportDeclaration" ||
+          node.type === "ExportNamedDeclaration" ||
+          node.type === "ExportAllDeclaration"
+            ? node.source
+            : node.type === "CallExpression" && node.callee.type === "Import"
+              ? node.arguments[0]
+              : undefined;
+        if (specifier)
+          imports.push({
+            external: false,
+            importerPath,
+            kind: node.type === "CallExpression" ? "dynamic-import" : "import-statement",
+            path: specifier.value.slice(2),
+          });
+        for (const value of Object.values(node)) {
+          if (Array.isArray(value)) value.forEach(visit);
+          else if (value && typeof value === "object") visit(value);
+        }
+      };
+      visit(parse(source, { sourceType: "module" }));
+      return imports;
+    }),
+    modules: modules.map(({ identity }) => identity),
+  };
+  const visited = new Set();
+  const ordered = [];
+  const importsByPath = new Map(
+    modules.map(({ identity }) => [
+      identity.path,
+      [
+        ...new Map(
+          closure.imports
+            .filter(({ importerPath }) => importerPath === identity.path)
+            .map((item) => [fingerprintJson(item), item])
+        ).values(),
+      ].sort((a, b) => a.path.localeCompare(b.path) || a.kind.localeCompare(b.kind)),
+    ])
+  );
+  const visit = (modulePath) => {
+    if (visited.has(modulePath)) return;
+    visited.add(modulePath);
+    ordered.push(modules.find(({ identity }) => identity.path === modulePath));
+    for (const imported of importsByPath.get(modulePath)) visit(imported.path);
+  };
+  visit("entry.js");
+  closure.modules = ordered.map(({ identity }) => identity);
+  closure.imports = ordered.flatMap(({ identity }) => importsByPath.get(identity.path));
+  return authenticateConvexWasmOfficialOutputSelectionFixtures([
+    {
+      closure: {
+        identity: { ...closure, sha256: fingerprintJson(closure) },
+        modules,
+      },
+      manifestMembership: {
+        dependencyGraphSha256: "b".repeat(64),
+        inventoryKind: "fixture-inventory-v1",
+        sourceEnvelopeSha256: "a".repeat(64),
+      },
+      route: {
+        entryPath: "convex/entry.ts",
+        exportName: "result",
+        modulePath: "entry",
+        runtimeModulePath: "entry.js",
+        udfKind: "query",
+        visibility: "public",
+      },
+      toolchain: { esbuild: esbuild.version },
+    },
+  ]).selections;
+}
+
+function runChunkUnits(chunkUnits) {
+  const facade = Object.create(null);
+  Object.defineProperty(facade, "globalThis", { value: facade });
+  const context = vm.createContext({
+    __convexWasmApplicationGlobalThis: facade,
+  });
+  return initializeConvexWasmOfficialOutputChunkUnits({
+    chunkUnits,
+    destroyStore(error) {
+      throw error;
+    },
+    executeChunk({ begin, javascript, publish, reportThrown, require }) {
+      Object.assign(context, {
+        __convexWasmOfficialChunkBegin: begin,
+        __convexWasmOfficialChunkPublish: publish,
+        __convexWasmOfficialChunkReportThrown: reportThrown,
+        __convexWasmOfficialChunkRequire: require,
+      });
+      vm.runInContext(javascript, context, { timeout: 1000 });
+    },
+  });
+}
+
 test("chunk preparation binds imported bodies and reuses unaffected compact artifacts", async (t) => {
   const cacheRoot = await fs.mkdtemp(join(tmpdir(), "convex-wasm-linkage-pipeline-"));
   t.after(() => fs.rm(cacheRoot, { force: true, recursive: true }));
@@ -1033,66 +1162,7 @@ test("chunk preparation binds imported bodies and reuses unaffected compact arti
       "dep.js": `export ${mutable ? "let" : "const"} read = v => v.amount ${operation} v.limit;
         export const extra = ${extra}; ${mutable ? "export function update() { read = () => 99; }" : ""}`,
     };
-    const modules = Object.entries(sources).map(([path, source]) => {
-      const sources = [`fixture:///${path}`];
-      const sourceMap = JSON.stringify({ sources, version: 3 });
-      const byteHash = (value) => createHash("sha256").update(value).digest("hex");
-      return {
-        source,
-        sourceMap,
-        identity: {
-          path,
-          environment: "isolate",
-          sourceMembershipSha256: convexWasmOfficialOutputSourceMembershipIdentitySha256({
-            sources,
-          }),
-          sourceSha256: byteHash(source),
-          sourceSize: Buffer.byteLength(source),
-          sourceMap: {
-            sha256: byteHash(sourceMap),
-            size: Buffer.byteLength(sourceMap),
-            sourcesCount: 1,
-            sourcesContentCount: 0,
-          },
-          moduleSha256: byteHash(source + sourceMap),
-        },
-      };
-    });
-    const closure = {
-      entryModulePath: "entry.js",
-      kind: "fixture-closure-v1",
-      imports: [
-        {
-          external: false,
-          importerPath: "entry.js",
-          kind: "import-statement",
-          path: "dep.js",
-        },
-      ],
-      modules: modules.map(({ identity }) => identity),
-    };
-    const selections = authenticateConvexWasmOfficialOutputSelectionFixtures([
-      {
-        closure: {
-          identity: { ...closure, sha256: fingerprintJson(closure) },
-          modules,
-        },
-        manifestMembership: {
-          dependencyGraphSha256: "b".repeat(64),
-          inventoryKind: "fixture-inventory-v1",
-          sourceEnvelopeSha256: "a".repeat(64),
-        },
-        route: {
-          entryPath: "convex/entry.ts",
-          exportName: "result",
-          modulePath: "entry",
-          runtimeModulePath: "entry.js",
-          udfKind: "query",
-          visibility: "public",
-        },
-        toolchain: { esbuild: esbuild.version },
-      },
-    ]).selections;
+    const selections = await chunkSelections(sources);
     const session = createConvexWasmOfficialOutputChunkTransformSession({
       esbuild: counting,
       persistentCache: {
@@ -1122,26 +1192,7 @@ test("chunk preparation binds imported bodies and reuses unaffected compact arti
         }))
       ),
     };
-    const facade = Object.create(null);
-    Object.defineProperty(facade, "globalThis", { value: facade });
-    const context = vm.createContext({
-      __convexWasmApplicationGlobalThis: facade,
-    });
-    const entries = initializeConvexWasmOfficialOutputChunkUnits({
-      chunkUnits: materialized,
-      destroyStore(error) {
-        throw error;
-      },
-      executeChunk({ begin, javascript, publish, reportThrown, require }) {
-        Object.assign(context, {
-          __convexWasmOfficialChunkBegin: begin,
-          __convexWasmOfficialChunkPublish: publish,
-          __convexWasmOfficialChunkReportThrown: reportThrown,
-          __convexWasmOfficialChunkRequire: require,
-        });
-        vm.runInContext(javascript, context, { timeout: 1000 });
-      },
-    });
+    const entries = runChunkUnits(materialized);
     assert.equal(entries[0].namespace.result({ amount: 8, limit: 3 }), operation === "+" ? 11 : 5);
     return {
       report,
@@ -1346,4 +1397,90 @@ test("bounded imports prioritize fresh object fields and charge helper bodies", 
     32
   );
   assert.equal(plan.rejectedBindings, 10);
+});
+
+
+test("stable import bindings retain source order, cyclic exports and deferred dynamic imports", async () => {
+  const builds = [];
+  for (const suffix of ["old", "new"]) {
+    const a = `a-${suffix}.js`,
+      b = `b-${suffix}.js`;
+    const declarations = [`import { value } from "./${a}";`, `import { early } from "./${b}";`];
+    const sources = {
+      "entry.js": `${(suffix === "old" ? declarations : declarations.toReversed()).join("\n")}
+        export { value }; export function result() { return early; }
+        export function deferred() { return import("./dynamic.js"); }`,
+      [a]: `export let value = 7; export function update() { value++; }`,
+      [b]: `import { value } from "./entry.js";
+        export let early; try { early = value; } catch (error) { early = error.name; }`,
+      "dynamic.js": `throw new Error("deferred");`,
+    };
+    const chunks = await buildConvexWasmOfficialOutputChunkUnits({
+      esbuild,
+      selections: await chunkSelections(sources),
+    });
+    builds.push(chunks);
+    const entries = runChunkUnits(chunks);
+    assert.equal(entries[0].namespace.result(), suffix === "old" ? 7 : "TypeError");
+    await assert.rejects(entries[0].namespace.deferred(), /deferred/u);
+  }
+  const entry = (chunks) =>
+    chunks.units.find(({ identity }) => identity.module.path === "entry.js");
+  assert.equal(entry(builds[0]).javascript, entry(builds[1]).javascript);
+  assert.notDeepEqual(
+    entry(builds[0]).identity.dependencies,
+    entry(builds[1]).identity.dependencies
+  );
+  const reusable = builds.map((chunks) => {
+    const identities = deriveConvexWasmOfficialOutputReusableCodeIdentitySha256s({
+      chunkSlotCount: chunks.units.length,
+      units: chunks.units.map(({ identity }) => ({ ...identity, entryPublication: false })),
+    });
+    return identities[chunks.units.indexOf(entry(chunks))];
+  });
+  assert.equal(reusable[0], reusable[1]);
+});
+
+test("stable import bindings retain imported function specialization identity", async () => {
+  const builds = [];
+  for (const suffix of ["old", "new"]) {
+    const imports = [
+      `import { first } from "./a-${suffix}.js";`,
+      `import { second } from "./b-${suffix}.js";`,
+    ];
+    const chunks = await buildConvexWasmOfficialOutputChunkUnits({
+      esbuild,
+      selections: await chunkSelections({
+        "entry.js": `${(suffix === "old" ? imports : imports.toReversed()).join("\n")}
+          export function result(value) { return first(value) + second(value); }`,
+        [`a-${suffix}.js`]: "export const first = value => value.amount + 1;",
+        [`b-${suffix}.js`]: "export const second = value => value.amount + 2;",
+      }),
+    });
+    assert.equal(runChunkUnits(chunks)[0].namespace.result({ amount: 3 }), 9);
+    builds.push(chunks.units.find(({ identity }) => identity.module.path === "entry.js"));
+  }
+  assert.equal(builds[0].javascript, builds[1].javascript);
+});
+
+test("ordered initialization retains default imports, star reexports and repeated imports", async () => {
+  for (const repeated of [false, true]) {
+    const chunks = await buildConvexWasmOfficialOutputChunkUnits({
+      esbuild,
+      selections: await chunkSelections({
+        "entry.js": `import first from "./a.js"; export * from "./b.js"; export * from "./c.js";
+          ${repeated ? 'import { value as again } from "./b.js"; export { again };' : ""}
+          globalThis.trace.push("entry");
+          export function result() { return [first, globalThis.trace.join(",")]; }`,
+        "a.js": `globalThis.trace = ["a"]; export default 7;`,
+        "b.js": `globalThis.trace.push("b"); export let value = 9;`,
+        "c.js": `globalThis.trace.push("c"); export let other = 2;`,
+      }),
+    });
+    const [{ namespace }] = runChunkUnits(chunks);
+    assert.deepEqual(Array.from(namespace.result()), [7, "a,b,c,entry"]);
+    assert.equal(namespace.value, 9);
+    assert.equal(namespace.other, 2);
+    if (repeated) assert.equal(namespace.again, 9);
+  }
 });

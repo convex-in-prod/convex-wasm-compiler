@@ -137,7 +137,11 @@ function projectDependency(dependency, description) {
   return {
     executableOccurrence: executableIdentity.occurrence,
     kind,
-    nativeSymbolIdentitySha256: executableIdentity.nativeSymbolIdentitySha256,
+    // Initialization aliases bind source order through their target slot/path,
+    // while ordinary executable bindings also carry the native symbol identity.
+    ...(kind === "import-initialization"
+      ? {}
+      : { nativeSymbolIdentitySha256: executableIdentity.nativeSymbolIdentitySha256 }),
     path: requireString(dependency.path, `${description} path`),
     slot: dependency.slot,
     specifier: requireString(dependency.specifier, `${description} specifier`),

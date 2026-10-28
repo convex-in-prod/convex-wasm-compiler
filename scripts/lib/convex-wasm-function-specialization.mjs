@@ -822,7 +822,12 @@ export function planConvexWasmFunctionImports(module, modulesByPath, immutableIm
   // Import order is unrelated to removable work. Prefer fresh argument fields,
   // then repeatedly exposed field reads within the same bounded code budget.
   // These are profitability hints; Hermes still proves inlining and escape.
-  candidates.sort((a, b) => b.freshFields - a.freshFields || b.readDensity - a.readDensity);
+  // Equal benefits must not inherit source import order: selection and copied-body
+  // names feed the reusable module's executable identity.
+  candidates.sort((a, b) =>
+    b.freshFields - a.freshFields || b.readDensity - a.readDensity ||
+    (a.binding.local < b.binding.local ? -1 : a.binding.local > b.binding.local ? 1 : 0)
+  );
   for (const { binding, body } of candidates) {
     let selected = bodies.get(body.sha256);
     if (selected === undefined) {

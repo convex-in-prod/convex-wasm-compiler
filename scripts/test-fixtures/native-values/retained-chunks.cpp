@@ -13,7 +13,13 @@ extern "C" SHUnit *sh_export_test_failed_chunk(void);
 extern "C" int32_t convex_wasm_application_chunk_slot_count(void) { return 2; }
 extern "C" void convex_wasm_clear_selected_entry(void) {}
 extern "C" int32_t convex_wasm_application_chunk_dependency_by_specifier(
-    int32_t, const char *) { return -1; }
+    int32_t, const char *specifier) {
+  if (std::strcmp(specifier, "valid") == 0 ||
+      std::strcmp(specifier, "./__convex_wasm_import_initialization_00000000.js") == 0) return 0;
+  if (std::strcmp(specifier, "failed") == 0 ||
+      std::strcmp(specifier, "./__convex_wasm_import_initialization_00000001.js") == 0) return 1;
+  return -1;
+}
 extern "C" SHUnitCreator convex_wasm_application_factory_by_unit_slot(
     int32_t slot) {
   if (slot == 0) return sh_export_test_valid_chunk;
@@ -81,13 +87,29 @@ int main() {
       --declared_application_unit_count;
       require(retained_runtime_state_is_valid());
 
+      unsigned assigned = 0;
+      Array bindings(js, 2);
+      for (size_t index = 0; index < 2; ++index) {
+        Array pair(js, 2);
+        pair.setValueAtIndex(js, 0, String::createFromAscii(js, index == 0 ? "failed" : "valid"));
+        pair.setValueAtIndex(js, 1, Function::createFromHostFunction(
+            js, PropNameID::forAscii(js, "assign"), 1,
+            [&, index](Runtime &js, const Value &, const Value *values, size_t count) {
+              require(index == 1 && count == 1 && Value::strictEquals(js, values[0], first));
+              ++assigned;
+              return Value::undefined();
+            }));
+        bindings.setValueAtIndex(js, index, std::move(pair));
+      }
+      expose_official_chunk_unit_bindings(js, 0);
       bool failed = false;
       try {
-        (void)initialize_official_chunk_unit(js, 1);
+        js.global().getPropertyAsFunction(js, "__convexWasmOfficialChunkRequire").call(
+            js, String::createFromAscii(js, "./__convex_wasm_initialize_imports.js"), bindings);
       } catch (const JSError &) {
         failed = true;
       }
-      require(failed && inspected_initializations == 2);
+      require(failed && assigned == 1 && inspected_initializations == 2);
       // Guest code may catch a deferred initialization error. The runtime must
       // still reject retention instead of accepting an old validation result.
       require(!retained_runtime_state_is_valid());

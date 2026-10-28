@@ -25,6 +25,10 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const MAX_MANIFEST_STRING_BYTES = 4 * 1024;
 const EXECUTABLE_DEPENDENCY_SPECIFIER_PATTERN =
   /^\.\/__convex_wasm_dependency_(dynamic_import|import_statement)_([0-9a-f]{64})_([0-9]{8})\.js$/u;
+const IMPORT_INITIALIZATION_SPECIFIER_PATTERN =
+  /^\.\/__convex_wasm_import_initialization_([0-9]{8})\.js$/u;
+
+export const convexWasmImportInitializationRequest = "./__convex_wasm_initialize_imports.js";
 
 export function createConvexWasmOfficialOutputExecutableDependencySpecifier({
   kind,
@@ -32,7 +36,7 @@ export function createConvexWasmOfficialOutputExecutableDependencySpecifier({
   occurrence,
 }) {
   if (
-    (kind !== "dynamic-import" && kind !== "import-statement") ||
+    !["dynamic-import", "import-statement", "import-initialization"].includes(kind) ||
     typeof nativeSymbolIdentitySha256 !== "string" ||
     !SHA256_PATTERN.test(nativeSymbolIdentitySha256) ||
     !Number.isSafeInteger(occurrence) ||
@@ -41,10 +45,18 @@ export function createConvexWasmOfficialOutputExecutableDependencySpecifier({
   ) {
     fail("official-output executable dependency identity is invalid");
   }
+  if (kind === "import-initialization") {
+    return `./__convex_wasm_import_initialization_${String(occurrence).padStart(8, "0")}.js`;
+  }
   return `./__convex_wasm_dependency_${kind.replaceAll("-", "_")}_${nativeSymbolIdentitySha256}_${String(occurrence).padStart(8, "0")}.js`;
 }
 
 export function parseConvexWasmOfficialOutputExecutableDependencySpecifier(specifier) {
+  const initialization =
+    typeof specifier === "string" ? IMPORT_INITIALIZATION_SPECIFIER_PATTERN.exec(specifier) : null;
+  if (initialization !== null) {
+    return Object.freeze({ kind: "import-initialization", occurrence: Number(initialization[1]) });
+  }
   const match =
     typeof specifier === "string" ? EXECUTABLE_DEPENDENCY_SPECIFIER_PATTERN.exec(specifier) : null;
   if (match === null) {
@@ -91,7 +103,7 @@ export function normalizeConvexWasmOfficialOutputChunkDependencies({
       `${unitDescription} dependency ${dependencyIndex}`
     );
     if (
-      (value.kind !== "dynamic-import" && value.kind !== "import-statement") ||
+      !["dynamic-import", "import-statement", "import-initialization"].includes(value.kind) ||
       !Number.isSafeInteger(value.slot) ||
       value.slot < 0 ||
       value.slot >= namespaceSlotCount
@@ -142,7 +154,39 @@ export function normalizeConvexWasmOfficialOutputChunkDependencies({
   if (executableOccurrences.some((occurrence, index) => occurrence !== index)) {
     fail(`${unitDescription} executable dependency occurrences are invalid`);
   }
+  validateConvexWasmImportInitializationDependencies(normalized, unitDescription);
   return normalized;
+}
+
+export function validateConvexWasmImportInitializationDependencies(dependencies, description) {
+  const initialization = dependencies.filter(({ kind }) => kind === "import-initialization");
+  if (initialization.length === 0) return;
+  const imports = dependencies.filter(({ kind }) => kind === "import-statement");
+  const bindings = new Map(imports.map((dependency) => [dependency.slot, dependency]));
+  const ordinals = initialization
+    .map(
+      ({ executableSpecifier }) =>
+        parseConvexWasmOfficialOutputExecutableDependencySpecifier(executableSpecifier).occurrence
+    )
+    .sort((left, right) => left - right);
+  if (
+    initialization.length !== imports.length ||
+    initialization.length !== bindings.size ||
+    ordinals.some((ordinal, index) => ordinal !== index)
+  ) {
+    fail(`${description} import initialization is incomplete`);
+  }
+  for (const dependency of initialization) {
+    const binding = bindings.get(dependency.slot);
+    if (
+      binding === undefined ||
+      binding.path !== dependency.path ||
+      binding.specifier !== dependency.specifier
+    ) {
+      fail(`${description} import initialization does not match its bindings`);
+    }
+    bindings.delete(dependency.slot);
+  }
 }
 
 export function validateConvexWasmOfficialOutputChunkDependencyTopology({
@@ -184,6 +228,7 @@ export function validateConvexWasmOfficialOutputChunkDependencyTopology({
         dependency.executableSpecifier
       );
       if (
+        executableIdentity.kind !== "import-initialization" &&
         executableIdentity.nativeSymbolIdentitySha256 !==
         units[dependency.slot].nativeSymbolIdentitySha256
       ) {

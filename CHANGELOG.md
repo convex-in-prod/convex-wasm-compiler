@@ -3,6 +3,24 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.56
+
+- Canonicalize distinct static import declarations and dependency tokens before
+  identifier minification, keeping lowered code reusable when import order and
+  emitted filenames change while native-symbol locators stay the same.
+- Preserve source evaluation order through authenticated initialization aliases.
+  Assign each dependency namespace immediately to retain side effects and cyclic
+  bindings; repeated static targets and deferred dynamic imports keep their
+  existing behavior.
+- Make imported-function specialization ties deterministic and retain
+  initialization order in compiler-cache topology identities.
+
+This package release reuses the native compiler and precompiler package selection
+from 0.2.55. It updates the runtime adapter source compiled into application Wasm;
+changed lowering and producer identities rebuild affected application artifacts.
+Native executables, the backend ABI, and Wasmtime artifact compatibility are
+unchanged. This release does not include rebuilt standalone toolchain bundles.
+
 ## 0.2.55
 
 - Add an optional awaited `onPackageReady` observer for completed immutable module

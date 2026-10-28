@@ -1972,10 +1972,64 @@ void expose_official_chunk_unit_bindings(Runtime &js, int32_t unit_slot) {
                   const Value *arguments,
                   size_t count) -> Value {
         try {
-          if (count != 1 || !arguments[0].isString()) {
+          if (count == 0 || !arguments[0].isString()) {
             throw JSError(js, "Official chunk require specifier is invalid");
           }
           const std::string specifier = arguments[0].getString(js).utf8(js);
+          if (specifier == "./__convex_wasm_initialize_imports.js") {
+            if (count != 2 || !arguments[1].isObject() ||
+                !arguments[1].getObject(js).isArray(js)) {
+              throw JSError(js, "Official chunk import bindings are invalid");
+            }
+            const auto bindings = arguments[1].getObject(js).getArray(js);
+            const auto binding_count = bindings.size(js);
+            const auto slot_count = convex_wasm_application_chunk_slot_count();
+            if (binding_count == 0 || binding_count > static_cast<size_t>(slot_count)) {
+              throw JSError(js, "Official chunk import binding count is invalid");
+            }
+            std::vector<size_t> callbacks(slot_count, binding_count);
+            for (size_t index = 0; index < binding_count; ++index) {
+              const auto value = bindings.getValueAtIndex(js, index);
+              if (!value.isObject() || !value.getObject(js).isArray(js)) {
+                throw JSError(js, "Official chunk import binding is invalid");
+              }
+              const auto binding = value.getObject(js).getArray(js);
+              if (binding.size(js) != 2) {
+                throw JSError(js, "Official chunk import binding is incomplete");
+              }
+              const auto name = binding.getValueAtIndex(js, 0);
+              const auto callback = binding.getValueAtIndex(js, 1);
+              if (!name.isString() || !callback.isObject() ||
+                  !callback.getObject(js).isFunction(js)) {
+                throw JSError(js, "Official chunk import callback is invalid");
+              }
+              const auto target = convex_wasm_application_chunk_dependency_by_specifier(
+                  unit_slot, name.getString(js).utf8(js).c_str());
+              if (target < 0 || target >= slot_count || callbacks[target] != binding_count) {
+                throw JSError(js, "Official chunk import target is invalid or repeated");
+              }
+              callbacks[target] = index;
+            }
+            // Stable compiled bindings and source evaluation order are independent. Assign
+            // each namespace as soon as it returns, including when a cycle observes it.
+            for (size_t index = 0; index < binding_count; ++index) {
+              char request[80];
+              std::snprintf(request, sizeof(request),
+                            "./__convex_wasm_import_initialization_%08zu.js", index);
+              const auto target = convex_wasm_application_chunk_dependency_by_specifier(unit_slot, request);
+              if (target < 0 || target >= slot_count || callbacks[target] == binding_count) {
+                throw JSError(js, "Official chunk import initialization is incomplete");
+              }
+              const auto binding = bindings.getValueAtIndex(js, callbacks[target]).getObject(js).getArray(js);
+              callbacks[target] = binding_count;
+              auto namespace_value = initialize_official_chunk_unit(js, target);
+              binding.getValueAtIndex(js, 1).getObject(js).getFunction(js).call(js, namespace_value);
+            }
+            return Value::undefined();
+          }
+          if (count != 1) {
+            throw JSError(js, "Official chunk namespace lookup has unexpected arguments");
+          }
           const int32_t dependency_slot =
               convex_wasm_application_chunk_dependency_by_specifier(
                   unit_slot, specifier.c_str());
