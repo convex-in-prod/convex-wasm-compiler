@@ -3,6 +3,27 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.57
+
+- Authenticate one immutable inventory per maintenance invocation and derive successive
+  dependency waves from compact surviving facts. Preserve current authority fences,
+  fresh candidate admission, and durable batch quarantine.
+- Reuse measured inode allocation from authority checks, report completed waves and
+  distinguish reaching the watermark from exhausting eligible candidates.
+- Start automatic maintenance's 15-minute cooldown after successful completion.
+  Recognize valid legacy receipts as due once, and recover interrupted quarantine
+  during cooldown without selecting new pressure evictions.
+- Expose compact monotonic diagnostics and provide bounded deterministic comparison
+  fixtures in the source checkout.
+- Drain admitted work-root and quarantine deletions before releasing the cache lock
+  when a child operation fails.
+
+This JavaScript tooling release reuses the authenticated native compiler and
+precompiler selection from 0.2.56. Semantic producer identities, native package IDs,
+immutable entry formats and quarantine records remain unchanged. The scheduling
+receipt advances to v2; see **Cache maintenance** in the README for receipt-only
+rollback. No native executables or standalone toolchain bundles are rebuilt.
+
 ## 0.2.56
 
 - Canonicalize distinct static import declarations and dependency tokens before

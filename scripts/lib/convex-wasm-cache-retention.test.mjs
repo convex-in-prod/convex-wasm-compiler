@@ -11,8 +11,6 @@ import { canonicalJson, fingerprintJson } from "./convex-wasm-artifact-contract.
 import { fingerprintMaterialPaths } from "./convex-wasm-artifact-material.mjs";
 import { loadAndVerifyConvexWasmModuleGraphPackage } from "./convex-wasm-module-graph-package.mjs";
 import {
-  C_BUNDLE_CACHE_ENTRY_KIND,
-  C_BUNDLE_KIND,
   C_BUNDLE_MANIFEST_PATH,
 } from "./convex-wasm-static-hermes-c-bundle.mjs";
 import {
@@ -23,6 +21,7 @@ import {
   recordConvexWasmSuccessfulCacheUse,
 } from "./convex-wasm-cache-retention.mjs";
 import {
+  currentConvexWasmRetentionPhase,
   planConvexWasmImmutableGc,
   sweepConvexWasmImmutableGc,
 } from "./convex-wasm-cache-retention-immutable.mjs";
@@ -59,8 +58,20 @@ async function withHeavyLock(environment, operation) {
   }
 }
 
+async function isVerifiedQuarantineRoot(path) {
+  if (!path.includes("immutable-sweep-trash") || !/^[0-9a-f]{64}$/u.test(path.split("/").at(-1))) return false;
+  try {
+    await fs.lstat(`${path}.verified.json`);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function maintenanceOptions(fixtureValue, overrides = {}) {
   return {
+    clock: () => overrides.nowMs ?? Date.now(),
     abandonedRecoveryMilliseconds: 1_000,
     cacheRoot: fixtureValue.cacheRoot,
     completedRetentionMilliseconds: 1_000,
@@ -71,716 +82,20 @@ function maintenanceOptions(fixtureValue, overrides = {}) {
   };
 }
 
-async function writeGenericArtifact({
-  cacheLayout,
-  extension,
-  identity: rawIdentity,
-  metadata,
-  payload,
-  stage,
-}) {
-  const identity = rawIdentity ?? { fixture: "cache-retention", stage };
-  const key = fingerprintJson({
-    identity,
-    kind: "convex-wasm-artifact-pipeline-v9",
-    stage,
-  });
-  const artifact = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-  const entry = {
-    artifactFile: `artifact.${extension}`,
-    artifactSha256: createHash("sha256").update(artifact).digest("hex"),
-    artifactSize: artifact.length,
-    identity,
-    key,
-    kind: "convex-wasm-artifact-cache-entry-v5",
-    metadata,
-    stage,
-  };
-  const root = join(cacheLayout.immutable.artifacts, stage, key);
-  await fs.mkdir(root, { mode: 0o700, recursive: true });
-  await fs.chmod(join(cacheLayout.immutable.artifacts, stage), 0o700);
-  await fs.chmod(root, 0o700);
-  await Promise.all([
-    fs.writeFile(join(root, entry.artifactFile), artifact, { mode: 0o600 }),
-    fs.writeFile(join(root, "entry.json"), `${canonicalJson(entry)}\n`, { mode: 0o600 }),
-    fs.writeFile(join(root, "COMPLETE"), `${key}\n`, { mode: 0o600 }),
-  ]);
-  return { entry, key, stage };
-}
-
-async function ageGenericArtifact(cacheLayout, { key, stage }) {
-  const root = join(cacheLayout.immutable.artifacts, stage, key);
-  await Promise.all(
-    (await fs.readdir(root)).map((name) => fs.utimes(join(root, name), new Date(0), new Date(0)))
-  );
-  await fs.utimes(root, new Date(0), new Date(0));
-}
-
-async function ageTree(path) {
-  const status = await fs.lstat(path);
-  if (status.isDirectory()) {
-    for (const name of await fs.readdir(path)) await ageTree(join(path, name));
-  }
-  await fs.utimes(path, new Date(0), new Date(0));
-}
-
-function packageFileMaterial(value) {
-  const bytes = Buffer.from(`${canonicalJson(value)}\n`);
-  return {
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-    size: bytes.length,
-  };
-}
-
-async function writeLegacyV2ModuleGraphPackage(cacheLayout) {
-  const coreWasmContract = { fixture: "legacy-v2-core-wasm-contract" };
-  const coreWasm = await writeGenericArtifact({
-    cacheLayout,
-    extension: "wasm",
-    metadata: { contract: coreWasmContract },
-    payload: "legacy-v2-core-wasm",
-    stage: "legacy-v2-core-wasm",
-  });
-  const aot = await writeGenericArtifact({
-    cacheLayout,
-    extension: "cwasm",
-    metadata: { fixture: "legacy-v2-aot" },
-    payload: "legacy-v2-aot",
-    stage: "legacy-v2-aot",
-  });
-  const producerImplementation = {
-    kind: "convex-wasm-artifact-producer-identity-v1",
-    sha256: "a".repeat(64),
-  };
-  const artifacts = {
-    aot: {
-      cacheKey: aot.key,
-      sha256: aot.entry.artifactSha256,
-      size: aot.entry.artifactSize,
-      stage: aot.stage,
-    },
-    coreWasm: {
-      cacheKey: coreWasm.key,
-      sha256: coreWasm.entry.artifactSha256,
-      size: coreWasm.entry.artifactSize,
-      stage: coreWasm.stage,
-    },
-  };
-  const common = {
-    engine: { fixture: "legacy-v2-engine" },
-    hostAbi: { fixture: "legacy-v2-host-abi" },
-    routing: { fixture: "legacy-v2-routing" },
-    sharedShards: { fixture: "legacy-v2-shared-shards" },
-    toolchain: { fixture: "legacy-v2-toolchain" },
-  };
-  const manifestPayload = {
-    ...common,
-    initialization: { fixture: "legacy-v2-initialization" },
-    kind: "convex-wasm-module-graph-manifest-v2",
-    modules: [{ artifacts, contract: coreWasmContract, role: "base" }],
-    producerImplementation,
-    replacement: { fixture: "legacy-v2-replacement" },
-    schemaVersion: 2,
-  };
-  const key = fingerprintJson(manifestPayload);
-  const manifest = { ...manifestPayload, graphManifestSha256: key };
-  const provenance = {
-    ...common,
-    identities: {
-      base: {
-        aot: aot.entry.identity,
-        coreWasm: coreWasm.entry.identity,
-      },
-    },
-    kind: "convex-wasm-module-graph-provenance-v2",
-    producerIdentity: {
-      ...producerImplementation,
-      manifest: { fixture: "legacy-v2-producer-manifest" },
-    },
-    schemaVersion: 2,
-  };
-  const entry = {
-    artifacts: { base: artifacts },
-    key,
-    kind: "convex-wasm-module-graph-package-v2",
-    manifest: packageFileMaterial(manifest),
-    provenance: packageFileMaterial(provenance),
-  };
-  const root = join(cacheLayout.immutable.packages, key);
-  await fs.mkdir(root, { mode: 0o700, recursive: true });
-  for (const directory of [
-    cacheLayout.cacheRoot,
-    join(cacheLayout.cacheRoot, "immutable"),
-    cacheLayout.immutable.root,
-    cacheLayout.immutable.packages,
-    root,
-  ]) {
-    await fs.chmod(directory, 0o700);
-  }
-  await Promise.all([
-    fs.writeFile(join(root, "COMPLETE"), `${key}\n`, { mode: 0o600 }),
-    fs.writeFile(join(root, "build-provenance.json"), `${canonicalJson(provenance)}\n`, {
-      mode: 0o600,
-    }),
-    fs.writeFile(join(root, "graph-manifest.json"), `${canonicalJson(manifest)}\n`, {
-      mode: 0o600,
-    }),
-    fs.writeFile(join(root, "package-entry.json"), `${canonicalJson(entry)}\n`, {
-      mode: 0o600,
-    }),
-  ]);
-  return { aot, artifacts, coreWasm, entry, key, manifest, provenance, root };
-}
-
-async function writeCBundleArtifact({ cacheLayout, complete = true, functionCount = 1, identity: rawIdentity, retainedLayout, stage }) {
-  const sources = new Map([
-    ["unit.h", "#define SH_UNIT 1\n"],
-    ["metadata.c", "const int metadata = 1;\n"],
-  ]);
-  for (let index = 0; index < functionCount; index += 1) {
-    sources.set(`function-${String(index)}.c`, `int f${String(index)}(void) { return 0; }\n`);
-  }
-  const member = (path, role, extra = {}) => {
-    const source = sources.get(path);
-    return {
-      path,
-      role,
-      sha256: createHash("sha256").update(source).digest("hex"),
-      size: Buffer.byteLength(source),
-      ...extra,
-    };
-  };
-  const header = member("unit.h", "header");
-  const translationUnits = [member("metadata.c", "metadata")];
-  for (let index = 0; index < functionCount; index += 1) {
-    translationUnits.push(
-      member(`function-${String(index)}.c`, "function", {
-        firstFunctionId: index,
-        functionCount: 1,
-        lastFunctionId: index,
-        oversize: false,
-        targetBytes: 2_097_152,
-      })
-    );
-  }
-  const manifest = {
-    header,
-    kind: C_BUNDLE_KIND,
-    schemaVersion: 1,
-    translationUnits,
-  };
-  if (retainedLayout !== undefined) {
-    const path = "sh_this_unit_layout.json";
-    sources.set(path, retainedLayout);
-    manifest.layout = { path, sha256: createHash("sha256").update(retainedLayout).digest("hex"), size: Buffer.byteLength(retainedLayout) };
-  }
-  const manifestSource = `${canonicalJson(manifest)}\n`;
-  const bundle = {
-    ...manifest,
-    manifest: {
-      path: C_BUNDLE_MANIFEST_PATH,
-      sha256: createHash("sha256").update(manifestSource).digest("hex"),
-      size: Buffer.byteLength(manifestSource),
-    },
-  };
-  const identity = rawIdentity ?? { fixture: "cache-retention-c-bundle", stage };
-  const key = fingerprintJson({
-    identity,
-    kind: "convex-wasm-artifact-pipeline-v9",
-    stage,
-  });
-  const entry = {
-    artifactSha256: bundle.manifest.sha256,
-    artifactSize: [...sources.values()].reduce(
-      (size, source) => size + Buffer.byteLength(source),
-      0
-    ),
-    bundle,
-    identity,
-    key,
-    kind: C_BUNDLE_CACHE_ENTRY_KIND,
-    metadata: { fixture: true },
-    stage,
-  };
-  const root = join(cacheLayout.immutable.artifacts, stage, key);
-  await fs.mkdir(root, { mode: 0o700, recursive: true });
-  for (const directory of [
-    cacheLayout.cacheRoot,
-    join(cacheLayout.cacheRoot, "immutable"),
-    cacheLayout.immutable.root,
-    cacheLayout.immutable.artifacts,
-    join(cacheLayout.immutable.artifacts, stage),
-    root,
-  ]) {
-    await fs.chmod(directory, 0o700);
-  }
-  await Promise.all([
-    fs.writeFile(join(root, "entry.json"), `${canonicalJson(entry)}\n`, { mode: 0o600 }),
-    fs.writeFile(join(root, C_BUNDLE_MANIFEST_PATH), manifestSource, { mode: 0o600 }),
-    ...[...sources].map(([path, source]) =>
-      fs.writeFile(join(root, path), source, { mode: 0o600 })
-    ),
-    ...(complete ? [fs.writeFile(join(root, "COMPLETE"), `${key}\n`, { mode: 0o600 })] : []),
-  ]);
-  return { entry, key, root, stage };
-}
-
-function compilerOutputReference({ entry, extension, key, stage }) {
-  return { entry, extension, report: { cacheKey: key, stage } };
-}
-
-function compilerOutputCacheIdentity(descriptorIdentitySha256 = "a".repeat(64)) {
-  return {
-    cohortInputsSha256: "1".repeat(64),
-    descriptorIdentitySha256,
-    engineCompatibilitySha256: "3".repeat(64),
-    kind: "convex-wasm-official-output-module-graph-compiler-output-cache-identity-v8",
-    materialSessionSha256: "4".repeat(64),
-    producerIdentitySha256: "5".repeat(64),
-    topologyWitnessMaterialIdentitySha256: "6".repeat(64),
-  };
-}
-
-function compilerOutputDescriptorFixture({ historicalPreTransport = false } = {}) {
-  const chunkKind = historicalPreTransport
-    ? "convex-wasm-official-output-chunk-units-v2"
-    : "convex-wasm-official-output-chunk-units-v3";
-  const module = {
-    environment: "isolate",
-    moduleSha256: "1".repeat(64),
-    path: "fixture.js",
-    sourceMap: { sha256: "2".repeat(64), size: 1, sourcesContentCount: 0, sourcesCount: 1 },
-    sourceMembershipSha256: "3".repeat(64),
-    sourceSha256: "4".repeat(64),
-    sourceSize: 1,
-  };
-  const transform = {
-    format: "cjs",
-    kind: historicalPreTransport
-      ? "convex-wasm-esbuild-closed-chunk-transform-v1"
-      : "convex-wasm-esbuild-closed-chunk-transform-v2",
-    minifyIdentifiers: true,
-    minifySyntax: true,
-    minifyWhitespace: false,
-    platform: "browser",
-    sourcemap: false,
-    supported: {
-      "async-generator": false,
-      "class-static-blocks": false,
-      "dynamic-import": false,
-      "logical-assignment": false,
-      "object-rest-spread": false,
-    },
-    target: "esnext",
-    treeShaking: false,
-  };
-  const chunkUnitPayload = {
-    dependencies: [],
-    javascript: { sha256: "5".repeat(64), size: 1 },
-    kind: historicalPreTransport
-      ? "convex-wasm-official-output-chunk-unit-v1"
-      : "convex-wasm-official-output-chunk-unit-v2",
-    module,
-    nativeSymbolLocator: historicalPreTransport
-      ? {
-          kind: "convex-wasm-official-output-chunk-native-symbol-locator-v1",
-          sourceMembershipSha256: module.sourceMembershipSha256,
-          sourceSha256: module.sourceSha256,
-        }
-      : {
-          bindingPath: { entryPath: "fixture.ts", imports: [] },
-          canonicalEntryPath: "fixture.ts",
-          kind: "convex-wasm-official-output-chunk-native-symbol-locator-v5",
-          sourceMembershipSha256: module.sourceMembershipSha256,
-          symbolAbi: "convex-wasm-official-output-chunk-native-symbol-abi-v1",
-        },
-    slot: 0,
-    transform,
-  };
-  const chunkUnit = { ...chunkUnitPayload, sha256: fingerprintJson(chunkUnitPayload) };
-  const routes = [{ exportName: "fixture", udfKind: "query", visibility: "public" }];
-  const publicationUnitPayload = {
-    entry: { entryPath: "fixture.ts", entrySlot: 0, handoffSlot: 0, routes },
-    javascript: { sha256: "7".repeat(64), size: 1 },
-    kind: "convex-wasm-official-output-chunk-entry-publication-unit-v2",
-    slot: 1,
-  };
-  const publicationUnit = {
-    ...publicationUnitPayload,
-    sha256: fingerprintJson(publicationUnitPayload),
-  };
-  const chunkEntries = [
-    {
-      dependencyGraphSha256: "8".repeat(64),
-      entryModulePath: module.path,
-      entryPath: "fixture.ts",
-      entrySlot: 0,
-      modulePath: "fixture",
-      routes,
-    },
-  ];
-  const applicationEntries = [{ ...chunkEntries[0], entryPublicationUnitSlot: 1, handoffSlot: 0 }];
-  const chunkUnitsPayload = {
-    entries: chunkEntries,
-    esbuild: { version: "fixture" },
-    initialization: {
-      dynamicImport: "literal-require-after-promise-microtask",
-      kind: "closed-numbered-namespace-slots-v1",
-      publication: "selected-entry-namespaces-after-selected-closure-initialization",
-    },
-    kind: chunkKind,
-    units: [chunkUnit],
-  };
-  const chunkUnitsIdentity = {
-    ...chunkUnitsPayload,
-    sha256: fingerprintJson(chunkUnitsPayload),
-  };
-  const applicationPayload = {
-    chunkUnits: { kind: chunkKind, sha256: chunkUnitsIdentity.sha256 },
-    dependencyGraphSha256: "9".repeat(64),
-    entries: applicationEntries,
-    initialization: {
-      chunkSlotCount: 1,
-      entryPublicationUnitSlots: [1],
-      kind: "closed-numbered-chunk-slots-with-per-entry-publication-v1",
-      namespaceSlotCount: 1,
-    },
-    kind: historicalPreTransport
-      ? "convex-wasm-official-output-chunk-application-unit-v2"
-      : "convex-wasm-official-output-chunk-application-unit-v3",
-    nativeDescriptor: {
-      destruction: "destroy-store-on-any-initialization-failure",
-      initialization: "recursive-closed-literal-require-with-provisional-cjs-namespaces",
-      kind: historicalPreTransport
-        ? "convex-wasm-official-output-chunk-native-descriptor-abi-v2"
-        : "convex-wasm-official-output-chunk-native-descriptor-abi-v3",
-      publication:
-        "authenticated-selected-entry-wrapper-validation-after-selected-closure-initialization",
-      slots: "closed-numbered-namespace-slots-with-per-entry-publication-units",
-    },
-    unitCount: 2,
-    units: [chunkUnit, publicationUnit],
-  };
-  const applicationIdentity = {
-    ...applicationPayload,
-    sha256: fingerprintJson(applicationPayload),
-  };
-  return {
-    applicationIdentity,
-    chunkUnitsIdentity,
-    identitySha256: applicationIdentity.sha256,
-    kind: "convex-wasm-official-output-module-graph-compiler-cache-descriptor-v2",
-    schemaVersion: 2,
-  };
-}
-
-function compilerOutputTopologyDescriptor(descriptor) {
-  return {
-    applicationIdentitySha256: descriptor.applicationIdentity.sha256,
-    chunkUnitsIdentitySha256: descriptor.chunkUnitsIdentity.sha256,
-    descriptorSha256: fingerprintJson(descriptor),
-    identitySha256: descriptor.identitySha256,
-    kind: "convex-wasm-official-output-module-graph-compiler-output-topology-descriptor-v1",
-    schemaVersion: 1,
-  };
-}
-
-async function writeCompilerOutputFixture(
-  cacheLayout,
-  { historicalPreTransport = false, recordSchemaVersion = 5 } = {}
-) {
-  const generatedC = await writeGenericArtifact({
-    cacheLayout,
-    extension: "c",
-    metadata: { fixture: "compiler-output-generated-c" },
-    payload: "compiler-output-generated-c",
-    stage: "aaa-compiler-output-generated-c",
-  });
-  const picObject = await writeGenericArtifact({
-    cacheLayout,
-    extension: "o",
-    metadata: { fixture: "compiler-output-pic-object" },
-    payload: "compiler-output-pic-object",
-    stage: "aab-compiler-output-pic-object",
-  });
-  const engineProbe = await writeGenericArtifact({
-    cacheLayout,
-    extension: "cwasm",
-    metadata: { fixture: "compiler-output-engine-probe" },
-    payload: "compiler-output-engine-probe",
-    stage: "aac-compiler-output-engine-probe",
-  });
-  const generatedCReference = compilerOutputReference({ ...generatedC, extension: "c" });
-  const picObjectReference = compilerOutputReference({ ...picObject, extension: "o" });
-  const descriptor = compilerOutputDescriptorFixture({ historicalPreTransport });
-  const compactRecord = recordSchemaVersion === 5;
-  assert.ok(compactRecord || recordSchemaVersion === 4);
-  assert.ok(!historicalPreTransport || !compactRecord);
-  const record = {
-    applicationUnits: Array.from({ length: 2 }, () => ({
-      generatedC: generatedCReference,
-      picObject: picObjectReference,
-    })),
-    bridge: {
-      generatedC: generatedCReference,
-      generatedCIdentity: generatedC.entry.identity,
-      generatedSource: {
-        sha256: generatedC.entry.artifactSha256,
-        size: generatedC.entry.artifactSize,
-      },
-      object: picObjectReference,
-      objectIdentity: picObject.entry.identity,
-      requestEnvelope: { fixture: "request-envelope" },
-      valueCodec: { fixture: "value-codec" },
-    },
-    descriptor: compactRecord ? compilerOutputTopologyDescriptor(descriptor) : descriptor,
-    engine: {
-      compatibilitySha256: "3".repeat(64),
-      config: { fixture: "engine-config" },
-      configurationSha256: fingerprintJson({ fixture: "engine-config" }),
-      package: { fixture: "engine-package" },
-      revision: "fixture-revision",
-      target: { cpu: "fixture-cpu", triple: "fixture-triple" },
-      wasmtimeMaterialsSha256: "7".repeat(64),
-    },
-    engineProbe: compilerOutputReference({ ...engineProbe, extension: "cwasm" }),
-    formatter: {
-      generatedC: generatedCReference,
-      generatedCIdentity: generatedC.entry.identity,
-      generatedSource: {
-        sha256: generatedC.entry.artifactSha256,
-        size: generatedC.entry.artifactSize,
-      },
-      object: picObjectReference,
-      objectIdentity: picObject.entry.identity,
-    },
-    kind: "convex-wasm-official-output-module-graph-compiler-output-cache-v4",
-    ...(compactRecord
-      ? {
-          reusableCodeIdentitySha256s: ["8".repeat(64), "9".repeat(64)],
-          structuralTopologySha256: "c".repeat(64),
-        }
-      : {}),
-    schemaVersion: recordSchemaVersion,
-  };
-  const compilerOutput = await writeGenericArtifact({
-    cacheLayout,
-    extension: "json",
-    identity: compilerOutputCacheIdentity(descriptor.identitySha256),
-    metadata: {
-      kind: "convex-wasm-official-output-module-graph-compiler-output-cache-v4",
-    },
-    payload: `${canonicalJson(record)}\n`,
-    stage: "module-graph-compiler-output",
-  });
-  return { compilerOutput, dependencies: [generatedC, picObject, engineProbe], record };
-}
-
-async function writeCohortCapsuleFixture(cacheLayout, compilerOutput, record) {
-  const topologyStageCertificate = (reference, extension, includeIdentity) => ({
-    artifactSha256: reference.entry.artifactSha256,
-    artifactSize: reference.entry.artifactSize,
-    cacheKey: reference.report.cacheKey,
-    extension,
-    ...(includeIdentity ? { identity: reference.entry.identity } : {}),
-    identitySha256: fingerprintJson(reference.entry.identity),
-    stage: reference.report.stage,
-  });
-  const topologyCacheIdentity = {
-    compilerOutputCacheIdentity: compilerOutput.entry.identity,
-    compilerOutputCacheKey: compilerOutput.key,
-    kind: "convex-wasm-official-output-module-graph-compiler-output-topology-cache-v4",
-  };
-  const cacheRecordSha256 = createHash("sha256")
-    .update(Buffer.from(canonicalJson(record)))
-    .digest("hex");
-  assert.notEqual(cacheRecordSha256, compilerOutput.entry.artifactSha256);
-  const descriptor =
-    record.schemaVersion === 5
-      ? record.descriptor
-      : compilerOutputTopologyDescriptor(record.descriptor);
-  const certificate = {
-    applicationUnits: record.applicationUnits.map((unit) => ({
-      generatedC: topologyStageCertificate(unit.generatedC, "c", false),
-      picObject: topologyStageCertificate(unit.picObject, "o", false),
-    })),
-    bridge: {
-      generatedC: topologyStageCertificate(record.bridge.generatedC, "c", true),
-      object: topologyStageCertificate(record.bridge.object, "o", true),
-    },
-    cacheKey: compilerOutput.key,
-    // Topology certificates bind canonical record bytes without the artifact file's trailing
-    // newline. This mirrors publishModuleGraphCompilerOutputCache exactly.
-    cacheRecordSha256,
-    descriptor,
-    engine: record.engine,
-    engineProbe: topologyStageCertificate(record.engineProbe, "cwasm", false),
-    formatter: {
-      generatedC: topologyStageCertificate(record.formatter.generatedC, "c", true),
-      object: topologyStageCertificate(record.formatter.object, "o", true),
-    },
-    kind: "convex-wasm-official-output-module-graph-compiler-output-topology-cache-v4",
-    schemaVersion: 4,
-  };
-  const topologyCertificate = await writeGenericArtifact({
-    cacheLayout,
-    extension: "json",
-    identity: topologyCacheIdentity,
-    metadata: {
-      kind: "convex-wasm-official-output-module-graph-compiler-output-topology-cache-v4",
-    },
-    payload: `${canonicalJson(certificate)}\n`,
-    stage: "module-graph-compiler-output-topology",
-  });
-  const capsuleIdentityPayload = {
-    chunkBindingSha256: "b".repeat(64),
-    cohort: { cohortId: "1".repeat(64), entries: [{ fixture: "entry" }], entryCount: 1 },
-    esbuild: { version: "fixture" },
-    kind: "convex-wasm-official-output-cohort-planning-capsule-v6",
-    policies: { fixture: "policies" },
-    schemaVersion: 6,
-    sourceEnvelope: { fixture: "source-envelope" },
-  };
-  const capsuleIdentity = {
-    ...capsuleIdentityPayload,
-    sha256: fingerprintJson(capsuleIdentityPayload),
-  };
-  const capsule = await writeGenericArtifact({
-    cacheLayout,
-    extension: "json",
-    identity: {
-      capsuleIdentity,
-      kind: "convex-wasm-official-output-cohort-planning-capsule-v6",
-      schemaVersion: 6,
-    },
-    metadata: {
-      kind: "convex-wasm-official-output-cohort-planning-capsule-v6",
-      schemaVersion: 6,
-    },
-    payload: `${canonicalJson({
-      identity: capsuleIdentity,
-      kind: "convex-wasm-official-output-cohort-planning-capsule-v6",
-      planning: {
-        topology: {
-          cacheIdentity: compilerOutput.entry.identity,
-          cacheKey: compilerOutput.key,
-          cacheRecordSha256,
-          certificateCacheKey: topologyCertificate.key,
-          descriptor: certificate.descriptor,
-        },
-      },
-      schemaVersion: 6,
-      sourceEnvelopeSha256: "2".repeat(64),
-    })}\n`,
-    stage: "module-graph-cohort-planning-capsule",
-  });
-  return { capsule, topologyCertificate };
-}
-
-async function materializeModuleGraphPackageFixture(value) {
-  const source = JSON.parse(
-    await fs.readFile(
-      new URL("../test-fixtures/convex-wasm-module-graph-registry/fixture.json", import.meta.url),
-      "utf8"
-    )
-  );
-  const moduleGraph = source.material.moduleGraph;
-  const cacheLayout = value.layout("retention-closure");
-  const writeFiles = async (directory, files) => {
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    for (const file of files) {
-      await fs.writeFile(join(directory, file.name), Buffer.from(file.base64, "base64"), {
-        mode: 0o600,
-      });
-    }
-  };
-  await writeFiles(
-    join(cacheLayout.immutable.packages, moduleGraph.graphManifestSha256),
-    moduleGraph.packageFiles
-  );
-  for (const artifact of moduleGraph.artifactEntries) {
-    await writeFiles(
-      join(cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey),
-      artifact.files
-    );
-  }
-  const manifestPath = join(value.root, source.material.deployment.name);
-  await fs.writeFile(
-    manifestPath,
-    Buffer.from(source.material.deployment.base64, "base64"),
-    { mode: 0o600 }
-  );
-  const graphManifestSha256 = moduleGraph.graphManifestSha256;
-  const verified = await loadAndVerifyConvexWasmModuleGraphPackage({
-    cacheLayout,
-    cacheRoot: value.cacheRoot,
-    graphManifestSha256,
-    packagePath: join(cacheLayout.immutable.packages, graphManifestSha256),
-  });
-  return {
-    cacheLayout,
-    graphManifest: verified.graphManifest,
-    graphManifestSha256,
-    manifest: JSON.parse(await fs.readFile(manifestPath, "utf8")),
-    packageMaterial: verified.packageMaterial,
-  };
-}
-
-async function writeLegacyDeploymentResultCertificate({
-  cacheLayout,
-  graphManifest,
-  graphManifestSha256,
-  manifest,
-  packageMaterial,
-  schemaVersion = 3,
-}) {
-  assert.ok([1, 2, 3, 4].includes(schemaVersion));
-  if (schemaVersion <= 2) assert.notEqual(graphManifest, undefined);
-  const lookupIdentity = { fixture: "cache-retention-legacy-certificate" };
-  const payload = {
-    kind: "convex-wasm-deployment-result-certificate-v2",
-    lookupIdentity,
-    manifest,
-    ...(schemaVersion === 3 || schemaVersion === 4
-      ? { packageReferences: [{ graphManifestSha256, packageMaterial }] }
-      : {
-          packageGraphs: [{
-            graphManifest,
-            graphManifestSha256,
-            ...(schemaVersion === 2 ? { packageMaterial } : {}),
-          }],
-        }),
-    schemaVersion,
-  };
-  const certificate = { ...payload, certificateSha256: fingerprintJson(payload) };
-  const root = join(
-    cacheLayout.immutable.packages,
-    "deployment-results",
-    "v1",
-    fingerprintJson(lookupIdentity)
-  );
-  const path = join(root, certificate.certificateSha256);
-  await fs.mkdir(path, { mode: 0o700, recursive: true });
-  for (const directory of [
-    cacheLayout.immutable.root,
-    cacheLayout.immutable.packages,
-    join(cacheLayout.immutable.packages, "deployment-results"),
-    join(cacheLayout.immutable.packages, "deployment-results", "v1"),
-    root,
-    path,
-  ]) {
-    await fs.chmod(directory, 0o700);
-  }
-  await Promise.all([
-    fs.writeFile(join(path, "certificate.json"), `${canonicalJson(certificate)}\n`, {
-      mode: 0o600,
-    }),
-    fs.writeFile(join(path, "COMPLETE"), `${certificate.certificateSha256}\n`, {
-      mode: 0o600,
-    }),
-  ]);
-  return certificate;
-}
+import {
+  writeGenericArtifact,
+  ageGenericArtifact,
+  ageTree,
+  packageFileMaterial,
+  writeLegacyV2ModuleGraphPackage,
+  writeCBundleArtifact,
+  compilerOutputReference,
+  compilerOutputCacheIdentity,
+  writeCompilerOutputFixture,
+  writeCohortCapsuleFixture,
+  materializeModuleGraphPackageFixture,
+  writeLegacyDeploymentResultCertificate
+} from "../test-fixtures/cache-retention.mjs";
 
 test("successful builds remove their object-level work root", async (t) => {
   const value = await fixture(t);
@@ -798,6 +113,94 @@ test("successful builds remove their object-level work root", async (t) => {
     await lease.complete(2_000);
   });
   await assert.rejects(fs.lstat(layout.work.buildRoot), { code: "ENOENT" });
+});
+
+test("work cleanup and lease completion drain admitted deletions before lock release", async (t) => {
+  for (const boundary of ["maintenance", "lease-completion"]) {
+    await t.test(boundary, async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("work-deletion-drain");
+      let held = false;
+      const cacheLock = {
+        acquire() { assert.equal(held, false); held = true; return () => { held = false; }; },
+        inheritedAuthorityEnvironment() { return {}; },
+        requireAuthority() { assert.equal(held, true); },
+      };
+      const releaseSetup = cacheLock.acquire();
+      let lease;
+      const recordPath = join(cacheLayout.work.buildRoot, convexWasmBuildWorkRecordName);
+      const delayedPath = join(cacheLayout.work.scratch, "delayed-output");
+      try {
+        lease = await createConvexWasmBuildWorkLease({ cacheLayout, cacheLock, nowMs: 1_000 });
+        await fs.mkdir(cacheLayout.work.scratch, { mode: 0o700 });
+        await fs.writeFile(delayedPath, "output", { mode: 0o600 });
+        if (boundary === "maintenance") {
+          const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+          await fs.writeFile(recordPath, `${JSON.stringify({
+            ...record, status: "completed", updatedAtMs: 2_000,
+            outcome: { kind: "deployment-completed", completedAtMs: 2_000 },
+          })}\n`);
+        }
+      } finally { releaseSetup(); }
+
+      const started = Promise.withResolvers();
+      const delayed = Promise.withResolvers();
+      const failed = Promise.withResolvers();
+      const unlink = fs.unlink;
+      fs.unlink = async (path, ...args) => {
+        if (path === recordPath) {
+          await started.promise;
+          failed.resolve();
+          throw new Error("synthetic work unlink failure");
+        }
+        if (path === delayedPath) {
+          started.resolve();
+          await delayed.promise;
+          assert.equal(held, true, "admitted nested output deletion must remain under the lock");
+        }
+        return await unlink(path, ...args);
+      };
+      const options = maintenanceOptions(value, { apply: true, automaticImmutableSweep: true,
+        immutableHighWatermarkAllocatedBytes: 1, cacheLock, nowMs: 3_000 });
+      const operation = boundary === "maintenance"
+        ? maintainConvexWasmCache(options)
+        : (async () => {
+            const release = cacheLock.acquire();
+            try {
+              try { await lease.complete(2_000); }
+              catch (error) {
+                // Match callers that report deployment failure after completed-root cleanup
+                // fails: this must preserve the already-written completion authority.
+                await lease.fail(2_001);
+                throw error;
+              }
+            } finally { release(); }
+          })();
+      let settled = false;
+      const result = operation.then(
+        () => { settled = true; return undefined; },
+        (error) => { settled = true; return error; }
+      );
+      try {
+        await failed.promise;
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(held, true);
+        assert.equal(settled, false);
+        delayed.resolve();
+        assert.match((await result).message, /synthetic work unlink failure/u);
+        assert.equal(held, false);
+      } finally { delayed.resolve(); await result; fs.unlink = unlink; }
+      const completed = JSON.parse(await fs.readFile(recordPath, "utf8"));
+      assert.equal(completed.status, "completed");
+      assert.deepEqual(completed.outcome, { kind: "deployment-completed", completedAtMs: 2_000 });
+      await assert.rejects(fs.lstat(delayedPath), { code: "ENOENT" });
+      await assert.rejects(fs.lstat(join(value.cacheRoot, "automatic-maintenance.json")), { code: "ENOENT" });
+      const retry = await maintainConvexWasmCache(options);
+      assert.equal(retry.work.roots[0].action, "remove");
+      assert.equal(retry.work.roots[0].status, "completed");
+      await assert.rejects(fs.lstat(cacheLayout.work.buildRoot), { code: "ENOENT" });
+    });
+  }
 });
 
 test("failed work has bounded recovery and is removed after expiry", async (t) => {
@@ -3502,17 +2905,17 @@ test("automatic maintenance recovers quarantined entries below its high watermar
     automaticImmutableSweep: true,
     immutableHighWatermarkAllocatedBytes: 512 * 1024,
   });
-  const originalRm = fs.rm;
-  fs.rm = async (path, options) => {
-    if (path.includes("immutable-sweep-trash") && options?.recursive) {
+  const readdir = fs.readdir;
+  fs.readdir = async (path, ...args) => {
+    if (path.includes("immutable-sweep-trash") && currentConvexWasmRetentionPhase() === "unlink") {
       throw new Error("synthetic automatic sweep interruption");
     }
-    return await originalRm(path, options);
+    return await readdir(path, ...args);
   };
   try {
     await assert.rejects(maintainConvexWasmCache(options), /synthetic automatic sweep interruption/u);
   } finally {
-    fs.rm = originalRm;
+    fs.readdir = readdir;
   }
   const recovered = await maintainConvexWasmCache(options);
   assert.ok(recovered.immutable.automaticSweep.occupancy.uniqueAllocatedBytes < options.immutableHighWatermarkAllocatedBytes);
@@ -3563,6 +2966,533 @@ test("automatic maintenance shares its interval across calls while explicit swee
     immutableSweep: true,
   });
   await assert.rejects(fs.lstat(third), { code: "ENOENT" });
+});
+
+test("a recent automatic receipt cannot suppress explicit sweep recovery or authorize new eviction", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("cooldown-recovery");
+  const options = maintenanceOptions(value, {
+    apply: true, automaticImmutableSweep: true, immutableHighWatermarkAllocatedBytes: 1,
+    nowMs: 2_000_000_000,
+  });
+  await maintainConvexWasmCache(options);
+  const receiptPath = join(value.cacheRoot, "automatic-maintenance.json");
+  const receipt = await fs.readFile(receiptPath, "utf8");
+  const interrupted = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "interrupted", stage: "interrupted" });
+  await ageGenericArtifact(cacheLayout, interrupted);
+  const readdir = fs.readdir;
+  fs.readdir = async (path, ...args) => {
+    if (path.includes("immutable-sweep-trash") && currentConvexWasmRetentionPhase() === "unlink") throw new Error("synthetic explicit failure");
+    return await readdir(path, ...args);
+  };
+  try {
+    await assert.rejects(maintainConvexWasmCache({ ...options, automaticImmutableSweep: false, immutableSweep: true }), /synthetic explicit failure/u);
+  } finally { fs.readdir = readdir; }
+  assert.equal(await fs.readFile(receiptPath, "utf8"), receipt);
+  const waiting = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "waiting", stage: "waiting" });
+  await ageGenericArtifact(cacheLayout, waiting);
+  const recovered = await maintainConvexWasmCache({ ...options, nowMs: options.nowMs + 1 });
+  assert.equal(recovered.immutable.sweep.termination, "recovery-completed");
+  assert.equal(recovered.immutable.sweep.recovered.length, 1);
+  assert.deepEqual(recovered.immutable.sweep.removed, []);
+  assert.equal(recovered.immutable.plan, undefined);
+  assert.equal(await fs.readFile(receiptPath, "utf8"), receipt);
+  await fs.lstat(join(cacheLayout.immutable.artifacts, waiting.stage, waiting.key));
+  const deferred = await maintainConvexWasmCache({ ...options, nowMs: options.nowMs + 2 });
+  assert.equal(deferred.kind, "convex-wasm-cache-maintenance-deferred-v1");
+});
+
+test("maintenance stamps completion after the work has finished", async (t) => {
+  const value = await fixture(t);
+  const startedAtMs = 2_000_000_000;
+  let clockCalls = 0;
+  const completedAtMs = startedAtMs + 20 * 60 * 1000;
+  const options = maintenanceOptions(value, {
+    apply: true, automaticImmutableSweep: true, immutableHighWatermarkAllocatedBytes: 1,
+    clock: () => ++clockCalls === 1 ? startedAtMs : completedAtMs,
+  });
+  await maintainConvexWasmCache(options);
+  assert.equal(clockCalls, 2);
+  const next = await maintainConvexWasmCache({ ...options, clock: () => completedAtMs + 1 });
+  assert.equal(next.kind, "convex-wasm-cache-maintenance-deferred-v1");
+  assert.equal(next.nextDueAtMs, completedAtMs + 15 * 60 * 1000);
+});
+
+test("maintenance advances four layers with one inventory and fresh cross-wave hardlink witnesses", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("four-wave-maintenance");
+  const { compilerOutput, dependencies, record } = await writeCompilerOutputFixture(cacheLayout);
+  const { capsule, topologyCertificate } = await writeCohortCapsuleFixture(cacheLayout, compilerOutput, record);
+  const recordPath = join(cacheLayout.immutable.artifacts, compilerOutput.stage, compilerOutput.key, compilerOutput.entry.artifactFile);
+  const alias = await writeGenericArtifact({ cacheLayout, extension: "json", metadata: {}, payload: await fs.readFile(recordPath), stage: "cross-wave-alias" });
+  const aliasPath = join(cacheLayout.immutable.artifacts, alias.stage, alias.key, alias.entry.artifactFile);
+  await fs.unlink(aliasPath);
+  await fs.link(recordPath, aliasPath);
+  for (const entry of [compilerOutput, ...dependencies, capsule, topologyCertificate, alias]) await ageGenericArtifact(cacheLayout, entry);
+  const retained = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "unchanged retained bytes", stage: "retained-payload" });
+  const retainedPath = join(cacheLayout.immutable.artifacts, retained.stage, retained.key, retained.entry.artifactFile);
+  const open = fs.open;
+  let retainedOpens = 0;
+  fs.open = async (...args) => { if (args[0] === retainedPath) retainedOpens += 1; return await open(...args); };
+  let result;
+  try {
+    result = await maintainConvexWasmCache(maintenanceOptions(value, { apply: true, immutableSweep: true, immutableHighWatermarkAllocatedBytes: 1, nowMs: Date.now() }));
+  } finally { fs.open = open; }
+  assert.equal(result.diagnostics.phases.inventory.calls, 1);
+  assert.equal(result.diagnostics.phases.immutableOccupancy.calls, 5);
+  assert.equal(retainedOpens, 1);
+  assert.equal(result.immutable.sweep.waves.length, 4);
+  assert.equal(result.immutable.sweep.removed.length, 7);
+  assert.equal(result.immutable.sweep.termination, "no-eligible-candidates");
+  assert.equal(result.immutable.sweep.remainingExcessBytes, result.immutable.sweep.remainingAllocatedBytes - 1);
+  assert.equal(result.immutable.plan.evictions.length, 0);
+  assert.deepEqual(result.immutable.plan.retained.artifacts, [`${retained.stage}\0${retained.key}`]);
+  assert.equal(await fs.readFile(retainedPath, "utf8"), "unchanged retained bytes");
+});
+
+test("unchanged retained authentication and structured parsing do not grow across deletion waves", async (t) => {
+  const arms = [];
+  const nowMs = Date.now();
+  for (const waveCount of [1, 4]) {
+    const value = await fixture(t);
+    const material = await materializeModuleGraphPackageFixture(value);
+    const { cacheLayout } = material;
+    const certificate = await writeLegacyDeploymentResultCertificate(material);
+    const disposable = await writeCompilerOutputFixture(cacheLayout);
+    const disposableCapsule = await writeCohortCapsuleFixture(cacheLayout, disposable.compilerOutput, disposable.record);
+    // The fixture's capsule identity is fixed. Give the disposable capsule its own
+    // authenticated identity before constructing the independent retained closure.
+    const oldCapsule = disposableCapsule.capsule;
+    const oldCapsuleRoot = join(cacheLayout.immutable.artifacts, oldCapsule.stage, oldCapsule.key);
+    const oldPayload = JSON.parse(await fs.readFile(join(oldCapsuleRoot, oldCapsule.entry.artifactFile), "utf8"));
+    const { sha256: ignoredDigest, ...oldIdentity } = oldPayload.identity;
+    const identityPayload = { ...oldIdentity, policies: { fixture: "disposable" } };
+    oldPayload.identity = { ...identityPayload, sha256: fingerprintJson(identityPayload) };
+    const separateCapsule = await writeGenericArtifact({
+      cacheLayout, extension: "json", stage: oldCapsule.stage, metadata: oldCapsule.entry.metadata,
+      identity: { ...oldCapsule.entry.identity, capsuleIdentity: oldPayload.identity },
+      payload: `${canonicalJson(oldPayload)}\n`,
+    });
+    await fs.rm(oldCapsuleRoot, { recursive: true });
+    for (const entry of [disposable.compilerOutput, ...disposable.dependencies, disposableCapsule.topologyCertificate, separateCapsule]) {
+      await ageGenericArtifact(cacheLayout, entry);
+    }
+
+    const generatedCIdentity = {
+      exportedUnitName: "this_unit", flags: ["-Xemit-c-bundle", "-Xemit-c-layout"],
+      generatedSource: { sha256: "a".repeat(64), size: 10 },
+      semanticEnvironment: { LANG: "C" }, staticHermes: { materials: "b".repeat(64) },
+      unitRole: "untyped-official-chunk",
+    };
+    const selection = await planStaticHermesRetainedLayout({ cacheLayout, generatedCIdentity, stage: "retained-generated-c" });
+    const bundle = await writeCBundleArtifact({
+      cacheLayout, stage: "retained-generated-c", identity: selection.identity,
+      retainedLayout: '{"kind":"static-hermes-c-layout-v1","unitName":"this_unit"}\n',
+    });
+    await publishStaticHermesRetainedLayout({ cacheLayout, generatedCEntry: { ...bundle.entry, bundlePath: bundle.root } });
+    const layoutReferences = staticHermesLayoutCacheReferences(selection.identity, bundle.stage);
+    for (const reference of layoutReferences) {
+      const entryPath = join(cacheLayout.immutable.artifacts, reference.stage, reference.key, "entry.json");
+      const entry = JSON.parse(await fs.readFile(entryPath, "utf8"));
+      // Imported/legacy entries have no physical admission receipt. Exercise full
+      // payload hashing rather than letting fresh fixture publication skip it.
+      delete entry.admission;
+      await fs.writeFile(entryPath, `${canonicalJson(entry)}\n`);
+      await ageGenericArtifact(cacheLayout, reference);
+    }
+    const object = await writeGenericArtifact({ cacheLayout, extension: "o", stage: "retained-object", metadata: {}, payload: "retained object" });
+    const probe = await writeGenericArtifact({ cacheLayout, extension: "cwasm", stage: "retained-probe", metadata: {}, payload: "retained probe" });
+    const generatedC = compilerOutputReference({ ...bundle, extension: "c-bundle" });
+    const picObject = compilerOutputReference({ ...object, extension: "o" });
+    const record = structuredClone(disposable.record);
+    record.descriptor.applicationIdentitySha256 = "e".repeat(64);
+    record.descriptor.identitySha256 = "e".repeat(64);
+    record.applicationUnits = record.applicationUnits.map(() => ({ generatedC, picObject }));
+    record.engineProbe = compilerOutputReference({ ...probe, extension: "cwasm" });
+    for (const stage of [record.bridge, record.formatter]) {
+      Object.assign(stage, {
+        generatedC, generatedCIdentity: bundle.entry.identity,
+        object: picObject, objectIdentity: object.entry.identity,
+      });
+    }
+    const compilerOutput = await writeGenericArtifact({
+      cacheLayout, extension: "json", stage: disposable.compilerOutput.stage,
+      identity: compilerOutputCacheIdentity(record.descriptor.identitySha256),
+      metadata: disposable.compilerOutput.entry.metadata, payload: `${canonicalJson(record)}\n`,
+    });
+    const retainedCapsule = await writeCohortCapsuleFixture(cacheLayout, compilerOutput, record);
+    const capsule = retainedCapsule.capsule;
+    const topology = retainedCapsule.topologyCertificate;
+    const topologyPayload = JSON.parse(await fs.readFile(join(cacheLayout.immutable.artifacts, topology.stage, topology.key, topology.entry.artifactFile), "utf8"));
+    // The shared fixture writes single-C references; this closure exercises C bundles.
+    for (const unit of [topologyPayload.bridge, topologyPayload.formatter, ...topologyPayload.applicationUnits]) {
+      unit.generatedC.extension = "c-bundle";
+    }
+    const topologyCertificate = await writeGenericArtifact({
+      cacheLayout, extension: "json", stage: topology.stage,
+      identity: topology.entry.identity, metadata: topology.entry.metadata,
+      payload: `${canonicalJson(topologyPayload)}\n`,
+    });
+    // Keep the compiler/package authorities by a durable snapshot, not by creation time.
+    const snapshot = await withHeavyLock(value.environment, () => recordConvexWasmSuccessfulCacheUse({
+      buildId: "retained-work", cacheLayout, environment: value.environment, recordedAtMs: 1_000,
+      deployment: {
+        manifest: material.manifest,
+        buildReport: {
+          cache: { certificateSha256: certificate.certificateSha256 },
+          artifacts: [{ buildReport: { compilerOutputCache: { cacheKey: compilerOutput.key } } }],
+        },
+      },
+    }));
+    const certificateRoot = join(cacheLayout.immutable.packages, "deployment-results", "v1", fingerprintJson(certificate.lookupIdentity));
+    await ageTree(join(cacheLayout.immutable.packages, material.graphManifestSha256));
+    await ageTree(certificateRoot);
+    for (const entry of [compilerOutput, topologyCertificate, bundle, object, probe]) await ageGenericArtifact(cacheLayout, entry);
+    for (const reference of material.packageMaterial.artifactReferences) {
+      for (const { artifact } of [reference.aot, reference.coreWasm]) {
+        await ageGenericArtifact(cacheLayout, { stage: artifact.stage, key: artifact.cacheKey });
+      }
+    }
+    const targets = new Map();
+    const addTarget = async (path, requiresHash, family) => {
+      const bytes = await fs.readFile(path);
+      const label = path.slice(value.cacheRoot.length + 1);
+      assert.equal(targets.has(path), false);
+      // A changed shared inode legitimately requires new byte checks. The companion
+      // four-wave hardlink regression covers that case; this arm measures unchanged files.
+      assert.equal((await fs.lstat(path)).nlink, 1);
+      targets.set(path, { label, requiresHash, family, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });
+    };
+    for (const entry of [compilerOutput, topologyCertificate, capsule, object, probe]) {
+      await addTarget(join(cacheLayout.immutable.artifacts, entry.stage, entry.key, entry.entry.artifactFile), true, entry.stage);
+    }
+    for (const member of [bundle.entry.bundle.manifest, bundle.entry.bundle.header, ...bundle.entry.bundle.translationUnits, bundle.entry.bundle.layout]) {
+      await addTarget(join(bundle.root, member.path), true, "c-bundle");
+    }
+    for (const reference of layoutReferences) {
+      await addTarget(join(cacheLayout.immutable.artifacts, reference.stage, reference.key, "artifact.json"), true, reference.stage);
+    }
+    for (const reference of material.packageMaterial.artifactReferences) {
+      for (const [kind, extension] of [["aot", "cwasm"], ["coreWasm", "wasm"]]) {
+        const artifact = reference[kind].artifact;
+        await addTarget(join(cacheLayout.immutable.artifacts, artifact.stage, artifact.cacheKey, `artifact.${extension}`), true, "package-payloads");
+      }
+    }
+    for (const name of ["graph-manifest.json", "build-provenance.json", "package-entry.json"]) {
+      await addTarget(join(cacheLayout.immutable.packages, material.graphManifestSha256, name), true, "package");
+    }
+    await addTarget(join(certificateRoot, certificate.certificateSha256, "certificate.json"), false, "certificate");
+    await addTarget(join(value.cacheRoot, "state", "v1", "cache-retention", "v1", "recent-success", `${snapshot.snapshotSha256}.json`), false, "snapshot");
+    const contents = [...targets.values()].map(({ label, sha256 }) => [label, sha256]).sort();
+    if (arms.length !== 0) assert.deepEqual(contents, arms[0].contents, "both arms must contain identical retained bytes");
+
+    const occupancy = await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root);
+    const measurements = Object.fromEntries([...targets.values()].map(({ label }) => [label, {
+      readBytes: 0, fullFileHashes: 0, fullFileHashBytes: 0, parses: 0, phases: {},
+    }]));
+    const jsonSources = new Map();
+    for (const { label, bytes } of targets.values()) {
+      if (!label.endsWith(".json")) continue;
+      const source = bytes.toString("utf8");
+      if (!jsonSources.has(source)) jsonSources.set(source, []);
+      jsonSources.get(source).push(label);
+    }
+    const observe = (label, field, amount) => {
+      const row = measurements[label];
+      row[field] += amount;
+      const phase = currentConvexWasmRetentionPhase();
+      assert.notEqual(phase, undefined);
+      row.phases[phase] ??= { readBytes: 0, fullFileHashes: 0, fullFileHashBytes: 0, parses: 0 };
+      row.phases[phase][field] += amount;
+    };
+    // Attribute hashes to the exact ArrayBuffer extents populated by real file reads.
+    // Digest completion must cover the whole file and match its independently saved
+    // SHA-256. Read bytes alone are deliberately not called authenticated bytes.
+    const readExtents = new WeakMap();
+    const hashInputs = new WeakMap();
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256"));
+    const original = { open: fs.open, parse: JSON.parse, update: hashPrototype.update, digest: hashPrototype.digest };
+    fs.open = async (path, ...args) => {
+      const handle = await original.open(path, ...args);
+      const target = targets.get(path);
+      if (target !== undefined) {
+        const read = handle.read;
+        handle.read = async function (buffer, offset, ...args) {
+          const result = await read.call(this, buffer, offset, ...args);
+          const start = buffer.byteOffset + offset;
+          const end = start + result.bytesRead;
+          const extents = readExtents.get(buffer.buffer) ?? [];
+          readExtents.set(buffer.buffer, [...extents.filter((extent) => extent.end <= start || extent.start >= end), { start, end, target }]);
+          observe(target.label, "readBytes", result.bytesRead);
+          return result;
+        };
+      }
+      return handle;
+    };
+    hashPrototype.update = function (data, ...args) {
+      if (Buffer.isBuffer(data)) {
+        const extent = readExtents.get(data.buffer)?.find(({ start, end }) => start <= data.byteOffset && end >= data.byteOffset + data.byteLength);
+        if (extent !== undefined) {
+          const inputs = hashInputs.get(this) ?? [];
+          inputs.push({ target: extent.target, bytes: data.byteLength });
+          hashInputs.set(this, inputs);
+        }
+      }
+      return original.update.call(this, data, ...args);
+    };
+    hashPrototype.digest = function (...args) {
+      const digest = original.digest.apply(this, args);
+      const inputs = hashInputs.get(this);
+      if (inputs !== undefined) {
+        const target = inputs[0].target;
+        const bytes = inputs.reduce((total, input) => total + input.bytes, 0);
+        if (inputs.every((input) => input.target === target) && bytes === target.bytes.length &&
+            (Buffer.isBuffer(digest) ? digest.toString("hex") : digest) === target.sha256) {
+          observe(target.label, "fullFileHashes", 1);
+          observe(target.label, "fullFileHashBytes", bytes);
+        }
+      }
+      return digest;
+    };
+    JSON.parse = function (source, ...args) {
+      for (const label of jsonSources.get(source) ?? []) observe(label, "parses", 1);
+      return original.parse.call(this, source, ...args);
+    };
+    let result;
+    try {
+      result = await maintainConvexWasmCache(maintenanceOptions(value, {
+        apply: true, immutableSweep: true, nowMs,
+        immutableHighWatermarkAllocatedBytes: waveCount === 1 ? occupancy.uniqueAllocatedBytes - 1 : 1,
+      }));
+    } finally {
+      fs.open = original.open;
+      JSON.parse = original.parse;
+      hashPrototype.update = original.update;
+      hashPrototype.digest = original.digest;
+    }
+    assert.equal(result.immutable.sweep.waves.length, waveCount);
+    assert.equal(result.immutable.sweep.removed.length, waveCount === 1 ? 1 : 6);
+    assert.equal(result.diagnostics.counts.inventoryBuilds, 1);
+    for (const { label, requiresHash, family, bytes } of targets.values()) {
+      const row = measurements[label];
+      assert.ok(row.readBytes >= bytes.length, `${label} must be read during maintenance`);
+      if (requiresHash) assert.ok(row.fullFileHashes > 0, `${label} must undergo full payload hashing`);
+      if (["package", "certificate", "snapshot"].includes(family) || label.endsWith(`/${bundle.entry.bundle.manifest.path}`)) {
+        assert.ok(row.parses > 0, `${label} must be structurally interpreted`);
+      }
+      assert.deepEqual(Object.keys(row.phases), ["inventory"], `${label} must not be reprocessed during deletion or later planning`);
+    }
+    for (const entry of [compilerOutput, topologyCertificate, capsule]) {
+      const label = `immutable/v6/artifacts/${entry.stage}/${entry.key}/${entry.entry.artifactFile}`;
+      assert.equal(measurements[label].parses, 1, `${entry.stage} is interpreted once`);
+    }
+    for (const path of targets.keys()) await fs.lstat(path);
+    const summary = {};
+    for (const { family, label } of targets.values()) {
+      summary[family] ??= { files: 0, readBytes: 0, fullFileHashes: 0, fullFileHashBytes: 0, parses: 0 };
+      summary[family].files += 1;
+      for (const field of ["readBytes", "fullFileHashes", "fullFileHashBytes", "parses"]) summary[family][field] += measurements[label][field];
+    }
+    arms.push({ contents, measurements, summary });
+  }
+  assert.deepEqual(arms[1].measurements, arms[0].measurements,
+    "unchanged retained file authentication, reads and structured parsing must be independent of deletion-wave count");
+  t.diagnostic(`Identical retained work in one and four waves: ${JSON.stringify(arms[0].summary)}`);
+});
+
+test("cached inventory rejects changed retained authority before advancing a wave", async (t) => {
+  for (const mutation of ["rewrite-restored-mtime", "replacement", "permission", "new-authority", "redirected-ancestor", "shared-rewrite"]) {
+    await t.test(mutation, async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("changed-authority");
+      const { compilerOutput, dependencies, record } = await writeCompilerOutputFixture(cacheLayout);
+      const { capsule, topologyCertificate } = await writeCohortCapsuleFixture(cacheLayout, compilerOutput, record);
+      for (const entry of [compilerOutput, ...dependencies, capsule, topologyCertificate]) await ageGenericArtifact(cacheLayout, entry);
+      const recordRoot = join(cacheLayout.immutable.artifacts, compilerOutput.stage, compilerOutput.key);
+      const recordPath = join(recordRoot, compilerOutput.entry.artifactFile);
+      if (mutation === "shared-rewrite") {
+        const alias = await writeGenericArtifact({ cacheLayout, extension: "json", metadata: {}, payload: await fs.readFile(recordPath), stage: "cross-wave-alias" });
+        const aliasPath = join(cacheLayout.immutable.artifacts, alias.stage, alias.key, alias.entry.artifactFile);
+        await fs.unlink(aliasPath);
+        await fs.link(recordPath, aliasPath);
+        await ageGenericArtifact(cacheLayout, alias);
+      }
+      const rmdir = fs.rmdir;
+      let changed = false;
+      fs.rmdir = async (path, ...args) => {
+        const result = await rmdir(path, ...args);
+        if (!String(path).endsWith("/immutable-sweep-trash") || changed) return result;
+        changed = true;
+        if (mutation === "rewrite-restored-mtime" || mutation === "shared-rewrite") {
+          const status = await fs.stat(recordPath);
+          const bytes = await fs.readFile(recordPath);
+          bytes[0] = 32;
+          await fs.writeFile(recordPath, bytes);
+          await fs.utimes(recordPath, status.atime, status.mtime);
+        } else if (mutation === "replacement") {
+          const status = await fs.stat(recordPath);
+          const bytes = await fs.readFile(recordPath);
+          await fs.rename(recordPath, join(value.root, "old-record"));
+          await fs.writeFile(recordPath, bytes, { mode: 0o600 });
+          await fs.utimes(recordPath, status.atime, status.mtime);
+        } else if (mutation === "permission") {
+          await fs.chmod(recordPath, 0o400);
+        } else if (mutation === "new-authority") {
+          await writeCohortCapsuleFixture(cacheLayout, compilerOutput, record);
+        } else {
+          const stage = join(cacheLayout.immutable.artifacts, compilerOutput.stage);
+          await fs.rename(stage, join(value.root, "redirected-stage"));
+          await fs.symlink(join(value.root, "redirected-stage"), stage);
+        }
+        return result;
+      };
+      try {
+        await assert.rejects(maintainConvexWasmCache(maintenanceOptions(value, {
+          apply: true, immutableSweep: true, immutableHighWatermarkAllocatedBytes: 1, nowMs: Date.now(),
+        })), /immutable (authority|shared file)|removed immutable authority|new immutable authority/u);
+      } finally { fs.rmdir = rmdir; }
+      assert.equal(changed, true);
+      for (const dependency of dependencies) await fs.lstat(join(cacheLayout.immutable.artifacts, dependency.stage, dependency.key));
+    });
+  }
+});
+
+test("immutable occupancy rejects symbolic links inside publication scratch before eviction", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("publication-scratch-link");
+  const artifact = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "old artifact", stage: "publication-scratch-link" });
+  await ageGenericArtifact(cacheLayout, artifact);
+  const artifactRoot = join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key);
+  const scratch = join(cacheLayout.immutable.artifacts, artifact.stage, ".publish-interrupted");
+  await fs.mkdir(scratch, { mode: 0o700 });
+  await fs.symlink(artifactRoot, join(scratch, "redirected"));
+  await assert.rejects(withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc({
+    cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
+  })), /symbolic link/u);
+  await assert.rejects(maintainConvexWasmCache(maintenanceOptions(value, {
+    apply: true, immutableSweep: true, immutableHighWatermarkAllocatedBytes: 1,
+  })), /symbolic link/u);
+  await fs.lstat(artifactRoot);
+});
+
+test("authority fence failure drains admitted metadata reads before releasing the lock", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("fence-read-drain");
+  const paths = [];
+  for (const name of ["failure", "delayed"]) {
+    const entry = await writeGenericArtifact({ cacheLayout, extension: "wasm", identity: { name }, metadata: {}, payload: name, stage: "fence-read-drain" });
+    paths.push(join(cacheLayout.immutable.artifacts, entry.stage, entry.key, entry.entry.artifactFile));
+  }
+  let held = false;
+  const cacheLock = {
+    acquire() { held = true; return () => { held = false; }; },
+    inheritedAuthorityEnvironment() { return {}; },
+    requireAuthority() { assert.equal(held, true); },
+  };
+  const started = Promise.withResolvers();
+  const delayed = Promise.withResolvers();
+  const failed = Promise.withResolvers();
+  const lstat = fs.lstat;
+  fs.lstat = async (path, ...args) => {
+    if (path === paths[0]) {
+      await started.promise;
+      failed.resolve();
+      throw new Error("synthetic fence read failure");
+    }
+    if (path === paths[1]) { started.resolve(); await delayed.promise; }
+    return await lstat(path, ...args);
+  };
+  let settled = false;
+  const result = maintainConvexWasmCache(maintenanceOptions(value, {
+    apply: true, immutableSweep: true, immutableHighWatermarkAllocatedBytes: 1, cacheLock,
+  })).then(() => { settled = true; return undefined; }, (error) => { settled = true; return error; });
+  try {
+    await failed.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(held, true);
+    assert.equal(settled, false);
+    delayed.resolve();
+    assert.match((await result).message, /synthetic fence read failure/u);
+    assert.equal(held, false);
+  } finally { delayed.resolve(); await result; fs.lstat = lstat; }
+});
+
+test("quarantine deletion and recovery drain admitted unlinks before releasing the lock", async (t) => {
+  for (const recovery of [false, true]) {
+    await t.test(recovery ? "recovery" : "new deletion", async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("unlink-drain");
+      const artifact = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "delayed payload", stage: "unlink-drain" });
+      await ageGenericArtifact(cacheLayout, artifact);
+      let held = false;
+      const cacheLock = {
+        acquire() { assert.equal(held, false); held = true; return () => { held = false; }; },
+        inheritedAuthorityEnvironment() { return {}; },
+        requireAuthority() { assert.equal(held, true); },
+      };
+      const options = maintenanceOptions(value, { apply: true, immutableSweep: true,
+        immutableHighWatermarkAllocatedBytes: 1, cacheLock });
+      if (recovery) {
+        const readdir = fs.readdir;
+        fs.readdir = async (path, ...args) => {
+          if (await isVerifiedQuarantineRoot(path)) throw new Error("interrupted before unlink");
+          return await readdir(path, ...args);
+        };
+        try {
+          await assert.rejects(maintainConvexWasmCache(options), /interrupted before unlink/u);
+        } finally { fs.readdir = readdir; }
+      }
+      const started = Promise.withResolvers();
+      const delayed = Promise.withResolvers();
+      const failed = Promise.withResolvers();
+      const unlink = fs.unlink;
+      fs.unlink = async (path, ...args) => {
+        if (path.includes("immutable-sweep-trash") && path.endsWith("/COMPLETE")) {
+          await started.promise;
+          failed.resolve();
+          throw new Error("synthetic child unlink failure");
+        }
+        if (path.includes("immutable-sweep-trash") && path.endsWith("/artifact.wasm")) {
+          started.resolve();
+          await delayed.promise;
+          assert.equal(held, true, "admitted payload unlink must remain under the lock");
+        }
+        return await unlink(path, ...args);
+      };
+      let settled = false;
+      const result = maintainConvexWasmCache(options).then(
+        () => { settled = true; return undefined; },
+        (error) => { settled = true; return error; }
+      );
+      try {
+        await failed.promise;
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(held, true);
+        assert.equal(settled, false);
+        delayed.resolve();
+        assert.match((await result).message, /synthetic child unlink failure/u);
+        assert.equal(held, false);
+      } finally { delayed.resolve(); await result; fs.unlink = unlink; }
+      const retry = await maintainConvexWasmCache(options);
+      assert.equal(retry.immutable.sweep.recovered.length, 1);
+      assert.deepEqual(retry.immutable.sweep.removed, []);
+    });
+  }
+});
+
+test("phase measurements do not change a fixed-time plan identity", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("diagnostic-plan-identity");
+  const artifact = await writeGenericArtifact({ cacheLayout, extension: "wasm", metadata: {}, payload: "retained", stage: "diagnostic-plan-identity" });
+  await ageGenericArtifact(cacheLayout, artifact);
+  const options = maintenanceOptions(value, { apply: true, immutableSweep: true,
+    immutableHighWatermarkAllocatedBytes: Number.MAX_SAFE_INTEGER, nowMs: 2_000_000_000 });
+  const first = await maintainConvexWasmCache(options);
+  const second = await maintainConvexWasmCache(options);
+  assert.equal(first.immutable.plan.planSha256, second.immutable.plan.planSha256);
+  assert.equal(first.immutable.sweep.termination, "watermark-reached");
+  assert.equal(first.diagnostics.counts.inventoryBuilds, 1);
+  assert.equal(first.diagnostics.counts.dedicatedImmutableOccupancyWalks, 0);
 });
 
 test("maintenance keeps its lock until both occupancy reads drain after failure", async (t) => {
@@ -3649,6 +3579,44 @@ test("host lock ownership covers leases, immutable planning and sweeping", async
   assert.deepEqual(report.immutable.sweep.removed.map(({ key }) => key), [artifact.key]);
 });
 
+test("immutable maintenance rejects stale automatic pressure before evicting a candidate", async (t) => {
+  const value = await fixture(t);
+  const cacheLayout = value.layout("stale-automatic-pressure");
+  const artifact = await writeGenericArtifact({
+    cacheLayout, extension: "wasm", metadata: {}, payload: "old candidate",
+    stage: "stale-automatic-pressure",
+  });
+  await ageGenericArtifact(cacheLayout, artifact);
+  const candidatePath = join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key);
+  const scratchPath = join(cacheLayout.immutable.artifacts, artifact.stage, ".publish-interrupted");
+  await fs.mkdir(scratchPath, { mode: 0o700 });
+  await fs.writeFile(join(scratchPath, "payload"), Buffer.alloc(1024 * 1024), { mode: 0o600 });
+  const highWatermark = 512 * 1024;
+  assert.ok((await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes > highWatermark);
+  const lstat = fs.lstat;
+  let changed = false;
+  fs.lstat = async (path, ...args) => {
+    if (!changed && currentConvexWasmRetentionPhase() === "recovery") {
+      changed = true;
+      // Admission has completed, but the inventory's first fence has not been captured.
+      await fs.rm(scratchPath, { recursive: true });
+    }
+    return await lstat(path, ...args);
+  };
+  try {
+    await assert.rejects(maintainConvexWasmCache(maintenanceOptions(value, {
+      apply: true, automaticImmutableSweep: true,
+      immutableHighWatermarkAllocatedBytes: highWatermark, nowMs: 2_000_000_000,
+    })), /immutable occupancy changed after automatic admission/u);
+  } finally {
+    fs.lstat = lstat;
+  }
+  assert.equal(changed, true);
+  assert.ok((await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes < highWatermark);
+  await fs.lstat(candidatePath);
+  await assert.rejects(fs.lstat(join(value.cacheRoot, "automatic-maintenance.json")), { code: "ENOENT" });
+});
+
 test("maintenance preserves entries at the high watermark and stops after reclaiming enough", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("bounded-sweep");
@@ -3724,7 +3692,7 @@ test("immutable sweep handles shared payloads before unlinking or recovering a b
         cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
       };
-      const original = { open: fs.open, rm: fs.rm };
+      const original = { open: fs.open, readdir: fs.readdir };
       let verifiedWrites = 0;
       fs.open = async (path, ...args) => {
         if (typeof path === "string" && path.endsWith(".verified.json") && args[0] === "wx" &&
@@ -3733,12 +3701,12 @@ test("immutable sweep handles shared payloads before unlinking or recovering a b
         }
         return await original.open(path, ...args);
       };
-      fs.rm = async (path, options) => {
-        if (interruption === "partial-removal" && path.includes("immutable-sweep-trash") && options?.recursive) {
-          await original.rm(join(path, "artifact.wasm"));
+      fs.readdir = async (path, ...args) => {
+        if (interruption === "partial-removal" && await isVerifiedQuarantineRoot(path)) {
+          await fs.unlink(join(path, "artifact.wasm"));
           throw new Error("synthetic shared payload interruption");
         }
-        return await original.rm(path, options);
+        return await original.readdir(path, ...args);
       };
       let result;
       try {
@@ -3859,16 +3827,16 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
     stage: "sweep-removal-failure",
   });
   const artifactPath = join(cacheLayout.immutable.artifacts, artifact.stage, artifact.key);
-  const originalRm = fs.rm;
+  const readdir = fs.readdir;
   let removalAttempted = false;
-  fs.rm = async (path, options) => {
-    if (path.includes("immutable-sweep-trash") && options?.recursive) {
+  fs.readdir = async (path, ...args) => {
+    if (await isVerifiedQuarantineRoot(path)) {
       removalAttempted = true;
       throw Object.assign(new Error("synthetic immutable trash removal failure"), {
         code: "EIO",
       });
     }
-    return await originalRm(path, options);
+    return await readdir(path, ...args);
   };
   try {
     await assert.rejects(
@@ -3884,7 +3852,7 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
       /synthetic immutable trash removal failure/u
     );
   } finally {
-    fs.rm = originalRm;
+    fs.readdir = readdir;
   }
   assert.equal(removalAttempted, true);
   await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
@@ -3941,7 +3909,7 @@ test("maintenance recovers interrupted package and certificate retirement and fi
           nowMs: Date.now() + 1_000,
           recentRetentionMilliseconds: 0,
         };
-        const original = { open: fs.open, rename: fs.rename, rm: fs.rm, unlink: fs.unlink };
+        const original = { open: fs.open, rename: fs.rename, readdir: fs.readdir, unlink: fs.unlink };
         const interrupt = () => {
           throw Object.assign(new Error("synthetic root retirement interruption"), { code: "EIO" });
         };
@@ -3953,17 +3921,17 @@ test("maintenance recovers interrupted package and certificate retirement and fi
           if (interruption === "after-rename" && path.endsWith(".verified.json")) interrupt();
           return await original.open(path, ...args);
         };
-        fs.rm = async (path, options) => {
-          if (interruption === "partial-removal" && path.includes("immutable-sweep-trash") && options?.recursive) {
-            const name = (await fs.readdir(path))[0];
-            await original.rm(join(path, name), { recursive: true });
+        fs.readdir = async (path, ...args) => {
+          if (interruption === "partial-removal" && await isVerifiedQuarantineRoot(path)) {
+            const name = (await original.readdir(path))[0];
+            await fs.rm(join(path, name), { recursive: true });
             interrupt();
           }
-          return await original.rm(path, options);
+          return await original.readdir(path, ...args);
         };
         fs.unlink = async (path) => {
           if (interruption === "marker-cleanup" && path.includes("immutable-sweep-trash") &&
-              path.endsWith(".json") && !path.endsWith(".verified.json")) interrupt();
+              /\/[0-9a-f]{64}\.json$/u.test(path)) interrupt();
           return await original.unlink(path);
         };
         try {
@@ -4163,17 +4131,17 @@ test("immutable sweep recovers a partially removed quarantine root", async (t) =
       ),
     ].map(async (path) => await fs.utimes(path, new Date(0), new Date(0)))
   );
-  const originalRm = fs.rm;
+  const readdir = fs.readdir;
   let partialRemoval = true;
-  fs.rm = async (path, options) => {
-    if (partialRemoval && path.includes("immutable-sweep-trash") && options?.recursive) {
+  fs.readdir = async (path, ...args) => {
+    if (partialRemoval && await isVerifiedQuarantineRoot(path)) {
       partialRemoval = false;
-      await originalRm(join(path, "entry.json"), { force: true });
+      await fs.unlink(join(path, "entry.json"));
       throw Object.assign(new Error("synthetic partial immutable trash removal failure"), {
         code: "EIO",
       });
     }
-    return await originalRm(path, options);
+    return await readdir(path, ...args);
   };
   try {
     await assert.rejects(
@@ -4189,7 +4157,7 @@ test("immutable sweep recovers a partially removed quarantine root", async (t) =
       /synthetic partial immutable trash removal failure/u
     );
   } finally {
-    fs.rm = originalRm;
+    fs.readdir = readdir;
   }
 
   const retry = await withHeavyLock(value.environment, () =>
@@ -4225,17 +4193,17 @@ test("immutable sweep recovers a fully removed quarantine root", async (t) => {
       ),
     ].map(async (path) => await fs.utimes(path, new Date(0), new Date(0)))
   );
-  const originalRm = fs.rm;
+  const rmdir = fs.rmdir;
   let fullRemoval = true;
-  fs.rm = async (path, options) => {
-    if (fullRemoval && path.includes("immutable-sweep-trash") && options?.recursive) {
+  fs.rmdir = async (path, ...args) => {
+    if (fullRemoval && path.includes("immutable-sweep-trash") && /^[0-9a-f]{64}$/u.test(path.split("/").at(-1))) {
       fullRemoval = false;
-      await originalRm(path, options);
+      await rmdir(path, ...args);
       throw Object.assign(new Error("synthetic full immutable trash removal failure"), {
         code: "EIO",
       });
     }
-    return await originalRm(path, options);
+    return await rmdir(path, ...args);
   };
   try {
     await assert.rejects(
@@ -4251,7 +4219,7 @@ test("immutable sweep recovers a fully removed quarantine root", async (t) => {
       /synthetic full immutable trash removal failure/u
     );
   } finally {
-    fs.rm = originalRm;
+    fs.rmdir = rmdir;
   }
 
   const retry = await withHeavyLock(value.environment, () =>

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -8,10 +9,16 @@ import {
   fingerprintJson,
   requireSha256,
 } from "./convex-wasm-artifact-contract.mjs";
-import { decodeUtf8, mapBounded, readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
+import {
+  ConvexWasmArtifactByteLimitError,
+  createBoundedOperationRunner,
+  decodeUtf8,
+  hashPrivateRegularFile,
+  mapBounded,
+  readPrivateRegularFile,
+} from "./convex-wasm-artifact-material.mjs";
 import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import {
-  validateArtifactCacheEntry,
   validateArtifactCacheEntryInValidationScope,
 } from "./convex-wasm-artifact-cache-entry.mjs";
 import { staticHermesLayoutCacheReferences } from "./convex-wasm-static-hermes-layout-cache.mjs";
@@ -107,6 +114,46 @@ const GENERIC_ARTIFACT_EXTENSIONS = new Set(["a", "c", "cwasm", "js", "json", "o
 const COMPILER_OUTPUT_GENERATED_C_EXTENSIONS = new Set(["c", "c-bundle"]);
 const COMPILER_OUTPUT_AOT_EXTENSIONS = new Set(["cwasm"]);
 const COMPILER_OUTPUT_OBJECT_EXTENSIONS = new Set(["o"]);
+
+// Measurements belong to the invocation, never to authenticated plan or producer material.
+// Nested/concurrent phases overlap; their totals must not be added as a wall-time partition.
+const retentionMeasurements = new AsyncLocalStorage();
+
+export function currentConvexWasmRetentionPhase() {
+  return retentionMeasurements.getStore()?.phase;
+}
+
+export async function measureConvexWasmRetentionPhase(phase, operation) {
+  const context = retentionMeasurements.getStore();
+  if (context === undefined) return await operation();
+  const started = performance.now();
+  const measurement = context.phases[phase] ??= { calls: 0, milliseconds: 0 };
+  measurement.calls += 1;
+  try {
+    return await retentionMeasurements.run({ ...context, phase }, operation);
+  } finally {
+    measurement.milliseconds += performance.now() - started;
+  }
+}
+
+export async function withConvexWasmRetentionMeasurements(operation) {
+  const phases = {};
+  const started = performance.now();
+  const result = await retentionMeasurements.run({ phases }, operation);
+  return {
+    ...result,
+    diagnostics: {
+      elapsedMilliseconds: performance.now() - started, phases, overlappingPhases: true,
+      counts: {
+        inventoryBuilds: phases.inventory?.calls ?? 0,
+        immutableOccupancyMeasurements: phases.immutableOccupancy?.calls ?? 0,
+        dedicatedImmutableOccupancyWalks: phases.immutableOccupancyWalk?.calls ?? 0,
+        reportOccupancyWalks: phases.reportOccupancy?.calls ?? 0,
+        authorityFenceWalks: phases.authorityFence?.calls ?? 0,
+      },
+    },
+  };
+}
 
 function fail(message) {
   throw new Error(`Convex Wasm immutable cache retention: ${message}`);
@@ -212,6 +259,46 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// Weak keys retain only a digest alongside a live parsed object, never a second canonical
+// byte buffer. Topology binds JSON without the artifact file's trailing newline.
+const authenticatedStructuredDigests = new WeakMap();
+
+async function readStructuredArtifact(entry, maximumBytes, description, validation) {
+  if (entry.artifactSize > maximumBytes) {
+    throw new ConvexWasmArtifactByteLimitError(`${description} has`, entry.artifactSize, maximumBytes);
+  }
+  await requirePrivateCacheFile(validation.cacheRoot, entry.artifactPath);
+  const before = physicalWitness(await fs.lstat(entry.artifactPath, { bigint: true }));
+  const key = `${entry.artifactPath}\0${entry.artifactSha256}\0${entry.artifactSize}`;
+  let cached = validation.structured.get(key);
+  if (cached !== undefined && !sameWitness(cached.witness, before)) {
+    validation.structured.delete(key);
+    validation.structuredBytes -= cached.bytes;
+    cached = undefined;
+  }
+  if (cached === undefined) {
+    const value = readCanonical(entry.artifactPath, maximumBytes, description, entry);
+    cached = { value, witness: before, bytes: entry.artifactSize };
+    // This is a bounded collection/deletion scope, not the invocation inventory. Drop
+    // bulk parse material as the scope ends; only normalized closure facts survive waves.
+    const maximumCachedBytes = 4 * 1024 * 1024;
+    if (cached.bytes <= maximumCachedBytes) {
+      while (validation.structured.size >= 8 || validation.structuredBytes + cached.bytes > maximumCachedBytes) {
+        const oldest = validation.structured.keys().next().value;
+        validation.structuredBytes -= validation.structured.get(oldest).bytes;
+        validation.structured.delete(oldest);
+      }
+      validation.structured.set(key, cached);
+      validation.structuredBytes += cached.bytes;
+    }
+  }
+  const value = await cached.value;
+  if (!sameWitness(before, physicalWitness(await fs.lstat(entry.artifactPath, { bigint: true })))) {
+    fail(`${description} changed during structured interpretation: ${entry.artifactPath}`);
+  }
+  return value;
+}
+
 async function readCanonical(
   path,
   maximumBytes,
@@ -239,7 +326,11 @@ async function readCanonical(
   } catch (error) {
     throw new Error(`${description} is not JSON: ${path}`, { cause: error });
   }
-  if (`${canonicalJson(value)}\n` !== source) fail(`${description} is not canonical JSON: ${path}`);
+  const canonical = canonicalJson(value);
+  if (`${canonical}\n` !== source) fail(`${description} is not canonical JSON: ${path}`);
+  if (expectedArtifact !== undefined && value !== null && typeof value === "object") {
+    authenticatedStructuredDigests.set(value, sha256(Buffer.from(canonical)));
+  }
   return value;
 }
 
@@ -796,7 +887,7 @@ function authenticateStandaloneTopologyCertificate(certificate) {
   }
 }
 
-async function topologyCertificateCompilerOutputReference(entry) {
+async function topologyCertificateCompilerOutputReference(entry, validation) {
   if (entry.stage !== MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_STAGE) return undefined;
   if (
     canonicalJson(entry.metadata) !==
@@ -843,12 +934,7 @@ async function topologyCertificateCompilerOutputReference(entry) {
   ) {
     fail("compiler-output topology certificate points to a different compiler identity");
   }
-  const certificate = await readCanonical(
-    entry.artifactPath,
-    MAX_COMPILER_OUTPUT_CACHE_BYTES,
-    "compiler-output topology certificate",
-    entry
-  );
+  const certificate = await readStructuredArtifact(entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "compiler-output topology certificate", validation);
   requireExactKeys(
     certificate,
     [
@@ -895,7 +981,7 @@ async function topologyCertificateCompilerOutputReference(entry) {
   };
 }
 
-async function compilerOutputArtifactKeys(entry) {
+async function compilerOutputArtifactKeys(entry, validation) {
   if (entry.stage !== MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE) return [];
   if (entry.artifactFile !== "artifact.json") {
     fail("compiler-output cache entry does not contain JSON");
@@ -906,12 +992,7 @@ async function compilerOutputArtifactKeys(entry) {
     // current producer. Keep it as an ordinary bounded artifact until normal age-based eviction.
     return [];
   }
-  const record = await readCanonical(
-    entry.artifactPath,
-    MAX_COMPILER_OUTPUT_CACHE_BYTES,
-    "compiler-output cache record",
-    entry
-  );
+  const record = await readStructuredArtifact(entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "compiler-output cache record", validation);
   const recordAuthority = authenticateCompilerOutputRecord(record, "compiler-output cache record");
   const cacheIdentity =
     schema === "legacy-v6"
@@ -1238,7 +1319,7 @@ function authenticateCapsuleTopologyCertificate(certificate, record, recordAutho
   }
 }
 
-async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
+async function cohortCapsuleArtifactClosure(entry, cacheLayout, validation) {
   if (entry.stage !== OFFICIAL_OUTPUT_COHORT_CAPSULE_STAGE) return undefined;
   if (entry.artifactFile !== "artifact.json") {
     fail("cohort capsule cache entry does not contain JSON");
@@ -1344,7 +1425,8 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
   );
   const [compilerOutputMaterial, topologyCertificateMaterial] = await settleConcurrentWork([
     (async () => {
-      const compilerOutputEntry = await validateArtifactCacheEntry(
+      const compilerOutputEntry = await validateArtifactCacheEntryInValidationScope(
+        validation.artifacts,
         cacheLayout.cacheRoot,
         cacheLayout,
         MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE,
@@ -1360,13 +1442,8 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
       if (compilerOutputCacheEntrySchema(compilerOutputEntry) !== "current") {
         fail("cohort capsule compiler-output cache record has an unsupported schema");
       }
-      const record = await readCanonical(
-        compilerOutputEntry.artifactPath,
-        MAX_COMPILER_OUTPUT_CACHE_BYTES,
-        "cohort capsule compiler-output cache record",
-        compilerOutputEntry
-      );
-      if (sha256(Buffer.from(canonicalJson(record))) !== compilerOutputCacheRecordSha256) {
+      const record = await readStructuredArtifact(compilerOutputEntry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "cohort capsule compiler-output cache record", validation);
+      if (authenticatedStructuredDigests.get(record) !== compilerOutputCacheRecordSha256) {
         fail("cohort capsule compiler-output cache record digest is invalid");
       }
       authenticateCompilerOutputLookupIdentity(
@@ -1377,7 +1454,8 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
       return record;
     })(),
     (async () => {
-      const topologyCertificateEntry = await validateArtifactCacheEntry(
+      const topologyCertificateEntry = await validateArtifactCacheEntryInValidationScope(
+        validation.artifacts,
         cacheLayout.cacheRoot,
         cacheLayout,
         MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_STAGE,
@@ -1395,12 +1473,7 @@ async function cohortCapsuleArtifactClosure(entry, cacheLayout) {
         fail("cohort capsule compiler-output topology certificate changed");
       }
       return {
-        certificate: await readCanonical(
-          topologyCertificateEntry.artifactPath,
-          MAX_COMPILER_OUTPUT_CACHE_BYTES,
-          "cohort capsule compiler-output topology certificate",
-          topologyCertificateEntry
-        ),
+        certificate: await readStructuredArtifact(topologyCertificateEntry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "cohort capsule compiler-output topology certificate", validation),
         entry: topologyCertificateEntry,
       };
     })(),
@@ -1514,9 +1587,9 @@ async function authenticateGenericArtifact({ cacheLayout, key, metadata, path, s
   if (entry === undefined) fail(`artifact entry disappeared during authentication: ${path}`);
   const [capsuleResolution, closureArtifactReferences, topologyCompilerOutputReference] =
     await settleConcurrentWork([
-      cohortCapsuleArtifactClosure(entry, cacheLayout),
-      compilerOutputArtifactKeys(entry),
-      topologyCertificateCompilerOutputReference(entry),
+      cohortCapsuleArtifactClosure(entry, cacheLayout, validation),
+      compilerOutputArtifactKeys(entry, validation),
+      topologyCertificateCompilerOutputReference(entry, validation),
     ]);
   return {
     closureArtifactKeys: closureArtifactReferences.map(({ key }) => key),
@@ -2623,7 +2696,7 @@ async function exists(path) {
   }
 }
 
-async function immutableCacheAllocatedBytes(cacheLayout) {
+async function immutableCacheAllocatedBytesMeasured(cacheLayout) {
   if (!(await exists(cacheLayout.immutable.root))) return 0;
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, cacheLayout.immutable.root);
   const rootStatus = await fs.lstat(cacheLayout.immutable.root);
@@ -2701,7 +2774,25 @@ async function writePrivateDurableFile(cacheRoot, path, contents) {
   await syncDirectory(dirname(path));
 }
 
-async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
+export async function removeConvexWasmCacheTree(root) {
+  // Node's recursive rm rejects on the first child failure while sibling removals can
+  // still be running. Drain our bounded children before allowing lock release or recovery.
+  // One operation bound covers nested trees without holding a permit across recursion.
+  const run = createBoundedOperationRunner(4);
+  const remove = async (path) => {
+    const status = await run(() => fs.lstat(path));
+    if (!status.isDirectory()) {
+      await run(() => fs.unlink(path));
+      return;
+    }
+    const names = (await run(() => fs.readdir(path))).sort(compareStrings);
+    await mapBounded(names, 4, (name) => remove(join(path, name)));
+    await run(() => fs.rmdir(path));
+  };
+  await remove(root);
+}
+
+async function removeQuarantinedImmutableGcCandidatesMeasured(cacheLayout) {
   const root = immutableSweepTrashRoot(cacheLayout);
   if (!(await exists(root))) return [];
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, root);
@@ -2856,7 +2947,7 @@ async function removeQuarantinedImmutableGcCandidates(cacheLayout) {
     }
     for (const { candidatePresent, candidateRoot, candidateSha256, markerPath, status, verifiedMarkerPath } of pendingRemovals) {
       if (candidatePresent) {
-        await fs.rm(candidateRoot, { force: true, maxRetries: 0, recursive: true });
+        await removeConvexWasmCacheTree(candidateRoot);
         // Keep the durable marker until removal of the quarantined tree is itself durable.
         await syncDirectory(planRoot);
       }
@@ -2925,7 +3016,7 @@ function evictionCandidatePath(cacheLayout, candidate) {
   return path;
 }
 
-async function reauthenticateEvictionCandidate(cacheLayout, candidate, validation) {
+async function authenticateEvictionRoot(cacheLayout, candidate, validation) {
   const path = evictionCandidatePath(cacheLayout, candidate);
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, path);
   const status = await pathInfo(path);
@@ -2959,8 +3050,13 @@ async function reauthenticateEvictionCandidate(cacheLayout, candidate, validatio
     if (!authenticated.authenticated) fail(`immutable eviction certificate is invalid: ${path}`);
   }
   const stats = await treeStats(path);
+  if (authenticated.type !== candidate.type) fail(`immutable eviction candidate changed type: ${path}`);
+  return { path, stats };
+}
+
+async function reauthenticateEvictionCandidateMeasured(cacheLayout, candidate, validation) {
+  const { path, stats } = await authenticateEvictionRoot(cacheLayout, candidate, validation);
   if (
-    authenticated.type !== candidate.type ||
     stats.allocatedBytes !== candidate.allocationBytes ||
     stats.estimatedReclaimBytes !== candidate.estimatedReclaimBytes ||
     !matchesQuarantineCandidateTree(stats, candidate) ||
@@ -2971,34 +3067,16 @@ async function reauthenticateEvictionCandidate(cacheLayout, candidate, validatio
   return { path, stats };
 }
 
-export async function planConvexWasmImmutableGc({
-  cacheLayout: rawCacheLayout,
-  cacheLock = convexWasmCacheLock,
-  environment = process.env,
-  highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
-  maxRetainedPackages = defaultConvexWasmImmutableMaxRetainedPackages,
-  nowMs = Date.now(),
-  recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
-} = {}) {
-  cacheLock.requireAuthority(environment);
-  const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
-  requireLimit(nowMs, "GC planning time", false);
-  requireLimit(maxRetainedPackages, "maximum retained packages");
-  requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
-  requireLimit(recentRetentionMilliseconds, "recent retention period", false);
+async function collectImmutableInventory(cacheLayout) {
   // Packages, certificates and the artifact inventory repeatedly reach the same immutable
   // entries. Reuse the existing physical-state-fenced validators within this one locked plan,
   // instead of hashing and parsing their complete closures again for each referring root.
-  const validation = { packages: new Map(), artifacts: new Map() };
-  const [allSnapshots, packages, artifacts, immutableAllocatedBytes] = await settleConcurrentWork([
+  const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
+  const [allSnapshots, packages, artifacts] = await settleConcurrentWork([
     listSnapshots(cacheLayout),
     listPackages(cacheLayout, validation),
     listArtifactEntries(cacheLayout, validation),
-    immutableCacheAllocatedBytes(cacheLayout),
   ]);
-  const packagesByKey = new Map(
-    packages.filter((record) => record.authenticated).map((record) => [record.key, record])
-  );
   const packageRecordsByKey = new Map(packages.map((record) => [record.key, record]));
   const staleSnapshots = [];
   const snapshots = [];
@@ -3014,6 +3092,301 @@ export async function planConvexWasmImmutableGc({
     else staleSnapshots.push({ name: snapshot.name, missingPackageKeys: missingKeys });
   }
   const certificates = await listCertificates(cacheLayout, validation);
+  const artifactsByKey = new Map(
+    artifacts
+      .filter((record) => record.authenticated)
+      .map((record) => [`${record.stage}\0${record.key}`, record])
+  );
+  const artifactRecordsByKey = new Map(
+    artifacts.map((record) => [`${record.stage}\0${record.key}`, record])
+  );
+  // A compiler-output cache record is only authoritative together with the exact immutable
+  // entries it names. The entry key alone authenticates the target's identity, not the record's
+  // embedded artifact digest/size/metadata projection, so compare every closure reference against
+  // the already-authenticated target before granting retention authority.
+  for (const artifactRecord of artifacts) {
+    if (
+      !artifactRecord.authenticated ||
+      artifactRecord.type !== "artifact" ||
+      artifactRecord.stage !== MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE ||
+      compilerOutputCacheEntrySchema(artifactRecord.entry) !== "current"
+    ) {
+      continue;
+    }
+    authenticateCompilerOutputClosure(artifactRecord, artifactsByKey);
+  }
+  // A compact topology hit intentionally avoids reopening its full record. Preserve the
+  // publication prerequisite across GC: the certificate can be removed in this plan, while its
+  // exact current record and strict stage closure become reclaimable only in a later plan.
+  for (const artifactRecord of artifacts) {
+    const reference = artifactRecord.topologyCompilerOutputReference;
+    if (!artifactRecord.authenticated || reference === undefined) continue;
+    const compilerOutputRecordKey = `${MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE}\0${reference.cacheKey}`;
+    const compilerOutput = artifactRecordsByKey.get(compilerOutputRecordKey);
+    if (compilerOutput === undefined) {
+      // The certificate cannot retain anything once its exact full record has disappeared. Keep
+      // the independently authenticated certificate as an age-bounded artifact so an interrupted
+      // older cleanup cannot block every future sweep.
+      artifactRecord.orphanedTopologyCertificate = {
+        cacheKey: reference.cacheKey,
+        stage: MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE,
+      };
+      continue;
+    }
+    if (
+      !compilerOutput.authenticated ||
+      compilerOutput.type !== "artifact" ||
+      compilerOutputCacheEntrySchema(compilerOutput.entry) !== "current" ||
+      canonicalJson(compilerOutput.entry.identity) !== canonicalJson(reference.cacheIdentity)
+    ) {
+      fail("compiler-output topology certificate full record is absent or changed");
+    }
+    const [record, certificate] = await settleConcurrentWork([
+      readStructuredArtifact(compilerOutput.entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "compiler-output topology certificate full record", validation),
+      readStructuredArtifact(artifactRecord.entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "compiler-output topology certificate", validation),
+    ]);
+    if (
+      authenticatedStructuredDigests.get(record) !== reference.cacheRecordSha256 ||
+      certificate.cacheKey !== reference.cacheKey ||
+      certificate.cacheRecordSha256 !== reference.cacheRecordSha256
+    ) {
+      fail("compiler-output topology certificate full record is absent or changed");
+    }
+    const recordAuthority = authenticateCompilerOutputRecord(
+      record,
+      "compiler-output topology certificate full record"
+    );
+    if (recordAuthority.descriptorFamily === "historical-pre-transport") continue;
+    authenticateCapsuleTopologyCertificate(certificate, record, recordAuthority);
+  }
+  // A capsule hit fails closed when either its topology certificate or full compiler record is
+  // missing. Keep that strict closure for this plan, but leave the capsule itself removable so a
+  // later deployment can rebuild it before a subsequent sweep reclaims newly unreachable stages.
+  for (const artifactRecord of artifacts) {
+    if (!artifactRecord.authenticated || artifactRecord.capsuleClosure === undefined) continue;
+    const compilerOutputArtifactKey = `${MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE}\0${artifactRecord.capsuleClosure.compilerOutputCacheKey}`;
+    const compilerOutput = artifactsByKey.get(compilerOutputArtifactKey);
+    if (compilerOutput === undefined || compilerOutput.type !== "artifact") {
+      fail("cohort capsule compiler-output record is absent or changed");
+    }
+    const topologyCertificateArtifactKey = `${MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_STAGE}\0${artifactRecord.capsuleClosure.topologyCertificateCacheKey}`;
+    const topologyCertificate = artifactsByKey.get(topologyCertificateArtifactKey);
+    if (
+      topologyCertificate === undefined ||
+      topologyCertificate.type !== "artifact" ||
+      canonicalJson(topologyCertificate.entry.metadata) !==
+        canonicalJson({ kind: MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_KIND }) ||
+      topologyCertificate.entry.artifactSha256 !==
+        artifactRecord.capsuleClosure.topologyCertificateArtifactSha256 ||
+      topologyCertificate.entry.artifactSize !==
+        artifactRecord.capsuleClosure.topologyCertificateArtifactSize
+    ) {
+      fail("cohort capsule compiler-output topology certificate is absent or changed");
+    }
+    const [compilerOutputRecord, topologyCertificateRecord] = await settleConcurrentWork([
+      readStructuredArtifact(compilerOutput.entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "cohort capsule compiler-output cache record", validation),
+      readStructuredArtifact(topologyCertificate.entry, MAX_COMPILER_OUTPUT_CACHE_BYTES, "cohort capsule compiler-output topology certificate", validation),
+    ]);
+    // The topology certificate binds the canonical record bytes without the trailing newline
+    // used by the immutable artifact file. Compare that semantic digest, not the file digest.
+    if (
+      authenticatedStructuredDigests.get(compilerOutputRecord) !==
+      artifactRecord.capsuleClosure.compilerOutputCacheRecordSha256
+    ) {
+      fail("cohort capsule compiler-output record is absent or changed");
+    }
+    const topologyCertificateBytes = canonicalBytes(topologyCertificateRecord);
+    if (
+      sha256(topologyCertificateBytes) !==
+        artifactRecord.capsuleClosure.topologyCertificateArtifactSha256 ||
+      topologyCertificateBytes.length !==
+        artifactRecord.capsuleClosure.topologyCertificateArtifactSize
+    ) {
+      fail("cohort capsule compiler-output topology certificate is absent or changed");
+    }
+  }
+  // Reachability needs only normalized edges and family classification. Drop authenticated
+  // metadata, reference projections, and bundle manifests once their cross-checks finish;
+  // keeping those parse trees for every surviving wave would turn CPU reuse into an RSS cost.
+  for (const artifact of artifacts) {
+    if (artifact.authenticated) {
+      if (artifact.type === "artifact" && artifact.stage === MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE) {
+        artifact.compilerOutputSchema = compilerOutputCacheEntrySchema(artifact.entry);
+      }
+      if (artifact.type === "c-bundle") {
+        artifact.layoutReferences = staticHermesLayoutCacheReferences(artifact.entry.identity, artifact.stage);
+      }
+      if (artifact.topologyCompilerOutputReference !== undefined) {
+        artifact.topologyCompilerOutputReference = { cacheKey: artifact.topologyCompilerOutputReference.cacheKey };
+      }
+      if (artifact.capsuleClosure !== undefined) {
+        const { compilerOutputCacheKey, topologyCertificateCacheKey } = artifact.capsuleClosure;
+        artifact.capsuleClosure = { compilerOutputCacheKey, topologyCertificateCacheKey };
+      }
+    }
+    delete artifact.entry;
+    delete artifact.bundle;
+    delete artifact.closureArtifactReferences;
+  }
+  return { snapshots, staleSnapshots, packages, artifacts, certificates };
+}
+
+function physicalWitness(status) {
+  return {
+    dev: status.dev, ino: status.ino, mode: status.mode, uid: status.uid, gid: status.gid,
+    size: status.size, blocks: status.blocks, nlink: status.nlink,
+    mtimeNs: status.mtimeNs, ctimeNs: status.ctimeNs,
+    type: status.isDirectory() ? "directory" : status.isFile() ? "file" : "other",
+  };
+}
+
+function sameWitness(left, right, ignored = []) {
+  return right !== undefined && Object.keys(left).every((key) => ignored.includes(key) || left[key] === right[key]);
+}
+
+async function captureInventoryFence(cacheLayout) {
+  return await measureConvexWasmRetentionPhase("authorityFence", async () => {
+    const fence = new Map();
+    // Ancestor identity is part of authority. Checking just entry inodes would miss an
+    // ancestor replaced by a symlink to the same bytes. State ancestors may gain our own
+    // quarantine directories, so only their identity/access state is retained here.
+    for (const root of [cacheLayout.immutable.root, recentSuccessRoot(cacheLayout.cacheRoot)]) {
+      const ancestors = [];
+      for (let path = dirname(root); path !== dirname(cacheLayout.cacheRoot); path = dirname(path)) ancestors.push(path);
+      for (const path of ancestors.reverse()) {
+        if (!(await exists(path))) break;
+        await requirePrivateCacheDirectory(cacheLayout.cacheRoot, path);
+        const { dev, ino, mode, uid, gid, type } = physicalWitness(await fs.lstat(path, { bigint: true }));
+        fence.set(path, { dev, ino, mode, uid, gid, type });
+      }
+      if (!(await exists(root))) continue;
+      await requirePrivateCacheDirectory(cacheLayout.cacheRoot, root);
+      const pending = [root];
+      while (pending.length !== 0) {
+        // Bound metadata concurrency just like inventory authentication. mapBounded drains
+        // every admitted sibling before propagating failure and releasing the cache lock.
+        const captured = await mapBounded(pending.splice(-64), 4, async (path) => {
+          const status = await fs.lstat(path, { bigint: true });
+          // This walk also supplies occupancy, whose existing boundary rejects links even
+          // in non-authoritative publication scratch. Reuse must preserve that boundary.
+          if (root === cacheLayout.immutable.root && status.isSymbolicLink()) {
+            fail(`immutable authority path is a symbolic link: ${path}`);
+          }
+          const witness = physicalWitness(status);
+          // Never follow malformed members; authentication owns their classification.
+          const children = status.isDirectory() ? await fs.readdir(path) : [];
+          if (status.isDirectory() && !sameWitness(witness, physicalWitness(await fs.lstat(path, { bigint: true })))) {
+            fail(`immutable directory changed during authority capture: ${path}`);
+          }
+          return { path, witness, children };
+        });
+        for (const { path, witness, children } of captured) {
+          fence.set(path, witness);
+          for (const name of children) pending.push(join(path, name));
+        }
+      }
+    }
+    return fence;
+  });
+}
+
+function immutableAllocatedBytesFromFence(cacheLayout, fence) {
+  const inodes = new Map();
+  let bytes = 0;
+  for (const [path, witness] of fence) {
+    if (!path.startsWith(`${cacheLayout.immutable.root}/`)) continue;
+    const inode = `${witness.dev}:${witness.ino}`;
+    const previous = inodes.get(inode);
+    if (previous !== undefined) {
+      if (!sameWitness(previous, witness)) fail(`immutable inode changed during occupancy capture: ${path}`);
+      continue;
+    }
+    inodes.set(inode, witness);
+    bytes += Number(witness.blocks * 512n);
+    if (!Number.isSafeInteger(bytes)) fail("immutable occupancy exceeds the safe integer range");
+  }
+  return bytes;
+}
+
+async function hashWitnessedFile(path, witness) {
+  if (!sameWitness(witness, physicalWitness(await fs.lstat(path, { bigint: true })))) {
+    fail(`immutable shared file changed before authentication: ${path}`);
+  }
+  const digest = await hashPrivateRegularFile(path, Number(witness.size), "immutable shared file");
+  if (!sameWitness(witness, physicalWitness(await fs.lstat(path, { bigint: true })))) {
+    fail(`immutable shared file changed during authentication: ${path}`);
+  }
+  return digest.sha256;
+}
+
+async function plannedWaveEffects(fence, evictions) {
+  const roots = new Set(evictions.map(({ path }) => path));
+  const removedPaths = new Set();
+  const removedLinks = new Map();
+  const changedParents = new Set(evictions.map(({ path }) => dirname(path)));
+  for (const [path, witness] of fence) {
+    for (let ancestor = path; ancestor !== dirname(ancestor); ancestor = dirname(ancestor)) {
+      if (!roots.has(ancestor)) continue;
+      removedPaths.add(path);
+      if (witness.type === "file") {
+        const inode = `${witness.dev}:${witness.ino}`;
+        removedLinks.set(inode, (removedLinks.get(inode) ?? 0n) + 1n);
+      }
+      break;
+    }
+  }
+  const sharedDigests = new Map();
+  for (const [path, witness] of fence) {
+    const inode = `${witness.dev}:${witness.ino}`;
+    if (witness.type !== "file" || removedPaths.has(path) || !removedLinks.has(inode) || sharedDigests.has(inode)) continue;
+    // Our unlink legitimately changes ctime on surviving hardlinks. Authenticate their
+    // bytes before and after the wave; accepting ctime solely from an nlink decrease would
+    // hide an in-place rewrite with restored mtime during the same unlink window.
+    sharedDigests.set(inode, await hashWitnessedFile(path, witness));
+  }
+  return { removedPaths, removedLinks, changedParents, sharedDigests };
+}
+
+async function verifyInventoryFence(previous, current, effects) {
+  const verifiedInodes = new Set();
+  for (const [path, before] of previous) {
+    if (effects?.removedPaths.has(path)) {
+      if (current.has(path)) fail(`removed immutable authority reappeared: ${path}`);
+      continue;
+    }
+    const after = current.get(path);
+    const inode = `${before.dev}:${before.ino}`;
+    if (before.type === "file" && effects?.sharedDigests.has(inode)) {
+      if (!sameWitness(before, after, ["nlink", "ctimeNs"]) ||
+          after.nlink !== before.nlink - effects.removedLinks.get(inode)) {
+        fail(`immutable shared file changed outside planned unlinks: ${path}`);
+      }
+      if (!verifiedInodes.has(inode)) {
+        if (await hashWitnessedFile(path, after) !== effects.sharedDigests.get(inode)) {
+          fail(`immutable shared file bytes changed during deletion: ${path}`);
+        }
+        verifiedInodes.add(inode);
+      }
+    } else if (!sameWitness(before, after,
+      effects?.changedParents.has(path) ? ["size", "blocks", "nlink", "mtimeNs", "ctimeNs"] : [])) {
+      fail(`immutable authority changed between waves: ${path}`);
+    }
+  }
+  for (const path of current.keys()) {
+    if (previous.has(path)) continue;
+    // The first sweep may create state ancestors for quarantine. They confer no retention
+    // authority. A newly created snapshot root or any member of an inventoried tree does.
+    const ancestorOfSnapshotRoot = [...previous.keys()].some((existing) => existing.startsWith(`${path}/`));
+    if (ancestorOfSnapshotRoot) fail(`immutable authority ancestor appeared: ${path}`);
+    const witness = current.get(path);
+    if (Object.hasOwn(witness, "mtimeNs")) fail(`new immutable authority appeared between waves: ${path}`);
+  }
+}
+
+function deriveImmutablePlan({ inventory, immutableAllocatedBytes, highWatermarkAllocatedBytes,
+  maxRetainedPackages, nowMs, recentRetentionMilliseconds }) {
+  const { snapshots, staleSnapshots, packages, artifacts, certificates } = inventory;
+  const packagesByKey = new Map(packages.filter((record) => record.authenticated).map((record) => [record.key, record]));
   const artifactsByKey = new Map(
     artifacts
       .filter((record) => record.authenticated)
@@ -3066,78 +3439,16 @@ export async function planConvexWasmImmutableGc({
       fail(`retained compiler-output cache entry is unavailable: ${key}`);
     }
     retainArtifact(compilerOutputKey);
-    if (compilerOutputCacheEntrySchema(compilerOutput.entry) !== "current") return;
+    if (compilerOutput.compilerOutputSchema !== "current") return;
     for (const artifactKey of compilerOutput.closureArtifactKeys) retainArtifact(artifactKey);
   };
-  // A compiler-output cache record is only authoritative together with the exact immutable
-  // entries it names. The entry key alone authenticates the target's identity, not the record's
-  // embedded artifact digest/size/metadata projection, so compare every closure reference against
-  // the already-authenticated target before granting retention authority.
-  for (const artifactRecord of artifacts) {
-    if (
-      !artifactRecord.authenticated ||
-      artifactRecord.type !== "artifact" ||
-      artifactRecord.stage !== MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE ||
-      compilerOutputCacheEntrySchema(artifactRecord.entry) !== "current"
-    ) {
-      continue;
+  // Every surviving topology authority keeps its full record, including when the
+  // topology itself is selected in this wave. Only a completed removal releases an edge.
+  for (const record of artifacts) {
+    if (record.authenticated && record.topologyCompilerOutputReference !== undefined &&
+        record.orphanedTopologyCertificate === undefined) {
+      retainCompilerOutput(record.topologyCompilerOutputReference.cacheKey);
     }
-    authenticateCompilerOutputClosure(artifactRecord, artifactsByKey);
-  }
-  // A compact topology hit intentionally avoids reopening its full record. Preserve the
-  // publication prerequisite across GC: the certificate can be removed in this plan, while its
-  // exact current record and strict stage closure become reclaimable only in a later plan.
-  for (const artifactRecord of artifacts) {
-    const reference = artifactRecord.topologyCompilerOutputReference;
-    if (!artifactRecord.authenticated || reference === undefined) continue;
-    const compilerOutputRecordKey = `${MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE}\0${reference.cacheKey}`;
-    const compilerOutput = artifactRecordsByKey.get(compilerOutputRecordKey);
-    if (compilerOutput === undefined) {
-      // The certificate cannot retain anything once its exact full record has disappeared. Keep
-      // the independently authenticated certificate as an age-bounded artifact so an interrupted
-      // older cleanup cannot block every future sweep.
-      artifactRecord.orphanedTopologyCertificate = {
-        cacheKey: reference.cacheKey,
-        stage: MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE,
-      };
-      continue;
-    }
-    if (
-      !compilerOutput.authenticated ||
-      compilerOutput.type !== "artifact" ||
-      compilerOutputCacheEntrySchema(compilerOutput.entry) !== "current" ||
-      canonicalJson(compilerOutput.entry.identity) !== canonicalJson(reference.cacheIdentity)
-    ) {
-      fail("compiler-output topology certificate full record is absent or changed");
-    }
-    const [record, certificate] = await settleConcurrentWork([
-      readCanonical(
-        compilerOutput.entry.artifactPath,
-        MAX_COMPILER_OUTPUT_CACHE_BYTES,
-        "compiler-output topology certificate full record",
-        compilerOutput.entry
-      ),
-      readCanonical(
-        artifactRecord.entry.artifactPath,
-        MAX_COMPILER_OUTPUT_CACHE_BYTES,
-        "compiler-output topology certificate",
-        artifactRecord.entry
-      ),
-    ]);
-    if (
-      sha256(Buffer.from(canonicalJson(record))) !== reference.cacheRecordSha256 ||
-      certificate.cacheKey !== reference.cacheKey ||
-      certificate.cacheRecordSha256 !== reference.cacheRecordSha256
-    ) {
-      fail("compiler-output topology certificate full record is absent or changed");
-    }
-    const recordAuthority = authenticateCompilerOutputRecord(
-      record,
-      "compiler-output topology certificate full record"
-    );
-    if (recordAuthority.descriptorFamily === "historical-pre-transport") continue;
-    authenticateCapsuleTopologyCertificate(certificate, record, recordAuthority);
-    retainCompilerOutput(reference.cacheKey);
   }
   // A lookup root is removed as a whole, including PREFERRED and superseded certificates. Pin
   // every package its reader can select for this pass, even if the root itself is removable.
@@ -3164,69 +3475,18 @@ export async function planConvexWasmImmutableGc({
       !artifactRecord.authenticated ||
       artifactRecord.type !== "artifact" ||
       artifactRecord.stage !== MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE ||
-      compilerOutputCacheEntrySchema(artifactRecord.entry) !== "current"
+      artifactRecord.compilerOutputSchema !== "current"
     ) {
       continue;
     }
     for (const artifactKey of artifactRecord.closureArtifactKeys) retainArtifact(artifactKey);
   }
-  // A capsule hit fails closed when either its topology certificate or full compiler record is
-  // missing. Keep that strict closure for this plan, but leave the capsule itself removable so a
-  // later deployment can rebuild it before a subsequent sweep reclaims newly unreachable stages.
-  for (const artifactRecord of artifacts) {
-    if (!artifactRecord.authenticated || artifactRecord.capsuleClosure === undefined) continue;
-    const compilerOutputArtifactKey = `${MODULE_GRAPH_COMPILER_OUTPUT_CACHE_STAGE}\0${artifactRecord.capsuleClosure.compilerOutputCacheKey}`;
-    const compilerOutput = artifactsByKey.get(compilerOutputArtifactKey);
-    if (compilerOutput === undefined || compilerOutput.type !== "artifact") {
-      fail("cohort capsule compiler-output record is absent or changed");
-    }
-    const topologyCertificateArtifactKey = `${MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_STAGE}\0${artifactRecord.capsuleClosure.topologyCertificateCacheKey}`;
-    const topologyCertificate = artifactsByKey.get(topologyCertificateArtifactKey);
-    if (
-      topologyCertificate === undefined ||
-      topologyCertificate.type !== "artifact" ||
-      canonicalJson(topologyCertificate.entry.metadata) !==
-        canonicalJson({ kind: MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_KIND }) ||
-      topologyCertificate.entry.artifactSha256 !==
-        artifactRecord.capsuleClosure.topologyCertificateArtifactSha256 ||
-      topologyCertificate.entry.artifactSize !==
-        artifactRecord.capsuleClosure.topologyCertificateArtifactSize
-    ) {
-      fail("cohort capsule compiler-output topology certificate is absent or changed");
-    }
-    const [compilerOutputRecord, topologyCertificateRecord] = await settleConcurrentWork([
-      readCanonical(
-        compilerOutput.entry.artifactPath,
-        MAX_COMPILER_OUTPUT_CACHE_BYTES,
-        "cohort capsule compiler-output cache record",
-        compilerOutput.entry
-      ),
-      readCanonical(
-        topologyCertificate.entry.artifactPath,
-        MAX_COMPILER_OUTPUT_CACHE_BYTES,
-        "cohort capsule compiler-output topology certificate",
-        topologyCertificate.entry
-      ),
-    ]);
-    // The topology certificate binds the canonical record bytes without the trailing newline
-    // used by the immutable artifact file. Compare that semantic digest, not the file digest.
-    if (
-      sha256(Buffer.from(canonicalJson(compilerOutputRecord))) !==
-      artifactRecord.capsuleClosure.compilerOutputCacheRecordSha256
-    ) {
-      fail("cohort capsule compiler-output record is absent or changed");
-    }
-    const topologyCertificateBytes = canonicalBytes(topologyCertificateRecord);
-    if (
-      sha256(topologyCertificateBytes) !==
-        artifactRecord.capsuleClosure.topologyCertificateArtifactSha256 ||
-      topologyCertificateBytes.length !==
-        artifactRecord.capsuleClosure.topologyCertificateArtifactSize
-    ) {
-      fail("cohort capsule compiler-output topology certificate is absent or changed");
-    }
-    retainCompilerOutput(artifactRecord.capsuleClosure.compilerOutputCacheKey);
-    retainArtifact(topologyCertificateArtifactKey);
+  // Capsule closure was authenticated during collection. Recomputing reachability
+  // consumes those compact facts; it must never reopen or reinterpret their payloads.
+  for (const record of artifacts) {
+    if (!record.authenticated || record.capsuleClosure === undefined) continue;
+    retainCompilerOutput(record.capsuleClosure.compilerOutputCacheKey);
+    retainArtifact(`${MODULE_GRAPH_COMPILER_OUTPUT_TOPOLOGY_CACHE_STAGE}\0${record.capsuleClosure.topologyCertificateCacheKey}`);
   }
   for (const snapshot of snapshots) {
     for (const key of snapshot.snapshot.certificateSha256s) retainCertificate(key);
@@ -3265,7 +3525,7 @@ export async function planConvexWasmImmutableGc({
   // unchanged-build identities and the next edit's seed without retaining historical C bundles.
   for (const record of artifacts) {
     if (record.type !== "c-bundle" || !retainedArtifactKeys.has(`${record.stage}\0${record.key}`)) continue;
-    for (const reference of staticHermesLayoutCacheReferences(record.entry.identity, record.stage)) {
+    for (const reference of record.layoutReferences) {
       const key = `${reference.stage}\0${reference.key}`;
       // Layout entries may already have been evicted independently by an older cache manager.
       if (artifactRecordsByKey.has(key)) retainArtifact(key);
@@ -3402,8 +3662,34 @@ export async function planConvexWasmImmutableGc({
       snapshots: snapshots.map(({ name }) => name).sort(compareStrings),
     },
   };
-  return { ...payload, planSha256: fingerprintJson(payload) };
+  return { candidates, plan: { ...payload, planSha256: fingerprintJson(payload) } };
 }
+
+async function planConvexWasmImmutableGcMeasured({
+  cacheLayout: rawCacheLayout,
+  cacheLock = convexWasmCacheLock,
+  environment = process.env,
+  highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
+  maxRetainedPackages = defaultConvexWasmImmutableMaxRetainedPackages,
+  nowMs = Date.now(),
+  recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
+} = {}) {
+  cacheLock.requireAuthority(environment);
+  const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
+  requireLimit(nowMs, "GC planning time", false);
+  requireLimit(maxRetainedPackages, "maximum retained packages");
+  requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
+  requireLimit(recentRetentionMilliseconds, "recent retention period", false);
+  const [inventory, immutableAllocatedBytes] = await settleConcurrentWork([
+    measureConvexWasmRetentionPhase("inventory", () => collectImmutableInventory(cacheLayout)),
+    immutableCacheAllocatedBytes(cacheLayout),
+  ]);
+  return (await measureConvexWasmRetentionPhase("planDerivation", () => deriveImmutablePlan({
+    inventory, immutableAllocatedBytes, highWatermarkAllocatedBytes, maxRetainedPackages,
+    nowMs, recentRetentionMilliseconds,
+  }))).plan;
+}
+
 
 export async function sweepConvexWasmImmutableGc({
   cacheLayout: rawCacheLayout,
@@ -3426,6 +3712,104 @@ export async function sweepConvexWasmImmutableGc({
     nowMs,
     recentRetentionMilliseconds,
   });
+  return { ...await sweepImmutablePlan({ cacheLayout, plan }), recovered };
+}
+
+export async function maintainConvexWasmImmutableGc({
+  cacheLayout: rawCacheLayout,
+  initialImmutableAllocatedBytes,
+  cacheLock = convexWasmCacheLock,
+  environment = process.env,
+  highWatermarkAllocatedBytes = unconfiguredConvexWasmImmutableHighWatermarkAllocatedBytes,
+  maxRetainedPackages = defaultConvexWasmImmutableMaxRetainedPackages,
+  nowMs = Date.now(),
+  recentRetentionMilliseconds = defaultConvexWasmImmutableRecentRetentionMilliseconds,
+}) {
+  cacheLock.requireAuthority(environment);
+  const cacheLayout = normalizeConvexWasmCacheLayout(rawCacheLayout);
+  requireLimit(nowMs, "GC planning time", false);
+  requireLimit(maxRetainedPackages, "maximum retained packages");
+  requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
+  requireLimit(recentRetentionMilliseconds, "recent retention period", false);
+  if (initialImmutableAllocatedBytes !== undefined) requireLimit(initialImmutableAllocatedBytes, "initial immutable occupancy", false);
+  const recovered = await removeQuarantinedImmutableGcCandidates(cacheLayout);
+  let fence = await captureInventoryFence(cacheLayout);
+  const inventory = await measureConvexWasmRetentionPhase("inventory", () => collectImmutableInventory(cacheLayout));
+  const authenticatedFence = await captureInventoryFence(cacheLayout);
+  await verifyInventoryFence(fence, authenticatedFence);
+  fence = authenticatedFence;
+  // The fence already observed every inode and its allocated blocks. Compute occupancy
+  // from that same measured state rather than issuing a second set of filesystem reads.
+  // Automatic admission measured earlier, before recovery and inventory authentication.
+  // Reuse that measurement only if the current fence agrees: intervening cleanup must not
+  // leave stale pressure authorizing eviction below the watermark. This adds no filesystem walk.
+  let remainingAllocatedBytes;
+  if (initialImmutableAllocatedBytes === undefined) {
+    remainingAllocatedBytes = await measureConvexWasmRetentionPhase("immutableOccupancy", () => immutableAllocatedBytesFromFence(cacheLayout, fence));
+  } else {
+    remainingAllocatedBytes = immutableAllocatedBytesFromFence(cacheLayout, fence);
+    if (remainingAllocatedBytes !== initialImmutableAllocatedBytes) {
+      fail("immutable occupancy changed after automatic admission");
+    }
+  }
+  const removed = [];
+  const waves = [];
+  const derive = () => measureConvexWasmRetentionPhase("planDerivation", () => deriveImmutablePlan({
+    inventory, immutableAllocatedBytes: remainingAllocatedBytes, highWatermarkAllocatedBytes,
+    maxRetainedPackages, nowMs, recentRetentionMilliseconds,
+  }));
+  let { plan, candidates } = await derive();
+  for (;;) {
+    if (remainingAllocatedBytes <= highWatermarkAllocatedBytes || candidates.length === 0) {
+      return {
+        kind: "convex-wasm-immutable-gc-sweep-v1", plan, recovered, removed, waves, skipped: 0,
+        remainingAllocatedBytes,
+        remainingExcessBytes: Math.max(0, remainingAllocatedBytes - highWatermarkAllocatedBytes),
+        termination: remainingAllocatedBytes <= highWatermarkAllocatedBytes ? "watermark-reached" : "no-eligible-candidates",
+      };
+    }
+    if (waves.length !== 0) {
+      // Earlier unlinks can change both reclaim priority and physical witnesses. Refresh
+      // every eligible root before minting the next plan, never after a failed comparison
+      // against that plan. The first wave already has freshly authenticated inventory.
+      const records = new Map([...inventory.certificates, ...inventory.packages, ...inventory.artifacts].map((record) => [record.path, record]));
+      const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
+      await measureConvexWasmRetentionPhase("candidateRefresh", async () => {
+        for (const candidate of candidates) {
+          const { stats } = await authenticateEvictionRoot(cacheLayout, candidate, validation);
+          Object.assign(records.get(candidate.path), stats);
+        }
+      });
+      ({ plan, candidates } = await derive());
+    }
+    await verifyInventoryFence(fence, await captureInventoryFence(cacheLayout));
+    const effects = await measureConvexWasmRetentionPhase("sharedLinkAuthentication", () => plannedWaveEffects(fence, plan.evictions));
+    const started = performance.now();
+    const wave = await sweepImmutablePlan({ cacheLayout, plan });
+    // Nothing is released on a partial wave or failed durability operation. Recovery is
+    // next invocation's first operation and is followed by a new complete authentication.
+    const deleted = new Set(wave.removed.map(({ path }) => path));
+    if (deleted.size !== plan.evictions.length) fail("immutable wave did not remove every selected root");
+    const nextFence = await captureInventoryFence(cacheLayout);
+    await measureConvexWasmRetentionPhase("sharedLinkAuthentication", () => verifyInventoryFence(fence, nextFence, effects));
+    fence = nextFence;
+    for (const family of ["certificates", "packages", "artifacts"]) {
+      inventory[family] = inventory[family].filter(({ path }) => !deleted.has(path));
+    }
+    removed.push(...wave.removed);
+    // Reclaim estimates exclude shared file blocks and do not add up to freed occupancy.
+    // This one measurement is also the next plan's pressure input, including the terminal
+    // empty plan; never perform another full authentication merely to discover exhaustion.
+    remainingAllocatedBytes = await measureConvexWasmRetentionPhase("immutableOccupancy", () => immutableAllocatedBytesFromFence(cacheLayout, fence));
+    waves.push({ wave: waves.length + 1, selected: plan.evictions.length, removed: wave.removed.length,
+      remainingAllocatedBytes, elapsedMilliseconds: performance.now() - started });
+    ({ plan, candidates } = await derive());
+  }
+}
+
+// This operation executes exactly one already-minted plan. The public low-level sweeper
+// retains its one-plan contract; only top-level maintenance advances dependency waves.
+async function sweepImmutablePlan({ cacheLayout, plan }) {
   const removed = [];
   const trashBaseRoot = immutableSweepTrashRoot(cacheLayout);
   const trashRoot = join(trashBaseRoot, plan.planSha256);
@@ -3447,56 +3831,60 @@ export async function sweepConvexWasmImmutableGc({
   // check their current physical state; unchanged shared dependencies need not be rehashed for
   // every root. Quarantine and verify the whole selected batch before unlinking any file:
   // deleting a shared payload link changes nlink/ctime in otherwise unchanged later candidates.
-  const validation = { packages: new Map(), artifacts: new Map() };
+  const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
   const quarantined = [];
   for (const candidate of plan.evictions) {
     const { path, stats } = await reauthenticateEvictionCandidate(cacheLayout, candidate, validation);
-    const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
-    const markerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.json`);
-    const verifiedMarkerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.verified.json`);
-    const trashPath = join(trashRoot, quarantineRecord.candidateSha256);
-    // The durable marker must precede the rename. Otherwise a host crash could recover the moved
-    // root without the record that authorizes its removal.
-    await writePrivateDurableFile(
-      cacheLayout.cacheRoot,
-      markerPath,
-      `${canonicalJson(quarantineRecord)}\n`
-    );
-    await fs.rename(path, trashPath);
-    // Persist both sides of the cross-directory rename before recursive removal starts. If either
-    // sync fails, the marker still makes every crash outcome recoverable.
-    await syncDirectory(dirname(path));
-    await syncDirectory(trashRoot);
-    const movedStats = await treeStats(trashPath);
-    if (
-      movedStats.allocatedBytes !== stats.allocatedBytes ||
-      movedStats.estimatedReclaimBytes !== stats.estimatedReclaimBytes ||
-      movedStats.identity !== stats.identity ||
-      movedStats.treeIdentity !== stats.treeIdentity ||
-      movedStats.mtimeMs !== stats.mtimeMs
-    ) {
-      fail(`immutable eviction candidate changed while it was quarantined: ${path}`);
-    }
-    // Make the post-rename authentication durable before recursive removal. Recovery may only
-    // tolerate a partial tree after this marker exists; an unverified quarantine is never deleted.
-    await writePrivateDurableFile(
-      cacheLayout.cacheRoot,
-      verifiedMarkerPath,
-      `${canonicalJson({ ...quarantineRecord, state: "verified" })}\n`
-    );
-    quarantined.push({ candidate, markerPath, verifiedMarkerPath, trashPath });
+    await measureConvexWasmRetentionPhase("quarantine", async () => {
+      const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
+      const markerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.json`);
+      const verifiedMarkerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.verified.json`);
+      const trashPath = join(trashRoot, quarantineRecord.candidateSha256);
+      // The durable marker must precede the rename. Otherwise a host crash could recover the moved
+      // root without the record that authorizes its removal.
+      await writePrivateDurableFile(
+        cacheLayout.cacheRoot,
+        markerPath,
+        `${canonicalJson(quarantineRecord)}\n`
+      );
+      await fs.rename(path, trashPath);
+      // Persist both sides of the cross-directory rename before recursive removal starts. If either
+      // sync fails, the marker still makes every crash outcome recoverable.
+      await syncDirectory(dirname(path));
+      await syncDirectory(trashRoot);
+      const movedStats = await treeStats(trashPath);
+      if (
+        movedStats.allocatedBytes !== stats.allocatedBytes ||
+        movedStats.estimatedReclaimBytes !== stats.estimatedReclaimBytes ||
+        movedStats.identity !== stats.identity ||
+        movedStats.treeIdentity !== stats.treeIdentity ||
+        movedStats.mtimeMs !== stats.mtimeMs
+      ) {
+        fail(`immutable eviction candidate changed while it was quarantined: ${path}`);
+      }
+      // Make the post-rename authentication durable before recursive removal. Recovery may only
+      // tolerate a partial tree after this marker exists; an unverified quarantine is never deleted.
+      await writePrivateDurableFile(
+        cacheLayout.cacheRoot,
+        verifiedMarkerPath,
+        `${canonicalJson({ ...quarantineRecord, state: "verified" })}\n`
+      );
+      quarantined.push({ candidate, markerPath, verifiedMarkerPath, trashPath });
+    });
   }
   for (const { candidate, markerPath, verifiedMarkerPath, trashPath } of quarantined) {
-    await fs.rm(trashPath, { maxRetries: 0, recursive: true });
-    // Do not clear the authority record until deletion of the quarantined tree is durable.
-    await syncDirectory(trashRoot);
-    // Clear the verified marker first: recovery always needs the base record, even after the
-    // tree is gone. A crash between these unlinks must leave a recoverable completed marker.
-    await fs.unlink(verifiedMarkerPath);
-    await syncDirectory(trashRoot);
-    await fs.unlink(markerPath);
-    await syncDirectory(trashRoot);
-    removed.push(candidate);
+    await measureConvexWasmRetentionPhase("unlink", async () => {
+      await removeConvexWasmCacheTree(trashPath);
+      // Do not clear the authority record until deletion of the quarantined tree is durable.
+      await syncDirectory(trashRoot);
+      // Clear the verified marker first: recovery always needs the base record, even after the
+      // tree is gone. A crash between these unlinks must leave a recoverable completed marker.
+      await fs.unlink(verifiedMarkerPath);
+      await syncDirectory(trashRoot);
+      await fs.unlink(markerPath);
+      await syncDirectory(trashRoot);
+      removed.push(candidate);
+    });
   }
   if (plan.evictions.length !== 0) {
     await fs.rmdir(trashRoot);
@@ -3507,8 +3895,31 @@ export async function sweepConvexWasmImmutableGc({
   return {
     kind: "convex-wasm-immutable-gc-sweep-v1",
     plan,
-    recovered,
     removed,
     skipped: plan.evictions.length - removed.length,
   };
+}
+
+async function immutableCacheAllocatedBytes(...args) {
+  return await measureConvexWasmRetentionPhase("immutableOccupancy", () =>
+    measureConvexWasmRetentionPhase("immutableOccupancyWalk", () => immutableCacheAllocatedBytesMeasured(...args)));
+}
+
+async function removeQuarantinedImmutableGcCandidates(...args) {
+  return await measureConvexWasmRetentionPhase("recovery", () => removeQuarantinedImmutableGcCandidatesMeasured(...args));
+}
+
+async function reauthenticateEvictionCandidate(...args) {
+  return await measureConvexWasmRetentionPhase("selectedAuthentication", () => reauthenticateEvictionCandidateMeasured(...args));
+}
+
+export async function planConvexWasmImmutableGc(...args) {
+  return await measureConvexWasmRetentionPhase("plan", () => planConvexWasmImmutableGcMeasured(...args));
+}
+
+// Recovery is independent of new pressure eviction: a recent automatic receipt must not
+// strand a failed explicit sweep's durable quarantine outside the measured immutable tree.
+export async function recoverConvexWasmImmutableGc({ cacheLayout, cacheLock = convexWasmCacheLock, environment = process.env }) {
+  cacheLock.requireAuthority(environment);
+  return await removeQuarantinedImmutableGcCandidates(normalizeConvexWasmCacheLayout(cacheLayout));
 }

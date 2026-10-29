@@ -19,8 +19,12 @@ import {
 } from "./convex-wasm-artifact-contract.mjs";
 import { readPrivateRegularFile } from "./convex-wasm-artifact-material.mjs";
 import {
+  measureConvexWasmRetentionPhase,
+  withConvexWasmRetentionMeasurements,
   planConvexWasmImmutableGc,
-  sweepConvexWasmImmutableGc,
+  recoverConvexWasmImmutableGc,
+  removeConvexWasmCacheTree,
+  maintainConvexWasmImmutableGc,
 } from "./convex-wasm-cache-retention-immutable.mjs";
 import { readAutomaticCacheMaintenanceSchedule } from "./convex-wasm-cache-maintenance-schedule.mjs";
 
@@ -491,7 +495,9 @@ export async function createConvexWasmBuildWorkLease({
           requireNonNegativeSafeInteger(completedAtMs, "build completion time")
         )
       );
-      await fs.rm(cacheLayout.work.buildRoot, { recursive: true });
+      // Persist completion before cleanup, and drain admitted unlinks before the caller
+      // can release its lock on failure. fail() must preserve this completed state.
+      await removeConvexWasmCacheTree(cacheLayout.work.buildRoot);
     },
     async fail(failedAtMs = Date.now()) {
       cacheLock.requireAuthority(environment);
@@ -995,7 +1001,8 @@ async function inspectWorkRoot({
       if (current === undefined || JSON.stringify(current) !== JSON.stringify(record)) {
         fail(`build work record changed before removal: ${buildId}`);
       }
-      await fs.rm(buildRoot, { recursive: true });
+      // The top-level lock must cover admitted child removals even when one fails.
+      await removeConvexWasmCacheTree(buildRoot);
     }
     results.push({
       action: "remove",
@@ -1035,7 +1042,8 @@ function workSummary(roots) {
   return summary;
 }
 
-export async function maintainConvexWasmCache({
+async function maintainConvexWasmCacheMeasured({
+  clock = Date.now,
   abandonedRecoveryMilliseconds = defaultConvexWasmAbandonedRecoveryMilliseconds,
   apply = false,
   automaticImmutableSweep = false,
@@ -1104,12 +1112,22 @@ export async function maintainConvexWasmCache({
   if (Object.keys(cacheLock.inheritedAuthorityEnvironment(environment)).length !== 0) {
     fail("maintenance must acquire the top-level cache lock, not inherit build authority");
   }
-  const releaseLock = await cacheLock.acquire({ environment });
+  const releaseLock = await measureConvexWasmRetentionPhase("lockWait", () => cacheLock.acquire({ environment }));
   try {
     cacheLock.requireAuthority(environment);
     // The heavy lock can wait behind a build. Date automatic maintenance after that wait so newly
     // completed work records are not mistaken for future records and excluded from cleanup.
-    const normalizedNowMs = suppliedNowMs ?? Date.now();
+    const normalizedNowMs = requireNonNegativeSafeInteger(suppliedNowMs ?? clock(), "maintenance time");
+    const cacheLayout = deriveConvexWasmCacheLayout({
+      buildId: "maintenance",
+      cacheRoot: normalizedCacheRoot,
+      repositoryRoot: normalizedCacheRoot,
+    });
+    // Check recovery before deferral. Renamed trees are no longer in immutable occupancy,
+    // and an explicit failure may follow a still-current automatic completion receipt.
+    const pendingQuarantine = automaticImmutableSweep && await pathExists(
+      join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")
+    );
     const automaticSchedule = automaticImmutableSweep && !immutableSweep
       ? await readAutomaticCacheMaintenanceSchedule({
           cacheRoot: normalizedCacheRoot,
@@ -1124,7 +1142,7 @@ export async function maintainConvexWasmCache({
           },
         })
       : undefined;
-    if (automaticSchedule?.status === "deferred") {
+    if (automaticSchedule?.status === "deferred" && !pendingQuarantine) {
       return {
         kind: "convex-wasm-cache-maintenance-deferred-v1",
         cacheRoot: normalizedCacheRoot,
@@ -1134,11 +1152,7 @@ export async function maintainConvexWasmCache({
     }
     const cacheExists = await pathExists(normalizedCacheRoot);
     if (cacheExists) await requirePrivateCacheDirectory(normalizedCacheRoot, normalizedCacheRoot);
-    const cacheLayout = deriveConvexWasmCacheLayout({
-      buildId: "maintenance",
-      cacheRoot: normalizedCacheRoot,
-      repositoryRoot: normalizedCacheRoot,
-    });
+
     const occupancyRoot = includeImmutableOccupancy
       ? normalizedCacheRoot
       : join(normalizedCacheRoot, "work", "v1");
@@ -1146,9 +1160,9 @@ export async function maintainConvexWasmCache({
     // maintenance measures the immutable subtree separately so unrelated cache families cannot
     // trigger the expensive authenticated graph walk after every compilation.
     const [occupancy, immutableOccupancy] = await settleRetentionWork([
-      measureConvexWasmCacheOccupancy(occupancyRoot),
+      measureConvexWasmRetentionPhase("reportOccupancy", () => measureConvexWasmCacheOccupancy(occupancyRoot)),
       automaticImmutableSweep
-        ? measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)
+        ? measureConvexWasmRetentionPhase("immutableOccupancy", () => measureConvexWasmRetentionPhase("immutableOccupancyWalk", () => measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)))
         : undefined,
     ]);
     const roots = await inspectWorkRoot({
@@ -1166,13 +1180,11 @@ export async function maintainConvexWasmCache({
       ({ action, status }) => action !== "remove" && status !== "failed" && status !== "completed"
     );
     const automaticImmutableSweepAboveHighWatermark =
-      automaticImmutableSweep &&
+      automaticImmutableSweep && automaticSchedule?.status !== "deferred" &&
       immutableOccupancy.uniqueAllocatedBytes > normalizedImmutableHighWatermarkAllocatedBytes;
     // Quarantine is outside immutable/. An interrupted batch can lower that subtree below the
     // watermark before reclaiming any bytes, so its durable recovery must trigger independently.
-    const automaticImmutableSweepRecovery = automaticImmutableSweep && await pathExists(
-      join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash")
-    );
+    const automaticImmutableSweepRecovery = pendingQuarantine;
     const automaticImmutableSweepTriggered =
       automaticImmutableSweepAboveHighWatermark || automaticImmutableSweepRecovery;
     const immutableSweepRequested = immutableSweep || automaticImmutableSweepTriggered;
@@ -1185,29 +1197,34 @@ export async function maintainConvexWasmCache({
         : { highWatermarkAllocatedBytes: normalizedImmutableHighWatermarkAllocatedBytes }),
       nowMs: normalizedNowMs,
     };
+    // During cooldown, finish only previously authorized deletion. Do not let recovery
+    // accidentally authorize a new pressure sweep or advance the existing receipt.
+    const recoveryOnly = automaticSchedule?.status === "deferred" && pendingQuarantine;
     let immutableSweepResult;
-    if (immutableSweepRequested && immutableSweepBlockers.length === 0) {
-      const removed = [];
-      const recovered = [];
-      // Removing authority roots makes their dependencies eligible in the next plan.
-      // Keep the cache lock across those passes and stop on measured occupancy or no removals,
-      // rather than requiring another invocation or trusting hardlink reclaim estimates.
-      for (;;) {
-        const pass = await sweepConvexWasmImmutableGc(immutableGcOptions);
-        for (const candidate of pass.removed) removed.push(candidate);
-        for (const candidate of pass.recovered) recovered.push(candidate);
-        const remainingAllocatedBytes =
-          (await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes;
-        immutableSweepResult = { ...pass, removed, recovered, remainingAllocatedBytes };
-        if (
-          remainingAllocatedBytes <= normalizedImmutableHighWatermarkAllocatedBytes ||
-          pass.removed.length === 0
-        ) break;
-      }
+    if (recoveryOnly && immutableSweepBlockers.length === 0) {
+      const recovered = await recoverConvexWasmImmutableGc(immutableGcOptions);
+      // Recovery only changes quarantine outside immutable/, so the admission measurement
+      // remains current without a second full immutable walk.
+      const remainingAllocatedBytes = immutableOccupancy.uniqueAllocatedBytes;
+      immutableSweepResult = {
+        recovered,
+        removed: [],
+        skipped: 0,
+        remainingAllocatedBytes,
+        remainingExcessBytes: Math.max(0, remainingAllocatedBytes - normalizedImmutableHighWatermarkAllocatedBytes),
+        termination: "recovery-completed",
+      };
+    } else if (immutableSweepRequested && immutableSweepBlockers.length === 0) {
+      immutableSweepResult = await maintainConvexWasmImmutableGc({
+        ...immutableGcOptions,
+        // Quarantine recovery never removes immutable roots. Reuse the automatic
+        // admission measurement instead of immediately walking the same tree again.
+        initialImmutableAllocatedBytes: immutableOccupancy?.uniqueAllocatedBytes,
+      });
     }
     const shouldPlanImmutableGc =
       immutablePlanOutput !== undefined ||
-      (immutableSweepRequested && (immutableSweep || immutableSweepBlockers.length === 0));
+      (!recoveryOnly && immutableSweepRequested && (immutableSweep || immutableSweepBlockers.length === 0));
     const immutablePlan =
       immutableSweepResult?.plan ??
       (shouldPlanImmutableGc
@@ -1266,8 +1283,13 @@ export async function maintainConvexWasmCache({
                     : "interrupted-sweep",
                 skipped: immutableSweepResult?.skipped ?? 0,
                 ...(immutableSweepResult === undefined
-                  ? {}
-                  : { remainingAllocatedBytes: immutableSweepResult.remainingAllocatedBytes }),
+                  ? { termination: "blocked-work" }
+                  : {
+                      remainingAllocatedBytes: immutableSweepResult.remainingAllocatedBytes,
+                      ...(immutableSweepResult.waves === undefined ? {} : { waves: immutableSweepResult.waves }),
+                      remainingExcessBytes: immutableSweepResult.remainingExcessBytes,
+                      termination: immutableSweepResult.termination,
+                    }),
               },
             }
           : {}),
@@ -1289,9 +1311,18 @@ export async function maintainConvexWasmCache({
         summary: workSummary(roots),
       },
     };
-    if (automaticSchedule?.status === "due") await automaticSchedule.complete();
+    // A blocked sweep did not complete its requested work. Keep it due so clearing the
+    // lease can admit the next invocation immediately, including during v1 migration.
+    if (automaticSchedule?.status === "due" &&
+        !(immutableSweepRequested && immutableSweepBlockers.length !== 0)) {
+      await automaticSchedule.complete(clock());
+    }
     return report;
   } finally {
     releaseLock();
   }
+}
+
+export async function maintainConvexWasmCache(options) {
+  return await withConvexWasmRetentionMeasurements(() => maintainConvexWasmCacheMeasured(options));
 }

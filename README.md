@@ -880,28 +880,49 @@ snapshots and referenced packages before planning immutable eviction. Above
 the caller's high watermark, explicit and automatic sweeps remove old,
 unretained certificate lookup roots, packages, artifacts, and C-bundle entries.
 Certificate lookup roots are retired together with their preferred pointers
-and superseded certificates. Each pass preserves the dependencies of every
+and superseded certificates. Each deletion wave preserves the dependencies of every
 physical authority root: certificates pin their packages, and packages pin
 their artifacts. Newly unreachable dependencies become eligible on later
-passes. One maintenance invocation continues through those passes under the cache
-lock until measured occupancy reaches the high watermark or a pass removes no
-entries. The low-level `sweepConvexWasmImmutableGc` executes one plan. There is no
+waves. One maintenance invocation authenticates a single inventory under the cache
+lock and derives successive plans from its surviving records. Only completed durable
+removals release dependency edges. It stops when measured occupancy reaches the high
+watermark or no eligible entries remain. The low-level `sweepConvexWasmImmutableGc` executes one plan. There is no
 entry-count or reclaimed-byte ceiling. Roots take priority over independent
 artifacts, and each plan stops selecting entries when estimated reclaim covers
 the excess above the high watermark. Maintenance preserves eight recent successful
 snapshots and a 24-hour reuse grace, including their complete closure; retained
-data can keep occupancy above the target. The report includes all removals, the
-last plan before its removals, and measured
-`immutable.sweep.remainingAllocatedBytes`; the automatic summary reports that
-remaining occupancy when a sweep ran.
+data can keep occupancy above the target. The report includes accumulated removals,
+compact wave summaries, the most recently derived plan, measured
+`immutable.sweep.remainingAllocatedBytes`, and `remainingExcessBytes`.
+`termination` distinguishes `watermark-reached`, `no-eligible-candidates`,
+`blocked-work`, and cooldown-only `recovery-completed`. An unreachable watermark
+is a successful exhausted-plan outcome. Both CLI summaries report recovered record
+counts and post-sweep occupancy when a sweep ran. Monotonic diagnostics separate lock wait, inventory,
+plan derivation, admission, physical fences, quarantine, unlink, recovery, and
+occupancy. Nested/concurrent phase times overlap and are not a wall-time partition;
+they never affect plan hashes or producer identities.
 Unknown invalid certificate roots conservatively prevent package retirement.
 Removal uses authenticated durable quarantine and resumes after interruption.
 Automatic maintenance also resumes pending quarantine below the high watermark.
 Each selected batch is quarantined and verified before any payload is unlinked,
 including during recovery, so shared hardlinks do not invalidate later candidates.
-Planning shares package and artifact validation within one locked pass. Reuse
-checks the current physical state, and deletion starts a fresh validation scope;
-no authentication result survives into the next maintenance pass.
+Work-root and quarantine removal drain every admitted child filesystem operation
+before returning on failure, so the cache lock cannot be released while deletion
+is still running. Candidate roots remain sequential; nested removal uses one bounded
+operation limit and preserves the existing durability barriers.
+Inventory collection shares physically checked package/artifact validation and
+bounded structured interpretation. It retains compact closure facts, not complete
+parsed payloads, across waves. Surviving file state, ancestor identity, and directory
+membership must match the inventory after accounting for this invocation's removals.
+Unexpected replacement, mutation, new authority, or missing material fails closed.
+Surviving hardlinks affected by unlinking are authenticated before and after the
+wave, so legitimate link-count/ctime changes cannot hide a same-inode rewrite.
+Newly eligible roots receive current authentication, reclaim estimates, and physical
+witnesses before the next plan is minted. Deletion still starts a fresh validation
+scope and preserves exact pre-/post-quarantine comparisons; a failed comparison
+never refreshes a plan's witness. Recovery precedes the next invocation's new inventory.
+Pressure uses one initial immutable occupancy measurement and one per completed wave;
+the separate whole-cache report remains separately accounted.
 Artifact inventory reads use four concurrent workers. Overlapping checks of the
 same private ancestor share only pending work; later checks reopen the directory.
 Reclaim estimates exclude file blocks with surviving hardlinks outside each
@@ -931,11 +952,44 @@ npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler" --apply -
 configured high watermark; it also finishes pending quarantine recovery. Supply `--immutable-high-watermark-bytes` or
 `CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES` for either sweep mode; choose the value
 for the adopting host. The command uses the default cache root when `--cache-root`
-is omitted. Successful automatic maintenance records its policy and start time
-in the private cache. Further automatic calls using that policy defer their
-occupancy scans and sweeps for 15 minutes. Explicit sweeps, policy changes and
-clock rollback bypass that interval; failed maintenance does not advance it.
+is omitted. Successful automatic maintenance records its policy and completion time
+in a private `convex-wasm-automatic-maintenance-v2` receipt. The 15-minute interval
+starts after completion even when the run itself exceeds 15 minutes. A well-formed
+v1 start-time receipt is due once and is replaced only after success; malformed or
+linked receipts remain errors. Explicit sweeps, policy changes, and clock rollback
+bypass the interval; failed maintenance and blocked sweeps do not advance it. A
+blocked sweep remains due so that clearing a work lease permits an immediate retry.
+Pending quarantine
+bypasses deferral even below the watermark. Inside cooldown that call recovers only
+previously authorized deletion, without new pressure eviction or receipt advancement.
 The interval does not replace build-time disk admission or live disk limits.
+
+An older package rejects the v2 receipt. For a rollback, acquire the same top-level
+cache lock, authenticate the private regular `automatic-maintenance.json` file, and
+remove only that scheduling receipt before invoking the older package. This makes
+maintenance due; preserve immutable entries, work leases, and quarantine authority.
+A later upgrade accepts the resulting valid v1 receipt as due once. This receipt-only
+rollback has been exercised against the v1 reader; it is not cache deletion.
+
+For isolated performance comparisons, run
+`node scripts/benchmark-cache-retention.mjs NEW_OUTPUT_DIRECTORY metadata|hardlink 1|4`
+from a source checkout, using the host's resource guard for expensive runs. Each arm
+uses an independent deterministic fixture bounded to 2,048 artifacts and 256 MiB,
+with a 60-second maintenance deadline. Keep all result files and compare semantic
+removed order and surviving content/hardlink graphs as well as timing. The comparison
+runner is `node scripts/compare-cache-retention-benchmarks.mjs BASELINE_SOURCE CANDIDATE_SOURCE NEW_OUTPUT_DIRECTORY`;
+both checkouts require the same benchmark scripts and fixture files. Input snapshots include
+retention timestamps; final snapshots omit directory timestamps changed by deletion.
+Wall time and CPU cover maintenance including lock acquisition. Peak RSS covers the entire
+process through maintenance, including imports, fixture creation and the input snapshot.
+Counters observe `FileHandle.read`, `JSON.parse`, `fs.lstat`, and `FileHandle.sync`;
+reads through other APIs are not counted. Payload read bytes are classified by filename,
+not by authentication purpose. These counters do not establish full authentication bytes,
+retained-only parsing scalability, physical disk traffic, or filesystem free-space changes.
+The runner checks semantic decisions and inventory/occupancy counts; separate focused
+validation establishes retained authentication scalability and crash safety. Three alternating
+pairs provide bounded fixture medians, not a live-cache speed prediction. Keep unfavorable
+pairs and source diffs, including staged edits. Native builds are unnecessary for retention-only changes.
 
 ### Verification and native precompilation
 

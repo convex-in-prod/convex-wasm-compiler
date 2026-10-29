@@ -140,7 +140,7 @@ export async function main(argumentsList) {
       `${JSON.stringify({
         at: new Date().toISOString(),
         cacheRoot: report.cacheRoot,
-        elapsedMilliseconds: Date.now() - report.nowMs,
+        elapsedMilliseconds: report.diagnostics?.elapsedMilliseconds ?? Date.now() - report.nowMs,
         estimatedReclaimedBytes:
           report.immutable.sweep?.removed.reduce(
             (total, entry) => total + entry.estimatedReclaimBytes,
@@ -151,8 +151,13 @@ export async function main(argumentsList) {
           report.immutable.automaticSweep.occupancy.uniqueAllocatedBytes,
         immutableSweepTriggered: report.immutable.automaticSweep.triggered,
         removed: report.immutable.sweep?.removed.length ?? 0,
+        recovered: report.immutable.sweep?.recovered.length ?? 0,
         sweepBlocker: report.immutable.sweepBlocker,
         workRoots: report.work.summary.total,
+        termination: report.immutable.sweep?.termination,
+        remainingExcessBytes: report.immutable.sweep?.remainingExcessBytes,
+        waves: report.immutable.sweep?.waves,
+        diagnostics: report.diagnostics,
       })}\n`
     );
     return;

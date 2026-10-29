@@ -14,11 +14,18 @@ import {
 } from "./convex-wasm-private-cache.mjs";
 
 export const automaticCacheMaintenanceIntervalMs = 15 * 60 * 1_000;
-const scheduleSchema = z.strictObject({
+const legacyScheduleSchema = z.strictObject({
   kind: z.literal("convex-wasm-automatic-maintenance-v1"),
   policySha256: z.string().regex(/^[0-9a-f]{64}$/u),
   startedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 });
+
+const completionScheduleSchema = z.strictObject({
+  kind: z.literal("convex-wasm-automatic-maintenance-v2"),
+  policySha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  completedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+const scheduleSchema = z.discriminatedUnion("kind", [legacyScheduleSchema, completionScheduleSchema]);
 
 // The caller holds its build/maintenance lock across this decision, the scan,
 // and completion. This lets different lock owners use the same generic policy
@@ -55,23 +62,30 @@ export async function readAutomaticCacheMaintenanceSchedule({
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
       throw error;
   }
+  // A well-formed v1 receipt is due once: its start time cannot establish a completion
+  // cooldown. Reject malformed legacy data instead of treating arbitrary state as absent.
   // A policy change or clock rollback requires a fresh scan. The receipt only
   // defers automatic work; it never authorizes deletion or bypasses disk guards.
   if (
-    previous !== undefined &&
+    previous?.kind === "convex-wasm-automatic-maintenance-v2" &&
     previous.policySha256 === policySha256 &&
-    nowMs >= previous.startedAtMs &&
-    nowMs - previous.startedAtMs < automaticCacheMaintenanceIntervalMs
+    nowMs >= previous.completedAtMs &&
+    nowMs - previous.completedAtMs < automaticCacheMaintenanceIntervalMs
   ) {
     return {
       status: "deferred",
-      previousStartedAtMs: previous.startedAtMs,
-      nextDueAtMs: previous.startedAtMs + automaticCacheMaintenanceIntervalMs,
+      previousCompletedAtMs: previous.completedAtMs,
+      nextDueAtMs: previous.completedAtMs + automaticCacheMaintenanceIntervalMs,
     };
   }
   return {
     status: "due",
-    async complete() {
+    async complete(completedAtMs) {
+      if (!Number.isSafeInteger(completedAtMs) || completedAtMs < 0) {
+        throw new Error("Automatic cache maintenance completion time must be a nonnegative safe integer");
+      }
+      // Persist only after all work succeeds. A long maintenance run earns a full interval
+      // after completion, and any thrown failure leaves the previous receipt untouched.
       const temporary = join(
         cacheRoot,
         `.automatic-maintenance-${process.pid}-${randomBytes(8).toString("hex")}`,
@@ -80,15 +94,18 @@ export async function readAutomaticCacheMaintenanceSchedule({
         await fs.writeFile(
           temporary,
           `${canonicalJson({
-            kind: "convex-wasm-automatic-maintenance-v1",
+            kind: "convex-wasm-automatic-maintenance-v2",
             policySha256,
-            startedAtMs: nowMs,
+            completedAtMs,
           })}\n`,
           { flag: "wx", mode: 0o600 },
         );
         await fs.rename(temporary, path);
-      } finally {
+      } catch (error) {
+        // Rename commits the receipt and consumes the temporary path. Do not run a
+        // fallible cleanup after publication and report a committed cooldown as failure.
         await fs.rm(temporary, { force: true });
+        throw error;
       }
     },
   };

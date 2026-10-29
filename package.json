@@ -1,6 +1,6 @@
 {
   "name": "convex-wasm-compiler",
-  "version": "0.2.56",
+  "version": "0.2.57",
   "private": true,
   "type": "module",
   "bin": {
@@ -39,6 +39,8 @@
     "scripts/test-fixtures/native-values/resource-probe.cpp",
     "!scripts/**/*.test.mjs",
     "!scripts/smoke-*.mjs",
+    "!scripts/benchmark-*.mjs",
+    "!scripts/compare-cache-retention-benchmarks.mjs",
     "!scripts/check-javascript.mjs",
     "!scripts/build-native-release.mjs",
     "!scripts/create-native-*.mjs",
