@@ -21,7 +21,10 @@ jobs:
       - name: Install compiler toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Check release tooling
-        run: npm run check:js
+        run: |
+          node --check .github/scripts/verify-reused-native.mjs
+          bash -n .github/scripts/package-javascript-release.sh
+          npm run check:js
       - name: Test compiler
         run: cargo test --locked --manifest-path scripts/convex-wasm-compiler/Cargo.toml
       - name: Test precompiler

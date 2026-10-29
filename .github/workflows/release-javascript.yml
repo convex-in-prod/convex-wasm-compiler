@@ -1,0 +1,116 @@
+name: Publish JavaScript release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful main-branch CI run for the new package version
+        required: true
+        type: string
+      native_selection_release:
+        description: Previous release whose native selection and source contract are reused
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-javascript-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Select tested source and published native selection
+        id: validated
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          NATIVE_SELECTION_RELEASE: ${{ inputs.native_selection_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$NATIVE_SELECTION_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" > "$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$NATIVE_SELECTION_RELEASE" > "$RUNNER_TEMP/native-release.json"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const run = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/ci-run.json`, 'utf8'));
+          assert.ok(run.status === 'completed' && run.conclusion === 'success' &&
+            run.path === '.github/workflows/ci.yml' && run.event === 'push' &&
+            run.head_branch === 'main' && run.head_repository.full_name === process.env.GITHUB_REPOSITORY &&
+            /^[0-9a-f]{40}$/.test(run.head_sha), 'A successful main-branch CI run is required');
+          const release = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/native-release.json`, 'utf8'));
+          assert.ok(!release.draft && !release.prerelease && release.tag_name === process.env.NATIVE_SELECTION_RELEASE);
+          const assets = release.assets.filter(asset => asset.name === 'native-package-selection.json');
+          assert.equal(assets.length, 1);
+          assert.ok(assets[0].state === 'uploaded' && /^sha256:[0-9a-f]{64}$/.test(assets[0].digest));
+          appendFileSync(process.env.GITHUB_OUTPUT, `revision=${run.head_sha}\nselection_sha256=${assets[0].digest.slice(7)}\n`);
+          JS
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+      - name: Preserve workflow release scripts
+        run: |
+          # The tested commit can predate these scripts; packaging still uses its source.
+          cp .github/scripts/verify-reused-native.mjs "$RUNNER_TEMP/verify-reused-native.mjs"
+          cp .github/scripts/package-javascript-release.sh "$RUNNER_TEMP/package-javascript-release.sh"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.validated.outputs.revision }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Verify reuse and select new tag
+        env:
+          NATIVE_SELECTION_RELEASE: ${{ inputs.native_selection_release }}
+          SELECTION_SHA256: ${{ steps.validated.outputs.selection_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_revision=$(git rev-parse "refs/tags/$NATIVE_SELECTION_RELEASE^{commit}")
+          git merge-base --is-ancestor "$baseline_revision" HEAD
+          package_version=$(node -p "require('./package.json').version")
+          [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          release_tag="v$package_version"
+          # Reuse never replaces a published version or a manually pushed native tag.
+          test "$release_tag" != "$NATIVE_SELECTION_RELEASE"
+          existing_tag=$(git ls-remote --tags origin "refs/tags/$release_tag")
+          test -z "$existing_tag"
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/native-selection-source" "$baseline_revision"
+          mkdir release-assets "$RUNNER_TEMP/native-selection"
+          gh release download "$NATIVE_SELECTION_RELEASE" --repo "$GITHUB_REPOSITORY" \
+            --pattern native-package-selection.json --dir "$RUNNER_TEMP/native-selection"
+          node "$RUNNER_TEMP/verify-reused-native.mjs" \
+            "$RUNNER_TEMP/native-selection/native-package-selection.json" "$SELECTION_SHA256" \
+            "$RUNNER_TEMP/native-selection-source" "$GITHUB_REPOSITORY" \
+            release-assets/native-package-selection.json
+      - name: Package and verify installable JavaScript toolchain
+        run: bash "$RUNNER_TEMP/package-javascript-release.sh"
+      - name: Create GitHub release
+        env:
+          RELEASE_REVISION: ${{ steps.validated.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN-created tags do not trigger the tag-push native workflow.
+          # A personal token or a manually pushed tag would start native builds.
+          # Claim the tag atomically: release --target ignores its SHA if another
+          # publisher creates the tag after our early absence check.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_REVISION" >/dev/null
+          gh release create "$RELEASE_TAG" --verify-tag --target "$RELEASE_REVISION" \
+            --generate-notes release-assets/*

@@ -201,8 +201,9 @@ application `repoRoot`, an authenticated `compilerPackage`, optional
 `sourceRoots` for first-party directories outside the configured functions
 directory. The graph passes that functions directory to the native compiler, so
 generated-server registrations are recognized at the configured path. Use the
-native compiler package and JavaScript orchestrator from the same release so
-their graph protocols match.
+native compiler package selected by the JavaScript release's bundled
+`native-package-selection.json` so their graph protocols match. A JavaScript-only
+release can retain native assets from an earlier release.
 
 Ordinary V8 actions remain fresh unless selected through
 `bundler.experimentalContextReuse.actions.entries` in `convex.json`. Selected
@@ -328,7 +329,7 @@ The npm/source-build path below remains available for compiler development and
 callers that explicitly manage their own tool inputs.
 
 Install the JavaScript package from the matching tagged release into a project
-that already depends on a compatible Convex SDK. For `v0.2.52`:
+that already depends on a compatible Convex SDK. For `v0.2.54`:
 
 ```sh
 npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.54/convex-wasm-compiler-0.2.54.tgz
@@ -1018,7 +1019,7 @@ Release binaries are native executables. Build and test on the matching
 operating system and architecture: Linux x86-64, macOS Apple Silicon, or macOS
 Intel. Cross-compilation alone does not establish release support.
 
-Tagged releases publish the installable JavaScript package and authenticated
+Native releases publish the installable JavaScript package and authenticated
 compiler and precompiler packages for those hosts, plus complete toolchain
 archives. Each archive must pass a source-to-AOT smoke test after extraction
 into a different path. The release
@@ -1027,6 +1028,12 @@ It keeps the native control manifests, package IDs, binaries, and host selection
 together as release assets. A downstream tool can select a release by tag and
 verify the native manifest and binary hashes before placing the package in its
 content-addressed cache. A release can be consumed without this source checkout.
+
+JavaScript-only releases reuse a verified native selection from a previous
+release and publish the npm package without rebuilding native executables or
+bundled toolchains. Use the dedicated workflow described in
+[JavaScript-only releases](docs/toolchain-releases.md#javascript-only-releases);
+manually creating a version tag starts the native release workflow.
 
 The precompiler accepts Core Wasm inputs up to 320 MiB and publishes AOT
 artifacts up to 1 GiB, matching the backend's

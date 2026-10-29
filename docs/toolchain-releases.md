@@ -151,6 +151,50 @@ whole run, including Windows WSL2, to have passed. It packages the JavaScript
 release from that run's source commit and publishes its existing native and
 toolchain artifacts. The version comes from the tested `package.json`; an
 existing version tag must point to the same commit.
+If the tag is absent, publication creates it atomically after packaging so a
+concurrent publisher cannot substitute another source commit. A publication
+failure can leave that tag behind; inspect the run before retrying.
+
+### JavaScript-only releases
+
+For changes that preserve the native source contract, bump the npm package version
+and lockfile, push the source to `main`, and wait for its normal CI run to succeed.
+Then dispatch the dedicated workflow, naming that CI run and the previous release
+whose native selection is being reused:
+
+```sh
+gh workflow run release-javascript.yml --ref main \
+  -f ci_run_id=RUN_ID -f native_selection_release=vPREVIOUS_VERSION
+```
+
+Do not push the new version tag or create its release manually. The JavaScript
+workflow creates the tag with `GITHUB_TOKEN`, which does not trigger another
+workflow. Creating a tag through the GitHub API with a personal token still fires
+the native release workflow, just like a Git tag push.
+
+The workflow packages the exact successful CI commit. Release scripts come from
+the workflow's own revision, so the tested commit can predate those scripts;
+source collectors and package readers come from the tested checkout. It checks
+the previous release's selection against GitHub's asset SHA-256, verifies every selected
+compiler and precompiler manifest, binary hash and platform header, and copies the
+selection without changing its URLs or package IDs. All three native platforms
+remain available; their original build and smoke-test provenance remains intact.
+It compares the complete native source closures against the selected previous
+release, including Rust includes outside the crate. Only the package's own version
+fields in `package-lock.json` may differ; dependency changes require the native
+release path. This comparison preserves the previously released combination; it
+does not claim the retained binaries were rebuilt from the new JavaScript commit.
+
+Both release paths use the same package installation and command/import checks.
+The JavaScript path publishes only the npm tarball, its checksum and the verified
+native selection. It does not rebuild or republish bundled toolchains. Existing
+tags are rejected, and a failed verification never publishes a release. Normal CI
+continues to run for both kinds of source changes.
+
+After verification, the workflow atomically creates the version tag before
+uploading the release. If publication fails after that point, the tag may remain;
+inspect that run and any draft release before removing the unused tag to retry.
+The workflow never overwrites a tag or an existing release.
 
 ## Building a release locally
 

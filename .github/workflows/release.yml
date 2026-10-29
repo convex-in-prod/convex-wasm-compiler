@@ -64,6 +64,15 @@ jobs:
           fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+      - name: Preserve workflow packaging script
+        run: |
+          # A successful native run can predate this extracted script. Keep the
+          # workflow's script while packaging only the selected run's source.
+          cp .github/scripts/package-javascript-release.sh "$RUNNER_TEMP/package-javascript-release.sh"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
           ref: ${{ steps.validated.outputs.revision }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -85,11 +94,14 @@ jobs:
             test "$GITHUB_REF_NAME" = "$release_tag"
           fi
           git ls-remote --tags origin "refs/tags/$release_tag" "refs/tags/$release_tag^{}" > "$RUNNER_TEMP/release-tag"
+          release_tag_exists=false
           if [ -s "$RUNNER_TEMP/release-tag" ]; then
             # ls-remote emits an annotated tag's peeled commit after its tag object.
             test "$(tail -1 "$RUNNER_TEMP/release-tag" | cut -f1)" = "$RELEASE_REVISION"
+            release_tag_exists=true
           fi
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG_EXISTS=$release_tag_exists" >> "$GITHUB_ENV"
       - name: Prepare release assets
         shell: bash
         run: |
@@ -119,43 +131,7 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG"
       - name: Package installable JavaScript toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_version=$(node -p "require('./package.json').version")
-          test "$RELEASE_TAG" = "v$package_version"
-          cp release-assets/native-package-selection.json scripts/native-package-selection.json
-          npm pack --pack-destination release-assets --quiet
-          package_filename="convex-wasm-compiler-$package_version.tgz"
-          package_archive="$PWD/release-assets/$package_filename"
-          test -f "$package_archive"
-          sdk_package=$(node -p "require('./package.json').devDependencies.convex")
-          npm install --prefix "$RUNNER_TEMP/convex-wasm-package" \
-            --omit=dev --no-save "$package_archive" "$sdk_package"
-          package_root="$RUNNER_TEMP/convex-wasm-package/node_modules/convex-wasm-compiler"
-          cmp release-assets/native-package-selection.json "$package_root/scripts/native-package-selection.json"
-          for required in docs/runtime-compatibility.md docs/memory-reclamation.md docs/guest-memory-maintenance.md scripts/build-wasm-allocator.py scripts/lib/convex-wasm-allocator.h scripts/lib/convex-wasm-allocator.c scripts/vendor/convex-wasm-native-intl/ADAPTER-LICENSE.txt scripts/vendor/convex-wasm-native-intl/ICU-LICENSE.txt scripts/test-fixtures/native-values/resource-probe.cpp scripts/test-fixtures/convex-wasm-request-envelope/report-fixture.mjs; do
-            test -s "$package_root/$required"
-          done
-          for command in convex-wasm-build convex-wasm-backend-report convex-wasm-authority convex-wasm-bind convex-wasm-acquire-native convex-wasm-setup-gate convex-wasm-cache convex-wasm-publish-registry convex-wasm-transfer-registry; do
-            test -x "$RUNNER_TEMP/convex-wasm-package/node_modules/.bin/$command"
-            if "$RUNNER_TEMP/convex-wasm-package/node_modules/.bin/$command" --invalid-option >"$RUNNER_TEMP/$command.stdout" 2>"$RUNNER_TEMP/$command.stderr"; then
-              echo "Installed command did not reject an invalid option: $command" >&2
-              exit 1
-            fi
-          done
-          PACKAGE_ROOT="$package_root" node --input-type=module -e '
-            const root = process.env.PACKAGE_ROOT;
-            await Promise.all([
-              import(`${root}/scripts/build-convex-wasm.mjs`),
-              import(`${root}/scripts/backend-report.mjs`),
-              import(`${root}/scripts/authority-project.mjs`),
-              import(`${root}/scripts/bind-convex-wasm.mjs`),
-              import(`${root}/scripts/plan-registry-transfer.mjs`),
-              import(`${root}/scripts/publish-registry.mjs`),
-            ]);
-          '
-          (cd release-assets && sha256sum "$package_filename" >"$package_filename.sha256")
+        run: bash "$RUNNER_TEMP/package-javascript-release.sh"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,6 +139,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          options=(--target "$RELEASE_REVISION")
-          if [ "$GITHUB_EVENT_NAME" = push ]; then options+=(--verify-tag); fi
-          gh release create "$RELEASE_TAG" "${options[@]}" --generate-notes release-assets/*
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$RELEASE_TAG_EXISTS" = false ]; then
+            # Another publisher can claim this version while we package. Atomically
+            # claim it here: release --target would silently accept that other tag.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_REVISION" >/dev/null
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag --target "$RELEASE_REVISION" \
+            --generate-notes release-assets/*
