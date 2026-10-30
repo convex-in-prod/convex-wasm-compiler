@@ -924,8 +924,14 @@ scope and preserves exact pre-/post-quarantine comparisons; a failed comparison
 never refreshes a plan's witness. Recovery precedes the next invocation's new inventory.
 Pressure uses one initial immutable occupancy measurement and one per completed wave;
 the separate whole-cache report remains separately accounted.
-Artifact inventory reads use four concurrent workers. Overlapping checks of the
-same private ancestor share only pending work; later checks reopen the directory.
+Artifact inventory reads use four concurrent workers. Within one locked inventory,
+private ancestor checks reuse an earlier open/fstat/path proof only after a fresh
+`lstat` confirms the same inode, owner, mode, size and timestamps. Changed ancestors
+receive a full check; leaf directories, files and later inventories retain their
+full checks. Other callers share only pending directory checks. Freshly parsed JSON
+uses a data-only canonicalization check and requires exact canonical UTF-8 bytes,
+rejecting a leading byte-order mark. Payload authentication and structured digests
+for canonical records remain unchanged.
 Reclaim estimates exclude file blocks with surviving hardlinks outside each
 candidate; category allocation totals can include those shared blocks.
 Use the same cache root for builds and maintenance. A caller assembling a build

@@ -35,6 +35,7 @@ import {
   requirePrivateCacheDirectory,
   requirePrivateCacheDirectoryFileIdentities,
   requirePrivateCacheFile,
+  withPrivateCacheAncestorValidation,
 } from "./convex-wasm-private-cache.mjs";
 import {
   normalizeConvexWasmCompilerDescriptorCacheProjection,
@@ -326,12 +327,32 @@ async function readCanonical(
   } catch (error) {
     throw new Error(`${description} is not JSON: ${path}`, { cause: error });
   }
-  const canonical = canonicalJson(value);
-  if (`${canonical}\n` !== source) fail(`${description} is not canonical JSON: ${path}`);
+  // JSON.parse creates data-only trees. Avoid the general canonicalizer's proxy, accessor and
+  // frozen-object checks on every node of large records, while retaining exact byte comparison.
+  // Numeric object keys can enumerate out of UTF-16 order; the existing normalizer handles them.
+  const canonical = parsedJsonKeysAreCanonical(value) ? JSON.stringify(value) : canonicalJson(value);
+  // The fatal UTF-8 decoder strips a leading BOM. Reject that byte difference before
+  // reusing the original bytes for a digest of canonical JSON without its newline.
+  if (`${canonical}\n` !== source || Buffer.byteLength(source) !== bytes.length) {
+    fail(`${description} is not canonical JSON: ${path}`);
+  }
   if (expectedArtifact !== undefined && value !== null && typeof value === "object") {
-    authenticatedStructuredDigests.set(value, sha256(Buffer.from(canonical)));
+    authenticatedStructuredDigests.set(value, sha256(bytes.subarray(0, -1)));
   }
   return value;
+}
+
+function parsedJsonKeysAreCanonical(value) {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (value === null || typeof value !== "object") return true;
+  if (Array.isArray(value)) return value.every(parsedJsonKeysAreCanonical);
+  let previous;
+  for (const key of Object.keys(value)) {
+    if (previous !== undefined && key < previous) return false;
+    previous = key;
+    if (!parsedJsonKeysAreCanonical(value[key])) return false;
+  }
+  return true;
 }
 
 async function pathInfo(path) {
@@ -3681,7 +3702,8 @@ async function planConvexWasmImmutableGcMeasured({
   requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
   requireLimit(recentRetentionMilliseconds, "recent retention period", false);
   const [inventory, immutableAllocatedBytes] = await settleConcurrentWork([
-    measureConvexWasmRetentionPhase("inventory", () => collectImmutableInventory(cacheLayout)),
+    measureConvexWasmRetentionPhase("inventory", () =>
+      withPrivateCacheAncestorValidation(() => collectImmutableInventory(cacheLayout))),
     immutableCacheAllocatedBytes(cacheLayout),
   ]);
   return (await measureConvexWasmRetentionPhase("planDerivation", () => deriveImmutablePlan({
@@ -3734,7 +3756,8 @@ export async function maintainConvexWasmImmutableGc({
   if (initialImmutableAllocatedBytes !== undefined) requireLimit(initialImmutableAllocatedBytes, "initial immutable occupancy", false);
   const recovered = await removeQuarantinedImmutableGcCandidates(cacheLayout);
   let fence = await captureInventoryFence(cacheLayout);
-  const inventory = await measureConvexWasmRetentionPhase("inventory", () => collectImmutableInventory(cacheLayout));
+  const inventory = await measureConvexWasmRetentionPhase("inventory", () =>
+    withPrivateCacheAncestorValidation(() => collectImmutableInventory(cacheLayout)));
   const authenticatedFence = await captureInventoryFence(cacheLayout);
   await verifyInventoryFence(fence, authenticatedFence);
   fence = authenticatedFence;

@@ -97,6 +97,48 @@ import {
   writeLegacyDeploymentResultCertificate
 } from "../test-fixtures/cache-retention.mjs";
 
+test("inventory canonical JSON retains parsed data and rejects alternate byte encodings", async (t) => {
+  for (const numericKeys of [false, true]) {
+    await t.test(numericKeys ? "numeric-key normalization" : "parsed-data fast path", async (t) => {
+      const value = await fixture(t);
+      const cacheLayout = value.layout("canonical-inventory");
+      const { compilerOutput, record } = await writeCompilerOutputFixture(cacheLayout);
+      record.bridge.requestEnvelope = {
+        nested: [JSON.parse('{"__proto__":{"value":"\\ud800"},"toJSON":"data"}')],
+        number: 0,
+        ...(numericKeys ? { numeric: JSON.parse('{"10":"ten","2":"two"}') } : {}),
+      };
+      const source = `${canonicalJson(record)}\n`;
+      const write = (payload) => writeGenericArtifact({
+        cacheLayout, extension: "json", stage: compilerOutput.stage,
+        identity: compilerOutput.entry.identity, metadata: compilerOutput.entry.metadata, payload,
+      });
+      const plan = () => withHeavyLock(value.environment, () => planConvexWasmImmutableGc({
+        cacheLayout, environment: value.environment,
+      }));
+      await write(source);
+      assert.ok((await plan()).retained.artifacts.includes(`${compilerOutput.stage}\0${compilerOutput.key}`));
+      for (const changed of [
+        `\ufeff${source}`,
+        ` ${source}`,
+        source.slice(0, -1),
+        `${source}\n`,
+        source.replace('"stage":', '"stage":null,"stage":'),
+        source.replace('"fixture":', '"\\u0066ixture":'),
+        source.replace('"number":0', '"number":-0'),
+        source.replace('"number":0', '"number":1e400'),
+        ...(numericKeys ? [source.replace('"2":"two","10":"ten"', '"10":"ten","2":"two"')] : []),
+      ]) {
+        assert.notEqual(changed, source);
+        // Reauthenticate the altered payload in its entry so only structured JSON validation
+        // can reject it, rather than the earlier generic payload hash or metadata validator.
+        await write(changed);
+        await assert.rejects(plan(), /recent immutable authority is corrupt/u);
+      }
+    });
+  }
+});
+
 test("successful builds remove their object-level work root", async (t) => {
   const value = await fixture(t);
   const layout = value.layout("successful-build");

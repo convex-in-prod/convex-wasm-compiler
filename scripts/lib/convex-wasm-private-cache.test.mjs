@@ -8,6 +8,7 @@ import {
   requirePrivateCacheDirectory,
   requirePrivateCacheDirectoryFileIdentities,
   requirePrivateCacheFile,
+  withPrivateCacheAncestorValidation,
 } from "./convex-wasm-private-cache.mjs";
 
 async function createPrivateEntry(context) {
@@ -95,6 +96,42 @@ test("binds direct file identities across a cache-entry read", async (context) =
   await authenticated.verify();
   await fs.writeFile(materialPath, '{"changed":true}\n');
   await assert.rejects(authenticated.verify(), /changed during file authentication/u);
+});
+
+test("inventory ancestor reuse rechecks permissions, replacements and later scopes", async (context) => {
+  const { cacheRoot, directory } = await createPrivateEntry(context);
+  const leaf = join(directory, "leaf");
+  await fs.mkdir(leaf, { mode: 0o700 });
+  const originalOpen = fs.open;
+  let ancestorOpens = 0;
+  fs.open = async function (path, ...args) {
+    if (path === directory) ancestorOpens += 1;
+    return await originalOpen.call(this, path, ...args);
+  };
+  try {
+    await withPrivateCacheAncestorValidation(async () => {
+      await requirePrivateCacheDirectory(cacheRoot, leaf);
+      await requirePrivateCacheDirectory(cacheRoot, leaf);
+      assert.equal(ancestorOpens, 1);
+      await fs.chmod(directory, 0o755);
+      await assert.rejects(requirePrivateCacheDirectory(cacheRoot, leaf), /must have mode 0700/u);
+      await fs.chmod(directory, 0o700);
+      await requirePrivateCacheDirectory(cacheRoot, leaf);
+      assert.equal(ancestorOpens, 2);
+      const prior = join(cacheRoot, "prior");
+      await fs.rename(directory, prior);
+      await fs.symlink(prior, directory);
+      await assert.rejects(requirePrivateCacheDirectory(cacheRoot, leaf), /non-symlink directory/u);
+      await fs.unlink(directory);
+      await fs.mkdir(leaf, { recursive: true, mode: 0o700 });
+      await requirePrivateCacheDirectory(cacheRoot, leaf);
+      assert.equal(ancestorOpens, 3);
+    });
+    await withPrivateCacheAncestorValidation(() => requirePrivateCacheDirectory(cacheRoot, leaf));
+    assert.equal(ancestorOpens, 4);
+  } finally {
+    fs.open = originalOpen;
+  }
 });
 
 test("file identity verification drains member reads before returning a directory failure", async (context) => {

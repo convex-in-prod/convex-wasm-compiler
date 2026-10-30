@@ -3,6 +3,19 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.58
+
+- Reduce repeated private-ancestor validation during the first immutable inventory.
+  Reuse is scoped to that inventory and requires a fresh matching filesystem check;
+  leaf entries and changed ancestors retain full validation.
+- Avoid general JavaScript-object checks when verifying canonical bytes of freshly
+  parsed JSON records. Require exact canonical UTF-8 bytes, rejecting leading
+  byte-order marks before deriving structured digests; keep payload authentication.
+
+This JavaScript tooling release reuses the authenticated native selection from
+0.2.57. Semantic producer identities, native packages, retention policy, cache
+formats and durable deletion are unchanged. No native rebuild is required.
+
 ## 0.2.57
 
 - Authenticate one immutable inventory per maintenance invocation and derive successive

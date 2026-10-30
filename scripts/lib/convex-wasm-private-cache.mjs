@@ -1,8 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 const PRIVATE_CACHE_FILE_IDENTITY_CONCURRENCY = 4;
 const pendingPrivateDirectoryChecks = new Map();
+const privateAncestorValidation = new AsyncLocalStorage();
+
+export function withPrivateCacheAncestorValidation(operation) {
+  return privateAncestorValidation.run(new Map(), operation);
+}
 
 function fail(message) {
   throw new Error(`Convex Wasm private cache: ${message}`);
@@ -140,9 +146,23 @@ async function checkStablePrivateEntry(path, type, mode, uid) {
     if (opened.dev !== afterPath.dev || opened.ino !== afterPath.ino) {
       fail(`${path} changed during validation`);
     }
+    return afterPath;
   } finally {
     await handle.close();
   }
+}
+
+async function requirePrivateAncestor(path, uid) {
+  const scope = privateAncestorValidation.getStore();
+  if (scope === undefined) return requireStablePrivateEntry(path, "directory", 0o700, uid);
+  const current = await fs.lstat(path);
+  requireEntry(current, path, "directory", 0o700, uid);
+  const previous = scope.get(path);
+  // A locked inventory repeatedly traverses the same few ancestors. Every traversal still
+  // checks current inode, ownership, mode and timestamps; only an unchanged directory can
+  // reuse its earlier open/fstat/path proof. Leaf directories and files keep their full checks.
+  if (previous !== undefined && samePrivateDirectory(previous, current)) return;
+  scope.set(path, await requireStablePrivateEntry(path, "directory", 0o700, uid));
 }
 
 async function requireNoSymlinkAncestors(path) {
@@ -166,10 +186,12 @@ async function requirePrivateDirectories(cacheRoot, directory, uid) {
   }
   await requireNoSymlinkAncestors(dirname(cacheRoot));
   let current = cacheRoot;
-  await requireStablePrivateEntry(current, "directory", 0o700, uid);
+  if (current === directory) await requireStablePrivateEntry(current, "directory", 0o700, uid);
+  else await requirePrivateAncestor(current, uid);
   for (const component of relative(cacheRoot, directory).split(sep).filter(Boolean)) {
     current = join(current, component);
-    await requireStablePrivateEntry(current, "directory", 0o700, uid);
+    if (current === directory) await requireStablePrivateEntry(current, "directory", 0o700, uid);
+    else await requirePrivateAncestor(current, uid);
   }
 }
 
