@@ -3,6 +3,28 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.59
+
+- Compile eligible root queries and mutations in applications using components.
+  Preserve component definitions in deployment requests and exclude component
+  implementations, including `Init`, from Wasm route selection.
+- Support nested `ctx.runQuery` and `ctx.runMutation` calls through the existing
+  typed runtime. Authenticate generated root and component references without
+  compiling the callee or encoding its runtime choice in the caller artifact.
+- Preserve `ConvexError` data and SDK class identity across nested calls through
+  both entry ABIs. Retain terminal host-operation attribution for shadow comparison;
+  SDK wrappers must preserve the original rejection as a cause for that attribution.
+- Update the Rust Oxc frontend to main revision `71c628af95bf` (0.157.0) and tsrs
+  to `0.23.0-ts7.1.0-beta`. Use its stable API exports and add focused typed promise
+  linting for JavaScript tooling.
+
+This release rebuilds native compiler, precompiler and bundled toolchain packages.
+New capability artifacts require backend support for
+`convex_async_operation_error_data_take_v1` and `convex_developer_error_data_v1`.
+Updated backends continue accepting older artifacts. Component implementations
+retain their ordinary runtime; the current nested-call provider executes callees
+through V8 recursion.
+
 ## 0.2.58
 
 - Reduce repeated private-ancestor validation during the first immutable inventory.

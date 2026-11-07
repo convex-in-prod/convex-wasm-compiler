@@ -332,7 +332,7 @@ Install the JavaScript package from the matching tagged release into a project
 that already depends on a compatible Convex SDK. For `v0.2.54`:
 
 ```sh
-npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.54/convex-wasm-compiler-0.2.54.tgz
+npm install --save-dev https://github.com/convex-in-prod/convex-wasm-compiler/releases/download/v0.2.59/convex-wasm-compiler-0.2.59.tgz
 ```
 
 The project owns its Convex SDK dependency; the compiler resolves that installed
