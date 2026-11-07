@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { runInNewContext } from "node:vm";
 
-import { API, ModuleKind } from "tsrs/unstable/sync";
-import { ScriptTarget } from "tsrs/unstable/ast";
+import { API, ModuleKind } from "tsrs/sync";
+import { ScriptTarget } from "tsrs/ast";
 
 import { renderConvexWasmIntrinsicHardeningPrelude } from "./convex-wasm-intrinsic-hardening.mjs";
 import {

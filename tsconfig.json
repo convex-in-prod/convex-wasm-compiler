@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    // Infer JavaScript types for promise linting without enabling a repository-wide typecheck.
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ESNext",
+    "module": "NodeNext",
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.mjs", ".github/scripts/**/*.mjs"],
+  "exclude": ["scripts/**/*.test.mjs", "scripts/test-fixtures", "scripts/vendor"]
+}

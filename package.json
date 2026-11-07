@@ -56,7 +56,7 @@
     "@babel/traverse": "7.29.7",
     "domexception": "4.0.0",
     "esbuild": "0.27.0",
-    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
+    "tsrs": "0.23.0-ts7.1.0-beta",
     "whatwg-url": "14.2.0",
     "zod": "^4.4.3"
   },
@@ -78,6 +78,7 @@
     "matrix:authority": "node scripts/create-convex-wasm-request-envelope-evidence-authority.mjs",
     "matrix:codec": "node scripts/run-convex-wasm-committed-value-codec-matrix.mjs",
     "matrix:request": "node scripts/run-convex-wasm-request-envelope-matrix.mjs",
+    "lint": "OXLINT_TSGOLINT_PATH=./node_modules/.bin/tsrs-lint oxlint --type-aware --disable-nested-config scripts .github/scripts",
     "check:js": "node scripts/check-javascript.mjs",
     "check:runtime-support": "node scripts/generate-convex-wasm-runtime-support.mjs",
     "package:compiler": "node scripts/package-convex-wasm-compiler.mjs",
@@ -112,6 +113,8 @@
     "test:toolchain": "node --test scripts/lib/convex-wasm-hermes-source.test.mjs scripts/lib/convex-wasm-toolchain-package.test.mjs"
   },
   "devDependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/5f01b77b5f8b121b994fa53888b5c6cb78effcc4/convex.tgz"
+    "@types/node": "24.19.2",
+    "convex": "https://convex-in-prod.github.io/packages/convex/5f01b77b5f8b121b994fa53888b5c6cb78effcc4/convex.tgz",
+    "oxlint": "1.92.0"
   }
 }

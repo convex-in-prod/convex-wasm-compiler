@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { API, ModuleKind } from 'tsrs/unstable/sync';
-import { ScriptTarget } from 'tsrs/unstable/ast';
+import { API, ModuleKind } from 'tsrs/sync';
+import { ScriptTarget } from 'tsrs/ast';
 import { renderConvexWasmIntrinsicHardeningPrelude } from '../../scripts/lib/convex-wasm-intrinsic-hardening.mjs';
 
 process.env.TZ = 'UTC';

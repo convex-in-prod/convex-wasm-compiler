@@ -1,0 +1,9 @@
+{
+  "categories": { "correctness": "off" },
+  "plugins": ["typescript"],
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error"
+  },
+  "ignorePatterns": ["**/*.test.mjs", "scripts/test-fixtures/**", "scripts/vendor/**"]
+}

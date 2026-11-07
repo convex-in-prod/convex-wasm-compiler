@@ -1062,7 +1062,8 @@ function createBoundedAsyncScheduler(concurrency, description, { stopOnError = f
       const { operation, reject, resolve } = queue.shift();
       activeCount += 1;
       maximumActiveCount = Math.max(maximumActiveCount, activeCount);
-      Promise.resolve()
+      // This detached chain settles the promise returned by run().
+      void Promise.resolve()
         .then(operation)
         .catch((error) => {
           if (stopOnError) stop(error);

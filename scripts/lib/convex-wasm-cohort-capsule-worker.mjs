@@ -66,6 +66,7 @@ export function createConvexWasmCohortCapsuleWorkerPool({ jobs }) {
       }
       rejectPool(error);
     });
+    // oxlint-disable-next-line typescript/no-misused-promises -- The handler settles the assigned task and catches operation failures.
     worker.on("message", async (message) => {
       const task = record.task;
       try {
@@ -150,6 +151,7 @@ if (!isMainThread && workerData?.role === workerRole) {
   let modules;
   // Defer imports until this module has finished evaluation: descriptor admission imports the
   // owned-result predicate above, while the capsule itself imports the artifact pipeline.
+  // oxlint-disable-next-line typescript/no-misused-promises -- The handler reports operation failures through the worker protocol.
   parentPort.on("message", async ({ id, arguments: arguments_ }) => {
     try {
       modules ??= Promise.all([

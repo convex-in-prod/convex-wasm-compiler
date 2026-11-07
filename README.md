@@ -709,16 +709,14 @@ across checkouts.
 `loadConvexGeneratedApiInventory` now runs the bundled route flattener against
 the application's `convex.json` functions directory. The application supplies
 `tsrs` for syntax and semantic analysis in its installed
-package set (the example pins `tsrs` to `0.18.0-ts7.1.0-dev.20260929`). Compiler
+package set (the example pins `tsrs` to `0.23.0-ts7.1.0-beta`). Compiler
 identity includes the installed tsrs API, platform binaries, and libraries,
 including native packages nested by npm;
 `TSRS_BINARY` overrides are rejected, including when reusing cached results.
 The compiler also uses its own pinned tsrs package for producer source closure and
 runtime-surface checks. Both installations need a matching native package. The
-pinned release provides Linux x64/arm64 (GNU and musl) and macOS arm64 binaries;
-it has no macOS x64 binary. Intel macOS native compiler/precompiler packages remain
-separate from complete application build support, which is unavailable with this
-tsrs pin. Windows uses Linux through WSL2. Long-lived callers must restart after
+pinned release provides Linux x64/arm64 (GNU and musl) and macOS x64/arm64 binaries.
+Windows uses Linux through WSL2. Long-lived callers must restart after
 changing installed tsrs material; Node retains previously imported API modules.
 Fresh API analysis retains dependency text and directory listings, and rejects
 changes to those bytes, listings, or observed dependency presence before publishing
@@ -1041,6 +1039,7 @@ pairs and source diffs, including staged edits. Native builds are unnecessary fo
 
 ```sh
 npm ci
+npm run lint
 npm run check:js
 npm run check:runtime-support
 npm run test:runtime-support

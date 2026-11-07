@@ -2300,11 +2300,11 @@ async function loadToolchain(
     fail("toolchain versions changed after application package resolution");
   }
   const esbuild = requireFromConvex("esbuild");
-  const tsrsRuntimePath = requireFromToolchain.resolve("tsrs/unstable/sync");
+  const tsrsRuntimePath = requireFromToolchain.resolve("tsrs/sync");
   authenticateTsrsRuntimeMaterial(tsrsRuntimePath, tsrsMaterialCapture);
   const [tsrsVersionMetadata, tsrs, { API: TsrsAPI }] = await Promise.all([
     import(pathToFileURL(requireFromToolchain.resolve("tsrs")).href),
-    import(pathToFileURL(requireFromToolchain.resolve("tsrs/unstable/ast")).href),
+    import(pathToFileURL(requireFromToolchain.resolve("tsrs/ast")).href),
     import(pathToFileURL(tsrsRuntimePath).href),
   ]);
   if (esbuild.version !== esbuildVersion) {

@@ -7,8 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { API } from "tsrs/unstable/sync";
-import * as ts from "tsrs/unstable/ast";
+import { API } from "tsrs/sync";
+import * as ts from "tsrs/ast";
 import { convexApiSourceSurfaceProjection } from "./lib/convex-api-flattener-reuse.mjs";
 import { projectTsrsCacheRoot } from "./lib/tsrs-cache.mjs";
 

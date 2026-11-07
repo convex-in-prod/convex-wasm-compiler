@@ -11,8 +11,8 @@ import { runInNewContext } from "node:vm";
 import { nodeUrlService } from "../test-fixtures/native-url/node-service.mjs";
 import { version as convexSdkVersion } from "convex";
 import { CommitTsPlaceholder, ConvexError, compareValues, convexToJson, jsonToConvex } from "convex/values";
-import { API, ModuleKind } from "tsrs/unstable/sync";
-import { ScriptTarget } from "tsrs/unstable/ast";
+import { API, ModuleKind } from "tsrs/sync";
+import { ScriptTarget } from "tsrs/ast";
 
 import {
   assertNativeCapabilityHelperDefinitions,

@@ -1,8 +1,8 @@
 import { posix } from "node:path";
 import { TextDecoder } from "node:util";
 
-import { API } from "tsrs/unstable/sync";
-import * as ts from "tsrs/unstable/ast";
+import { API } from "tsrs/sync";
+import * as ts from "tsrs/ast";
 import { parseTsrsSource } from "./tsrs-source.mjs";
 
 const JAVASCRIPT_SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".mjs"]);

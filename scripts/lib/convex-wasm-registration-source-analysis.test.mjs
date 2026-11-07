@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 
-import * as ts from "tsrs/unstable/ast";
-import { API } from "tsrs/unstable/sync";
+import * as ts from "tsrs/ast";
+import { API } from "tsrs/sync";
 
 import { createConvexWasmRegistrationSourceAnalyzer } from "./convex-wasm-registration-source-analysis.mjs";
 

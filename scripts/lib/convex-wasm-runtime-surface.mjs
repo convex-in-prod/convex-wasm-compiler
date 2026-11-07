@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import * as ts from "tsrs/unstable/ast";
-import { API, SymbolFlags } from "tsrs/unstable/sync";
-import { createFileSystem } from "tsrs/unstable/fs";
+import * as ts from "tsrs/ast";
+import { API, SymbolFlags } from "tsrs/sync";
+import { createFileSystem } from "tsrs/fs";
 
 import {
   assertConvexWasmQueryMutationVisibleDeterministicGlobals,

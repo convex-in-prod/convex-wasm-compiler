@@ -161,11 +161,11 @@ const pathsEqualForHost = (left, right) =>
 let syntaxRuntimePromise;
 let ts;
 async function loadTsrs() {
-  const runtimePath = projectRequire.resolve("tsrs/unstable/sync");
+  const runtimePath = projectRequire.resolve("tsrs/sync");
   authenticateTsrsRuntimeMaterial(runtimePath, runtimeMaterialCapture);
   syntaxRuntimePromise ??= Promise.all([
     import(runtimePath),
-    import(projectRequire.resolve("tsrs/unstable/ast")),
+    import(projectRequire.resolve("tsrs/ast")),
   ]);
   const [{ API }, ast] = await syntaxRuntimePromise;
   verifyConvexApiInstalledMaterial(compilerMaterialCapture);
@@ -1931,8 +1931,8 @@ const {
   SignatureKind: NativeSignatureKind,
   SymbolFlags: NativeSymbolFlags,
   TypeFlags: NativeTypeFlags,
-} = await import(projectRequire.resolve("tsrs/unstable/sync"));
-const { serverFS } = await import(projectRequire.resolve("tsrs/unstable/fs"));
+} = await import(projectRequire.resolve("tsrs/sync"));
+const { serverFS } = await import(projectRequire.resolve("tsrs/fs"));
 if (convexTypeScriptInputPaths.includes(componentConfigPath)) {
   const retainedComponentConfigSource = authenticatedRepositorySource(componentConfigPath);
   if (retainedComponentConfigSource === undefined) {

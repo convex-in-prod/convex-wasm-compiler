@@ -6,8 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { API } from "tsrs/unstable/sync";
-import { ScriptTarget } from "tsrs/unstable/ast";
+import { API } from "tsrs/sync";
+import { ScriptTarget } from "tsrs/ast";
 
 import { buildSync } from "esbuild";
 
