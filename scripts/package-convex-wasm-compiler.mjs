@@ -909,9 +909,10 @@ export async function loadBuildInputs(
   cargoBuildJobs,
   workingDirectory = compilerCrateDirectory
 ) {
-  const cargoHomePath = await fs.realpath(
-    resolve(process.env.CARGO_HOME ?? join(homedir(), ".cargo"))
-  );
+  const requestedCargoHome = resolve(process.env.CARGO_HOME ?? join(homedir(), ".cargo"));
+  // A preinstalled Rust toolchain may not have initialized Cargo's cache yet.
+  await fs.mkdir(requestedCargoHome, { recursive: true });
+  const cargoHomePath = await fs.realpath(requestedCargoHome);
   const cargoTargetLinkerVariable = `CARGO_TARGET_${targetTriple
     .toUpperCase()
     .replaceAll("-", "_")}_LINKER`;
