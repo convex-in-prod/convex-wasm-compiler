@@ -153,7 +153,7 @@ pub(crate) use source_graph::{
 const COMPILER_SCHEMA: &str = "convex-wasm-compiler-output";
 const MODULE_SUMMARY_SCHEMA: &str = "convex-wasm-module-summary";
 const ABI_VERSION: &str = "convex-wasm-opaque";
-const OXC_VERSION: &str = "0.155.0";
+const OXC_VERSION: &str = "0.157.0";
 const ADMITTED_LANGUAGE_VERSION: u32 = 30;
 const MAX_CONTROL_INPUT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_BATCH_DIAGNOSTIC_CENSUS_IDS_PER_EXPORT: usize = 16;
