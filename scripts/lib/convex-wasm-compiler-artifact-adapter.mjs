@@ -329,6 +329,11 @@ export function assertConvexWasmCompilerRuntimeSurfacePolicyIdentity(compiler) {
 
 export function createCompilerImportedOperation(operation) {
   assertObject(operation, "compiler operation");
+  // Native project artifacts execute these through the typed UDF bridge. The legacy
+  // imported-operation runtime has no nested-call implementation or callee routing authority.
+  if (operation.kind === "udfRunQuery" || operation.kind === "udfRunMutation") {
+    fail("nested UDF calls require the native capability profile used by project builds");
+  }
   if (!Number.isSafeInteger(operation.id) || operation.id < 1 || operation.id > 65_535) {
     fail("compiler operation ID must be between 1 and 65535");
   }

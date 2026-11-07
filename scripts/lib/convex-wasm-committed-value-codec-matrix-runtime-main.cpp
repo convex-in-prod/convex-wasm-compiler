@@ -116,6 +116,7 @@ extern "C" int convex_async_operation_wait_any(void) { return 0; }
 extern "C" int convex_async_operation_poll_ready(void) { return 0; }
 extern "C" int convex_async_operation_completion_status(int) { return 0; }
 extern "C" long long convex_async_operation_completion_take(int) { return 0; }
+extern "C" long long convex_async_operation_error_data_take_v1(int) { return 0; }
 extern "C" int convex_async_operation_cancel_all(void) { return 0; }
 extern "C" long long convex_capability_current(void) { return 0; }
 extern "C" long long convex_capability_request_decode(const char *, int) { return 0; }
@@ -221,6 +222,7 @@ extern "C" void convex_guest_value_result(const char *value, int value_len) {
 }
 extern "C" void convex_function_result(long long) {}
 extern "C" void convex_developer_error(const char *, int, int) {}
+extern "C" void convex_developer_error_data_v1(const char *, int) {}
 extern "C" int convex_has_developer_error(void) { return 0; }
 extern "C" void convex_profile_mark(int) {}
 

@@ -12,14 +12,14 @@ use super::callable_resolution::{
 use super::callable_value_flow::AuthenticatedFixedPromiseAllChildOrigin;
 use super::effect_materialization::{AuthorizedEffectSiteIndex, materialize_authorized_batch_site};
 use super::{
-    AdmittedOperation, DatabaseOperationSource, Diagnostic, GraphInput, IndexConstraintCandidate,
-    LoadedModule, OperationCandidate, OperationIdentity, ReachableUnit, RegistrationSummary,
-    SourceRange, ValueMode, call_has_optional_callee, call_method_name, callee_identifier,
-    contains_node_type, count_node_type, diagnostic_at, hash_bytes, identifier_name,
-    is_static_member_call, leading_await_count, line_column, module_source, node_type,
-    parse_callsite_specializable_database_get, parse_db_operation, parse_db_operation_for_source,
-    parse_index_constraints, parse_scheduler_operation, source_slice, span,
-    unwrap_runtime_expression, unwrap_transparent_expression,
+    AdmittedOperation, DatabaseOperationSource, Diagnostic, GraphInput, ImportBinding,
+    IndexConstraintCandidate, LoadedModule, OperationCandidate, OperationIdentity, ReachableUnit,
+    RegistrationSummary, SourceRange, ValueMode, call_has_optional_callee, call_method_name,
+    callee_identifier, contains_node_type, count_node_type, diagnostic_at, hash_bytes,
+    identifier_name, is_static_member_call, leading_await_count, line_column, module_source,
+    node_type, parse_callsite_specializable_database_get, parse_db_operation,
+    parse_db_operation_for_source, parse_index_constraints, parse_scheduler_operation,
+    source_slice, span, unwrap_runtime_expression, unwrap_transparent_expression,
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -550,6 +550,7 @@ pub(super) fn collect_direct_async_batches(
     enclosing_function: Option<(u32, u32)>,
     suspension: Option<&str>,
     database_operation_source: DatabaseOperationSource,
+    imports: &BTreeMap<String, ImportBinding>,
     output: &mut Vec<DirectAsyncBatchCandidate>,
 ) {
     if let Value::Object(object) = value {
@@ -569,6 +570,7 @@ pub(super) fn collect_direct_async_batches(
                 current_function,
                 suspension == Some("await"),
                 database_operation_source,
+                imports,
             ));
         }
         let kind = object.get("type").and_then(Value::as_str);
@@ -593,6 +595,7 @@ pub(super) fn collect_direct_async_batches(
                 current_function,
                 child_suspension,
                 database_operation_source,
+                imports,
                 output,
             );
         }
@@ -603,6 +606,7 @@ pub(super) fn collect_direct_async_batches(
                 enclosing_function,
                 None,
                 database_operation_source,
+                imports,
                 output,
             );
         }
@@ -692,6 +696,7 @@ pub(super) fn parse_direct_async_batch(
     enclosing_function: Option<(u32, u32)>,
     directly_awaited: bool,
     database_operation_source: DatabaseOperationSource,
+    imports: &BTreeMap<String, ImportBinding>,
 ) -> DirectAsyncBatchCandidate {
     let (start, end) = span(call).expect("Promise.all call has a source span");
     let promise = call
@@ -782,7 +787,8 @@ pub(super) fn parse_direct_async_batch(
                     Some("fixed Promise.all arrays cannot contain spreads".to_string());
                 return candidate;
             }
-            let child = parse_direct_async_batch_fixed_child(element, database_operation_source);
+            let child =
+                parse_direct_async_batch_fixed_child(element, database_operation_source, imports);
             if let Some(error) = &child.shape_error
                 && error
                     != "direct Promise.all fixed child helper indirection is not mechanically lowered"
@@ -857,7 +863,7 @@ pub(super) fn parse_direct_async_batch(
         && (candidate.iterator_root.is_none() || candidate.iterator_field.is_none())
     {
         candidate.shape_error = Some(
-            if let Some(helper) = resumable_batch_helper_await(map_call) {
+            if let Some(helper) = resumable_batch_helper_await(map_call, imports) {
                 format!(
                     "direct Promise.all callback awaits helper {helper} and resumes afterward; helper-backed resumable children are an intentional V8 boundary"
                 )
@@ -985,7 +991,7 @@ pub(super) fn parse_direct_async_batch(
         return candidate;
     }
     let Some(operation) = parse_db_operation_for_source(expression, "", database_operation_source)
-        .or_else(|| parse_scheduler_operation(expression))
+        .or_else(|| parse_scheduler_operation(expression, imports))
     else {
         record_direct_batch_helper_call(expression, &mut candidate);
         candidate.shape_error = Some(
@@ -1045,25 +1051,28 @@ pub(super) fn parse_direct_async_batch(
     candidate
 }
 
-fn awaited_direct_helper_name(value: &Value) -> Option<String> {
+fn awaited_direct_helper_name(
+    value: &Value,
+    imports: &BTreeMap<String, ImportBinding>,
+) -> Option<String> {
     if let Value::Object(object) = value {
         if object.get("type").and_then(Value::as_str) == Some("AwaitExpression")
             && let Some(argument) = object.get("argument").map(unwrap_runtime_expression)
             && node_type(argument).ok() == Some("CallExpression")
             && parse_db_operation(argument, "").is_none()
-            && parse_scheduler_operation(argument).is_none()
+            && parse_scheduler_operation(argument, imports).is_none()
             && let Some(helper) = callee_identifier(argument)
         {
             return Some(helper);
         }
         for child in object.values() {
-            if let Some(helper) = awaited_direct_helper_name(child) {
+            if let Some(helper) = awaited_direct_helper_name(child, imports) {
                 return Some(helper);
             }
         }
     } else if let Value::Array(values) = value {
         for child in values {
-            if let Some(helper) = awaited_direct_helper_name(child) {
+            if let Some(helper) = awaited_direct_helper_name(child, imports) {
                 return Some(helper);
             }
         }
@@ -1071,7 +1080,10 @@ fn awaited_direct_helper_name(value: &Value) -> Option<String> {
     None
 }
 
-fn resumable_batch_helper_await(map_call: &Value) -> Option<String> {
+fn resumable_batch_helper_await(
+    map_call: &Value,
+    imports: &BTreeMap<String, ImportBinding>,
+) -> Option<String> {
     let callback = map_call
         .get("arguments")?
         .as_array()?
@@ -1091,12 +1103,13 @@ fn resumable_batch_helper_await(map_call: &Value) -> Option<String> {
     statements
         .iter()
         .take(statements.len().saturating_sub(1))
-        .find_map(awaited_direct_helper_name)
+        .find_map(|statement| awaited_direct_helper_name(statement, imports))
 }
 
 fn parse_direct_async_batch_fixed_child(
     value: &Value,
     database_operation_source: DatabaseOperationSource,
+    imports: &BTreeMap<String, ImportBinding>,
 ) -> DirectAsyncBatchFixedChildCandidate {
     let expression = unwrap_runtime_expression(value);
     let (start, end) = span(expression).expect("fixed Promise.all child has a source span");
@@ -1134,7 +1147,7 @@ fn parse_direct_async_batch_fixed_child(
         return child;
     }
     let Some(operation) = parse_db_operation_for_source(expression, "", database_operation_source)
-        .or_else(|| parse_scheduler_operation(expression))
+        .or_else(|| parse_scheduler_operation(expression, imports))
     else {
         record_fixed_direct_batch_helper_call(expression, &mut child);
         child.shape_error = Some(
@@ -1291,6 +1304,7 @@ fn direct_batch_helper_argument_parameter_index(
 pub(super) fn parse_direct_batch_helper(
     function: &Value,
     database_operation_source: DatabaseOperationSource,
+    imports: &BTreeMap<String, ImportBinding>,
 ) -> DirectBatchHelperCandidate {
     if function.get("generator").and_then(Value::as_bool) == Some(true) {
         return rejected_direct_batch_helper(
@@ -1433,7 +1447,7 @@ pub(super) fn parse_direct_batch_helper(
     }
     let (operation, table_parameter_index) = if let Some(operation) =
         parse_db_operation_for_source(expression, "", database_operation_source)
-            .or_else(|| parse_scheduler_operation(expression))
+            .or_else(|| parse_scheduler_operation(expression, imports))
     {
         (operation, None)
     } else if let Some((operation, table_parameter_index)) =

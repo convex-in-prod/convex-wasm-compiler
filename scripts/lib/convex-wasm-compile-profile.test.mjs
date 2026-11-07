@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 import { main as flattenConvexApi } from "../flatten-convex-api.mjs";
 import { resolveConvexWasmApplicationPackageSet } from "./convex-wasm-application-package-set.mjs";
@@ -50,7 +51,7 @@ test("authenticates the exact Zod source before applying the target transform", 
 test("builds a target profile using the explicit application package root", async (context) => {
   const applicationRoot = await fs.mkdtemp(join(await fs.realpath(tmpdir()), "convex-wasm-profile-"));
   context.after(() => fs.rm(applicationRoot, { force: true, recursive: true }));
-  await fs.mkdir(join(applicationRoot, "functions"));
+  await fs.mkdir(join(applicationRoot, "functions", "_generated"), { recursive: true });
   const compilerManifest = JSON.parse(await fs.readFile(join(compilerRoot, "package.json"), "utf8"));
   const applicationManifest = {
     name: "synthetic-convex-project",
@@ -76,9 +77,19 @@ test("builds a target profile using the explicit application package root", asyn
     fs.writeFile(
       join(applicationRoot, "functions", "read.ts"),
       'import { queryGeneric as query } from "convex/server";\n' +
+        'import { ConvexError } from "convex/values";\n' +
+        'import { components } from "./_generated/api.js";\n' +
         'import { type Answer } from "./answer";\n' +
         'import { answer } from "./answer";\n' +
-        'export const read = query({ args: {}, handler: (): Answer => answer });\n'
+        'export const read = query({ args: {}, handler: async (ctx): Promise<Answer> => {\n' +
+        '  try { return await ctx.runQuery(components.child.queries.read, { answer }); }\n' +
+        '  catch (error) { if (error instanceof ConvexError) return answer; throw error; }\n' +
+        '} });\n'
+    ),
+    fs.writeFile(
+      join(applicationRoot, "functions", "_generated", "api.js"),
+      'import { anyApi, componentsGeneric } from "convex/server";\n' +
+        'export const api = anyApi; export const internal = anyApi; export const components = componentsGeneric();\n'
     ),
     fs.writeFile(
       join(applicationRoot, "functions", "answer.ts"),
@@ -129,6 +140,22 @@ test("builds a target profile using the explicit application package root", asyn
     tsrs: packageSet.tsrs.version,
   });
   assert.ok(profile.javascript.length > 0);
+  assert.match(profile.javascript.toString("utf8"), /_reference\/childComponent/u);
+  const handlers = runInNewContext(`${profile.javascript}\n__convexWasmCompileProfile;`, {
+    __convexWasmApplicationGlobalThis: globalThis,
+  });
+  assert.equal(await handlers.read({
+    async runQuery(reference, args) {
+      assert.equal(reference[Symbol.for("toReferencePath")], "_reference/childComponent/child/queries/read");
+      assert.deepEqual(JSON.parse(JSON.stringify(args)), { answer: 42 });
+      return args.answer + 1;
+    },
+  }, {}), 43);
+  const nestedError = new handlers.__convexWasmSdkConvexError({ code: "REJECTED" });
+  assert.equal(await handlers.read({ runQuery: async () => { throw nestedError; } }, {}), 42);
+  const ordinaryError = new Error("ordinary failure");
+  await assert.rejects(handlers.read({ runQuery: async () => { throw ordinaryError; } }, {}),
+    (error) => error === ordinaryError);
   await profile.verifyMaterials();
   const linkedRoot = await fs.mkdtemp(join(await fs.realpath(tmpdir()), "convex-wasm-profile-link-"));
   context.after(() => fs.rm(linkedRoot, { force: true, recursive: true }));

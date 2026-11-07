@@ -703,7 +703,7 @@ writeFileSync(
       timeExecutable: "/usr/bin/time",
     },
     compiler: {
-      admittedLanguageVersion: 29,
+      admittedLanguageVersion: 30,
       compilerRevision: "compiler-fixture-1",
       loweringPipelineSha256: "3".repeat(64),
       sourcePipelineSha256: "4".repeat(64),

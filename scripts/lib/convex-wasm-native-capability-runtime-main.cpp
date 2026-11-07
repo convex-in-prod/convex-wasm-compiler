@@ -285,6 +285,7 @@ constexpr const char *kIntrinsicDescriptorStateValidatorBinding =
     "__convexWasmValidateIntrinsicDescriptorState";
 constexpr const char *kCommitTsPlaceholderExportName =
     "__convexWasmSdkCommitTsPlaceholder";
+constexpr const char *kConvexErrorExportName = "__convexWasmSdkConvexError";
 constexpr size_t kGuestInitializationDiagnosticMaximumBytes = 640;
 constexpr size_t kValueAbiMaximumFrameBytes = 16 * 1024 * 1024;
 // Invocation admission uses Convex value size. Tags and lengths may expand
@@ -3138,7 +3139,8 @@ int64_t exact_positive_handle(Runtime &js, const Value &value) {
 Object invocation_context(Runtime &js,
                           int64_t capability_identity,
                           const char *udf_kind,
-                          const Value &commit_ts_placeholder) {
+                          const Value &commit_ts_placeholder,
+                          const Function &convex_error_constructor) {
   auto start = Function::createFromHostFunction(
       js,
       PropNameID::forAscii(js, "startCapabilityOperation"),
@@ -3277,11 +3279,12 @@ Object invocation_context(Runtime &js,
       std::move(start_typed_write),
       std::move(start_typed_run_udf),
       std::move(start_typed_schedule),
+      Value(js, convex_error_constructor),
   };
   return guest_bridge->create_context
       ->call(js,
              static_cast<const Value *>(context_arguments),
-             size_t{10})
+             size_t{11})
       .asObject(js);
 }
 
@@ -3502,6 +3505,8 @@ extern "C" int convex_wasm_udf_prepare_selected_entry(void) {
       if (initialization_invocation_abi ==
           kSelectedInvocationAbiLegacyHandler) {
         (void)selected_commit_ts_placeholder(js, initialization_slot);
+        (void)selected_application_export(
+            js, initialization_slot, kConvexErrorExportName);
       }
 #endif
       js_error_phase = JSErrorPhase::ClearApplicationBindings;
@@ -3693,8 +3698,11 @@ extern "C" int convex_wasm_udf_run(void) {
             js, static_cast<const Value *>(invocation_arguments), size_t{2});
       } else {
         js_error_phase = JSErrorPhase::CreateInvocationContext;
+        auto convex_error_constructor =
+            selected_application_export(js, entry_slot, kConvexErrorExportName);
         auto context = invocation_context(
-            js, capability_identity, udf_kind, commit_ts_placeholder);
+            js, capability_identity, udf_kind, commit_ts_placeholder,
+            convex_error_constructor);
         Value invocation_arguments[] = {
             Value(js, selected_export),
             std::move(context),
@@ -3717,13 +3725,17 @@ extern "C" int convex_wasm_udf_run(void) {
         const auto settle_operation = [&](int32_t operation_handle) {
           const int32_t completion_status =
               convex_async_operation_completion_status(operation_handle);
+          const int64_t error_data_handle = completion_status == 1
+              ? convex_async_operation_error_data_take_v1(operation_handle)
+              : 0;
           const int64_t payload_handle =
               convex_async_operation_completion_take(operation_handle);
           js_error_phase = JSErrorPhase::SettleOperation;
           guest_bridge->settle->call(js,
                                      static_cast<double>(operation_handle),
                                      static_cast<double>(completion_status),
-                                     static_cast<double>(payload_handle));
+                                     static_cast<double>(payload_handle),
+                                     static_cast<double>(error_data_handle));
         };
         const int32_t operation_handle = convex_async_operation_wait_any();
         if (operation_handle <= 0) {

@@ -66,7 +66,7 @@ export const convexWasmDeploymentLegacyArtifactHandoffIdentity =
   );
 
 export const convexWasmDeploymentOfficialOutputCompilerRecordIdentity = Object.freeze({
-  admittedLanguageVersion: 29,
+  admittedLanguageVersion: 30,
   compilerRevision: "runtime-capability-entry-v1",
   kind: "convex-wasm-official-output-compiler-record-v1",
 });

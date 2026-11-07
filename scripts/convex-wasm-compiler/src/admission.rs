@@ -1063,6 +1063,7 @@ pub(super) fn admit_reachable(
                             | "db.delete"
                             | "scheduler.runAfter"
                             | "scheduler.runAt"
+                            | "udf.runMutation"
                     )
             }) {
                 diagnostics.push(diagnostic_at(

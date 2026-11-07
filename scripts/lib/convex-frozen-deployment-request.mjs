@@ -383,8 +383,11 @@ function inspectCompleteStartPushRequest(requestBytes) {
   if (request.forCodegen !== undefined && request.forCodegen !== false) {
     fail("start-push request must not be for code generation");
   }
-  if (!Array.isArray(request.componentDefinitions) || request.componentDefinitions.length !== 0) {
-    fail("component deployment requests are not supported");
+  // Component definitions are part of the authenticated Convex deployment request. Their
+  // function modules remain outside Wasm ownership; they are deliberately excluded from the
+  // Wasm route inventory and selected-module authority below.
+  if (!Array.isArray(request.componentDefinitions)) {
+    fail("start-push componentDefinitions must be an array");
   }
   if (!Array.isArray(request.nodeDependencies)) {
     fail("start-push nodeDependencies must be an array");

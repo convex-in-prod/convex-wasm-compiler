@@ -38,12 +38,12 @@ use super::query_values::{
     collect_callable_query_builder_flow, collect_callable_query_value_plans,
 };
 use super::{
-    DatabaseOperationSource, LoadedModule, OperationCandidate, OperationIdentity, ReachableUnit,
-    SourceRange, call_has_optional_callee, call_method_name, callee_identifier, contains_node_type,
-    count_node_type, hash_bytes, identifier_name, leading_await_count, module_source, node_type,
-    parse_db_operation_for_source, parse_scheduler_operation, source_range_string, source_slice,
-    span, static_member_chain, static_member_segments, unwrap_runtime_expression,
-    unwrap_transparent_expression, value_string,
+    DatabaseOperationSource, ImportBinding, LoadedModule, OperationCandidate, OperationIdentity,
+    ReachableUnit, SourceRange, call_has_optional_callee, call_method_name, callee_identifier,
+    contains_node_type, count_node_type, hash_bytes, identifier_name, leading_await_count,
+    module_source, node_type, parse_db_operation_for_source, parse_scheduler_operation,
+    source_range_string, source_slice, span, static_member_chain, static_member_segments,
+    unwrap_runtime_expression, unwrap_transparent_expression, value_string,
 };
 use query_value_graph::{AuthenticatedQueryBuilderGraph, build_authenticated_query_builder_graph};
 
@@ -382,6 +382,7 @@ fn callable_control_candidate(
     expression: &Value,
     parameter_starts: &[u32],
     bindings: &ResolvedBindingIndex,
+    imports: &BTreeMap<String, ImportBinding>,
     query_values: &BTreeMap<(u32, u32), CallableQueryValuePlanCandidate>,
     implicit_undefined: bool,
 ) -> Result<Option<CallableLeafControlCandidate>> {
@@ -398,7 +399,7 @@ fn callable_control_candidate(
     }
     let direct_operation =
         parse_db_operation_for_source(expression, "", DatabaseOperationSource::Raw)
-            .or_else(|| parse_scheduler_operation(expression));
+            .or_else(|| parse_scheduler_operation(expression, imports));
     let parameterized_table_operation = direct_operation
         .is_none()
         .then(|| parse_parameterized_table_database_operation(expression))
@@ -614,6 +615,7 @@ fn collect_callable_control_candidates(
     parameter_names: &[String],
     parameter_starts: &[u32],
     bindings: &ResolvedBindingIndex,
+    imports: &BTreeMap<String, ImportBinding>,
     query_values: &BTreeMap<(u32, u32), CallableQueryValuePlanCandidate>,
     current_batch_leaf: Option<(u32, u32, bool)>,
     root: bool,
@@ -635,6 +637,7 @@ fn collect_callable_control_candidates(
                     value,
                     parameter_starts,
                     bindings,
+                    imports,
                     query_values,
                     current_batch_leaf
                         .filter(|(leaf_start, leaf_end, _)| {
@@ -669,6 +672,7 @@ fn collect_callable_control_candidates(
                     parameter_names,
                     parameter_starts,
                     bindings,
+                    imports,
                     query_values,
                     current_batch_leaf,
                     false,
@@ -685,6 +689,7 @@ fn collect_callable_control_candidates(
                     parameter_names,
                     parameter_starts,
                     bindings,
+                    imports,
                     query_values,
                     current_batch_leaf,
                     false,
@@ -739,6 +744,7 @@ fn collect_callable_leaf_plans_inner(
     value: &Value,
     bindings: &ResolvedBindingIndex,
     binding_references: &ResolvedBindingReferenceIndex,
+    imports: &BTreeMap<String, ImportBinding>,
     with_index_callbacks: &BTreeMap<(u32, u32), SourceRange>,
     output: &mut Vec<CallableLeafPlanCandidate>,
 ) -> Result<()> {
@@ -772,6 +778,7 @@ fn collect_callable_leaf_plans_inner(
                     &parameter_names,
                     &parameter_starts,
                     bindings,
+                    imports,
                     &query_values,
                     current_batch_leaf,
                     true,
@@ -827,6 +834,7 @@ fn collect_callable_leaf_plans_inner(
                     child,
                     bindings,
                     binding_references,
+                    imports,
                     with_index_callbacks,
                     output,
                 )?;
@@ -838,6 +846,7 @@ fn collect_callable_leaf_plans_inner(
                     child,
                     bindings,
                     binding_references,
+                    imports,
                     with_index_callbacks,
                     output,
                 )?;
@@ -852,6 +861,7 @@ pub(super) fn collect_callable_leaf_plans(
     value: &Value,
     bindings: &ResolvedBindingIndex,
     binding_references: &ResolvedBindingReferenceIndex,
+    imports: &BTreeMap<String, ImportBinding>,
     output: &mut Vec<CallableLeafPlanCandidate>,
 ) -> Result<()> {
     let mut with_index_callbacks = BTreeMap::new();
@@ -860,6 +870,7 @@ pub(super) fn collect_callable_leaf_plans(
         value,
         bindings,
         binding_references,
+        imports,
         &with_index_callbacks,
         output,
     )

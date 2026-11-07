@@ -52,6 +52,7 @@ const ROUTE_METADATA_EXPORT_NAME = convexWasmCompileProfileRouteMetadataExportNa
 export const convexWasmCompileProfileCommitTsPlaceholderExportName =
   "__convexWasmSdkCommitTsPlaceholder";
 const SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME = convexWasmCompileProfileCommitTsPlaceholderExportName;
+const SDK_CONVEX_ERROR_EXPORT_NAME = "__convexWasmSdkConvexError";
 const TARGET_ZOD_VERSION = "4.4.3";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/u;
@@ -2361,7 +2362,8 @@ function selectedEntryCohort(inventory, entryPath, selectedExportNames) {
     }
     if (
       route.exportName === ROUTE_METADATA_EXPORT_NAME ||
-      route.exportName === SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME
+      route.exportName === SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME ||
+      route.exportName === SDK_CONVEX_ERROR_EXPORT_NAME
     ) {
       fail(`selected entry ${entryPath} uses reserved export ${route.exportName}`);
     }
@@ -2437,7 +2439,7 @@ function virtualEntrySource(selectedEntry, routes, mode) {
   let source =
     `// Convex module ${JSON.stringify(selectedEntry.modulePath)}\n` +
     (mode === convexWasmCompileProfileTargetAdapterMode
-      ? `import { ${SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME} } from "convex/values";\n`
+      ? `import { ${SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME}, ConvexError as ${SDK_CONVEX_ERROR_EXPORT_NAME} } from "convex/values";\n`
       : "") +
     `import { ${imports} } from ${JSON.stringify(`./${selectedEntry.entryPath}`)};\n`;
   for (const [index, route] of routes.entries()) {
@@ -2480,7 +2482,7 @@ function virtualEntrySource(selectedEntry, routes, mode) {
     [
       ROUTE_METADATA_EXPORT_NAME,
       ...(mode === convexWasmCompileProfileTargetAdapterMode
-        ? [SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME]
+        ? [SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME, SDK_CONVEX_ERROR_EXPORT_NAME]
         : []),
       ...routes.map(({ exportName }, index) => `__convexWasmHandler${index} as ${exportName}`),
     ].join(", ") +

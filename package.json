@@ -112,6 +112,6 @@
     "test:toolchain": "node --test scripts/lib/convex-wasm-hermes-source.test.mjs scripts/lib/convex-wasm-toolchain-package.test.mjs"
   },
   "devDependencies": {
-    "convex": "https://convex-in-prod.github.io/packages/convex/2582167f6286c1222c87bc6d6c60e8866c9e940d/convex.tgz"
+    "convex": "https://convex-in-prod.github.io/packages/convex/5f01b77b5f8b121b994fa53888b5c6cb78effcc4/convex.tgz"
   }
 }

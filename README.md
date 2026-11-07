@@ -685,8 +685,12 @@ host authorization. Composing records can copy child bytes; it does not claim
 zero-copy construction.
 
 For local source integration checks, `CONVEX_SDK_TEST_SOURCE_ROOT` selects an
-SDK checkout for the lowering and native-value fixtures. The native fixture
-also takes `CONVEX_HERMES_TEST_SOURCE_ROOT` and
+SDK checkout for the lowering and native-value fixtures. Running
+`CONVEX_SDK_TEST_SOURCE_ROOT=/path/to/convex-js npm run test:lowering` also
+checks terminal host-operation attribution through that SDK's registration and
+syscall wrappers. Those wrappers must retain the original rejection as a
+non-enumerable `.cause`; the check also runs against the pinned SDK package by default.
+The native fixture also takes `CONVEX_HERMES_TEST_SOURCE_ROOT` and
 `CONVEX_HERMES_TEST_BUILD_ROOT`; it links the actual adapter and compares SDK
 query bytes through the host Hermes runtime. This does not replace a selected
 application build or deployment measurement.
@@ -752,8 +756,43 @@ An optional project-owned flattener config lists additional registration builder
 generated-registry exports, additional `sourceRoots`, and `inputFiles` such as
 the application's lockfile or base TypeScript configuration. `patchFiles`
 lists application files that affect source analysis. The functions directory
-comes from `convex.json`; projects without components need no
-`convex.config.ts`.
+comes from `convex.json`. Component configurations can use `convex.config.ts` or
+`convex.config.js`; projects without components need neither.
+
+Component-aware applications use the same root inventory. The flattener accepts
+`app.use(...)` and emits `components` as Convex's `AnyComponents` type, preserving
+the component reference surface for root source analysis. Locally defined
+component directories are excluded from root route discovery. List local component
+directories outside the functions directory in the flattener configuration's
+`sourceRoots` so their source and generated files remain authenticated. Root handlers
+can call queries with `ctx.runQuery`; root mutations can also call mutations with
+`ctx.runMutation`. Project builds use the existing typed nested-call runtime,
+including arguments, results, promise rejection, and transaction options. Static generated
+`api`, `internal`, and `components` references are authenticated and preserved as
+Convex function addresses. The backend resolves the address and owns the callee's
+runtime policy; compiling the caller does not require the callee's code. The
+current shared nested-call provider executes callees through V8 recursion without
+resampling runtime policy. The compiler's call contract does not depend on the
+callee's runtime. Other Wasm eligibility rules still apply.
+
+Nested-call rejections preserve `ConvexError.data`, including when caught or
+rethrown by the caller. Both SDK-wrapper and direct-handler entries reconstruct
+the application's SDK `ConvexError` with the original Convex value, preserving
+`instanceof ConvexError` checks. Native capability artifacts require the backend's
+additive `convex_async_operation_error_data_take_v1` and
+`convex_developer_error_data_v1` imports. Backend capabilities advertise their exact signatures for compatibility
+checks; artifact admission validates the linked imports. Updated backends still
+accept older artifacts, which retain their message-only error behavior. Successful
+calls use the existing value transport without an additional host call.
+
+This support uses the native capability profile in project builds. The older
+blocking-fiber and imported-operation artifact paths do not support nested calls.
+
+Component query, mutation, action, and `Init` routes use their ordinary non-Wasm
+runtime. Component definitions and modules stay in the authenticated deployment
+request, while Wasm route selection covers only root functions. Compiling
+component implementations to Wasm is outside this support boundary.
+
 `buildConvexWasmDeploymentGraphSession` in
 `scripts/lib/convex-wasm-deployment-graph.mjs` accepts `repoRoot`, `inventory`,
 and a positive `materialVerificationConcurrency`. The optional

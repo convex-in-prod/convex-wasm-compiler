@@ -39,7 +39,7 @@ reader retains the old lexical format for existing packages, and legacy monolith
 capability packages retain their eight-entry bound. Module-graph grouping uses
 the logical-unit bound instead of an arbitrary entry-count limit.
 
-Grouping and physical sharding are separate. Keeping a component in its own
+Grouping and physical sharding are separate. Keeping a dependency in its own
 physical shard with one consuming runtime group preserves reusable native code
 when an entry changes. More interchangeable entries within a group can reduce
 fragmented runtime capacity, but grouping alone does not initialize instances

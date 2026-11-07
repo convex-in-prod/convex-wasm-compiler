@@ -10,7 +10,7 @@ import test, { after } from "node:test";
 import { runInNewContext } from "node:vm";
 import { nodeUrlService } from "../test-fixtures/native-url/node-service.mjs";
 import { version as convexSdkVersion } from "convex";
-import { CommitTsPlaceholder, compareValues, convexToJson, jsonToConvex } from "convex/values";
+import { CommitTsPlaceholder, ConvexError, compareValues, convexToJson, jsonToConvex } from "convex/values";
 import { API, ModuleKind } from "tsrs/unstable/sync";
 import { ScriptTarget } from "tsrs/unstable/ast";
 
@@ -145,6 +145,116 @@ test("source SDK reads, writes and scheduling reach the typed runtime without en
   assert.equal(harness.requestPayloads.length, 0);
   assert.equal(harness.outstandingHandles(), 0);
   assert.equal(harness.cleanup(), 0);
+});
+
+test("source SDK wrappers preserve terminal host-operation attribution", async () => {
+  const sdkRoot =
+    process.env.CONVEX_SDK_TEST_SOURCE_ROOT ??
+    dirname(createRequire(import.meta.url).resolve("convex/package.json"));
+  const sdkPackageVersion = JSON.parse(readFileSync(join(sdkRoot, "package.json"), "utf8")).version;
+  const compiled = buildSync({
+    stdin: {
+      contents: `
+        import { mutationGeneric, componentsGeneric } from "sdk-server";
+        import { ConvexError } from "sdk-values";
+        globalThis.sdkConvexError = ConvexError;
+        globalThis.sdkMutation = mutationGeneric(async (ctx, args) => {
+          try {
+            if (args.nested) {
+              await ctx.runMutation(componentsGeneric().child.mutations.write, {});
+            } else {
+              await ctx.db.patch("documents", "missing-id", {});
+            }
+          } catch (error) {
+            if (args.replace) throw new Error(error.message);
+            throw error;
+          }
+        });
+      `,
+    },
+    alias: {
+      "sdk-server": join(sdkRoot, "src/server/index.ts"),
+      "sdk-values": join(sdkRoot, "src/values/index.ts"),
+    },
+    bundle: true,
+    format: "iife",
+    target: "es2022",
+    write: false,
+  }).outputFiles[0].text;
+  const rendered = renderNativeDbGetCapabilityTarget({
+    argumentFields: [],
+    compileProfileJavascript: "var __convexWasmCompileProfile = {};",
+  });
+  const reporter = tsrs.transpileModule([
+    "__convexHostOperationErrorHandle", "__convexReportMessage", "__convexReportThrown",
+  ].map((name) => extractedFunction(rendered, name)).join("\n"), {
+    compilerOptions: { target: ScriptTarget.ES2022 },
+  }).outputText;
+  for (const mode of ["typed", "value", "object", "json", "direct"]) {
+    const disabledHooks = {
+      typed: "",
+      direct: "",
+      value: "asyncSyscallTyped: undefined,",
+      object: "asyncSyscallTyped: undefined, asyncSyscallValueArgs: undefined,",
+      json: "asyncSyscallTyped: undefined, asyncSyscallValueArgs: undefined, asyncSyscallObjectArgs: undefined,",
+    }[mode];
+    const harness = nativeCapabilityHarness({ sdkPackageVersion });
+    // Keep the SDK and guest errors in the same realm; only select which
+    // supported syscall entry points are available to the SDK bundle.
+    harness.guestValue(`((Convex) => { ${compiled} })({ ...globalThis.Convex, ${disabledHooks} });\n${reporter}`);
+    for (const [nested, data] of [[false, undefined], [true, undefined], [true, { count: 7n }]]) {
+      for (const replace of [false, true]) {
+        harness.activateSdk("mutation");
+        const result = mode === "direct"
+          ? harness.guestValue(
+            `sdkMutation._handler(context, { nested: ${nested}, replace: ${replace} })`,
+            { context: harness.createContext("mutation", undefined, 1, harness.guestValue("sdkConvexError")) },
+          )
+          : harness.guestValue(
+            `sdkMutation.invokeMutationValue({ nested: ${nested}, replace: ${replace} })`
+          );
+        const operation = harness.lastStartedOperationHandle();
+        harness.settle(operation, 1, harness.allocate("host rejected"),
+          data === undefined ? 0 : harness.allocate(data));
+        await assert.rejects(result, (error) => {
+          assert.equal(harness.guestValue("error instanceof sdkConvexError", { error }), data !== undefined && !replace);
+          if (nested && !replace) {
+            assert.equal(error.cause.message, "host rejected");
+            assert.equal(Object.getOwnPropertyDescriptor(error, "cause").enumerable, false);
+            for (const wrappers of [6, 7]) {
+              assert.equal(harness.guestValue(`(() => {
+                let terminal = error;
+                for (let i = 0; i < ${wrappers}; ++i) terminal = new Error("wrapper", { cause: terminal });
+                return __convexHostOperationErrorHandle(terminal);
+              })()`, { error }), wrappers === 6 ? operation : 0, mode);
+            }
+          }
+          let reported;
+          let reportedData;
+          harness.guestValue("__convexReportThrown(error)", {
+            error,
+            __convexHostHasDeveloperError: () => 0,
+            __convexHostDeveloperError: (message, length, hostOperationErrorHandle) => {
+              assert.equal(length, Buffer.byteLength(message));
+              reported = { message, hostOperationErrorHandle };
+            },
+            __convexHostDeveloperErrorData: (source, length) => {
+              assert.equal(length, Buffer.byteLength(source));
+              reportedData = jsonToConvex(JSON.parse(source));
+            },
+          });
+          assert.deepEqual(reported, {
+            message: `Uncaught ${data !== undefined && !replace ? "ConvexError" : "Error"}: host rejected`,
+            hostOperationErrorHandle: replace ? 0 : operation,
+          }, mode);
+          assert.deepEqual(reportedData, replace ? undefined : data);
+          return true;
+        });
+        assert.equal(harness.outstandingHandles(), 0);
+        assert.equal(harness.cleanup(), 0);
+      }
+    }
+  }
 });
 
 function lowerConvexWasmExport(input) {
@@ -417,6 +527,7 @@ function nativeCapabilityHarness({
     __convexReportThrown: (error) => {
       throw error;
     },
+    __convexHostOperationErrorCandidates: new WeakMap(),
     __convexSetGuestFunctionResult: (value) => results.push(value),
     __convexSetGuestFunctionTaggedJsonResult: (source) => {
       taggedResultSources.push(source);
@@ -567,7 +678,7 @@ function nativeCapabilityHarness({
     requests.push(take(requestHandle));
     return allocate(null);
   };
-  const settleOperation = (operationHandle, completionStatus, payloadHandle) => {
+  const settleOperation = (operationHandle, completionStatus, payloadHandle, errorDataHandle = 0) => {
     const streamHandle = queryStreamReads.get(operationHandle);
     if (streamHandle !== undefined) {
       const payload = values.get(payloadHandle);
@@ -576,7 +687,7 @@ function nativeCapabilityHarness({
       }
       queryStreamReads.delete(operationHandle);
     }
-    return settle(operationHandle, completionStatus, payloadHandle);
+    return settle(operationHandle, completionStatus, payloadHandle, errorDataHandle);
   };
   const selectedCommitTsPlaceholder = jsonToConvex({ $commitTs: null });
   const guestArguments = (argumentsObject) => {
@@ -626,7 +737,7 @@ function nativeCapabilityHarness({
     cleanup,
     closedQueryStreams,
     capturedQueryValues,
-    createContext: (udfKind, sync = syncOperation, capabilityIdentity = 1) =>
+    createContext: (udfKind, sync = syncOperation, capabilityIdentity = 1, sdkConvexError = ConvexError) =>
       createContext(
         (requestHandle) => startOperation(requestHandle, capabilityIdentity),
         sync,
@@ -656,7 +767,8 @@ function nativeCapabilityHarness({
           startTypedSchedule(
             capabilityIdentity, kind, timeMilliseconds,
             addressKind, address, args, commitTs
-          )
+          ),
+        sdkConvexError
       ),
     date: (value) => new sandbox.Date(value),
     directGetStarts,
@@ -3466,7 +3578,7 @@ test("renders the generic native capability target without operation-ID authorit
   assert.match(code, /kind: "storageGenerateUploadUrl"/u);
   assert.match(code, /kind: "storageDelete"/u);
   assert.match(code, /context\.runQuery = function\(functionReference, args, options\)/u);
-  assert.match(code, /__convexCapabilityStartTypedRunUdf\(\s*useStaleSnapshot \? "snapshotQuery" : "query"/u);
+  assert.match(code, /runUdf\(\s*useStaleSnapshot \? "snapshotQuery" : "query"/u);
   assert.match(code, /request\.udfType !== "query"/u);
   assert.match(code, /request\.udfType !== "snapshotQuery"/u);
   assert.match(code, /__convexCapabilityStartTypedSchedule\(\s*1, delayMilliseconds/u);
@@ -7981,10 +8093,300 @@ test("native capability starts typed nested mutations with pending arguments", a
 
   const queryContext = harness.createContext("query");
   assert.equal(queryContext.runMutation, undefined);
-  assert.throws(
+  await assert.rejects(
     () => context.runMutation("tasks:enqueue", {}, { transactionLimits: { unknown: 1 } }),
     /Transaction limit field is unsupported/u
   );
+  for (const option of ["maxWriteConflictRetries", "writeConflictRetryDelayMs"]) {
+    assert.throws(
+      () => context.runMutation(reference, {}, { [option]: 0 }),
+      /MutationCtx\.runMutation runs within the parent mutation transaction/u
+    );
+  }
+  assert.equal(harness.directRunUdfStarts.length, 0);
+  assert.equal(harness.outstandingHandles(), 0);
+});
+
+test("native nested calls preserve generated component addresses, values, and errors", async () => {
+  const { componentsGeneric } = await import("convex/server");
+  const components = componentsGeneric();
+  for (const [caller, method, reference, address, typeCode] of [
+    ["query", "runQuery", components.child.queries.read, "_reference/childComponent/child/queries/read", 1],
+    ["mutation", "runQuery", components.child.queries.read, "_reference/childComponent/child/queries/read", 1],
+    ["mutation", "runMutation", components.child.mutations.write, "_reference/childComponent/child/mutations/write", 2],
+  ]) {
+    const harness = nativeCapabilityHarness();
+    const context = harness.createContext(caller);
+    const args = { count: 7n, bytes: new Uint8Array([1, 2]).buffer };
+    const pending = context[method](reference, args);
+    const start = harness.directRunUdfStarts.shift();
+    assert.equal(start.typeCode, typeCode);
+    assert.equal(start.addressKind, 2);
+    assert.equal(start.address, address);
+    assert.equal(start.args, args);
+    const result = { count: 8n, bytes: args.bytes };
+    harness.settle(harness.lastStartedOperationHandle(), 0, harness.allocate(result));
+    assert.equal(await pending, result);
+
+    const rejected = context[method](reference, {});
+    const rejection = assert.rejects(rejected, /nested function failed/u);
+    harness.settle(harness.lastStartedOperationHandle(), 1, harness.allocate("nested function failed"));
+    await rejection;
+    assert.equal(harness.outstandingHandles(), 0);
+    assert.equal(harness.cleanup(), 0);
+  }
+});
+
+test("direct nested calls reconstruct the selected SDK ConvexError and retain operation identity", async () => {
+  const { componentsGeneric } = await import("convex/server");
+  const reference = componentsGeneric().child.queries.read;
+  for (const [kind, method] of [
+    ["query", "runQuery"],
+    ["mutation", "runQuery"],
+    ["mutation", "runMutation"],
+  ]) {
+    const harness = nativeCapabilityHarness();
+    const context = harness.createContext(kind);
+    for (const data of [null, false, 0, "", 7n, new Uint8Array([0, 255]).buffer, { count: 9n }]) {
+      const result = context[method](reference, {});
+      const operation = harness.lastStartedOperationHandle();
+      harness.settle(operation, 1, harness.allocate("nested rejected"), harness.allocate(data));
+      await assert.rejects(result, (error) => {
+        assert.ok(error instanceof ConvexError);
+        assert.equal(error.constructor, ConvexError);
+        assert.equal(error.message, "nested rejected");
+        assert.deepEqual(error.data, data);
+        assert.equal(harness.guestValue(
+          "__convexHostOperationErrorCandidates.get(error.cause)", { error }
+        ), operation);
+        return true;
+      });
+      assert.equal(harness.outstandingHandles(), 0);
+      assert.equal(harness.cleanup(), 0);
+    }
+  }
+});
+
+test("direct contexts retain their application's SDK class when another context is created", async () => {
+  // Separately bundled applications can have distinct SDK constructors.
+  class OtherConvexError extends ConvexError {}
+  const harness = nativeCapabilityHarness();
+  const context = harness.createContext("query");
+  const otherContext = harness.createContext("query", undefined, 1, OtherConvexError);
+  for (const [selected, constructor] of [[context, ConvexError], [otherContext, OtherConvexError]]) {
+    const result = (async () => {
+      try {
+        await selected.runQuery("child:read", {});
+      } catch (error) {
+        assert.equal(error.constructor, constructor);
+        error.data.count += 1n;
+        throw error;
+      }
+    })();
+    harness.settle(harness.lastStartedOperationHandle(), 1,
+      harness.allocate("nested rejected"), harness.allocate({ count: 7n }));
+    await assert.rejects(result, (error) => {
+      assert.equal(error.constructor, constructor);
+      assert.deepEqual(error.data, { count: 8n });
+      return true;
+    });
+    assert.equal(harness.outstandingHandles(), 0);
+    assert.equal(harness.cleanup(), 0);
+  }
+});
+
+test("nested SDK calls preserve ConvexError data and release both completion handles", async () => {
+  const { componentsGeneric, queryGeneric, mutationGeneric } = await import("convex/server");
+  const reference = componentsGeneric().child.queries.read;
+  const previousConvex = globalThis.Convex;
+  try {
+    for (const [kind, method, register, invoke] of [
+      ["query", "runQuery", queryGeneric, "invokeQueryValue"],
+      ["mutation", "runQuery", mutationGeneric, "invokeMutationValue"],
+      ["mutation", "runMutation", mutationGeneric, "invokeMutationValue"],
+    ]) {
+      for (const [facade, data] of ["sdkFacade", "legacySdkFacade"].flatMap((facade) =>
+        [null, false, 7n, new Uint8Array([0, 255]).buffer, { code: "REJECTED", count: 9n }]
+          .map((data) => [facade, data]))) {
+        const harness = nativeCapabilityHarness();
+        globalThis.Convex = harness[facade];
+        harness.activateSdk(kind);
+        const handler = register(async (ctx) => {
+          try {
+            await ctx[method](reference, {});
+            assert.fail("nested call must reject");
+          } catch (error) {
+            assert.ok(error instanceof ConvexError);
+            assert.equal(error.message, "nested rejected");
+            assert.deepEqual(error.data, data);
+          }
+          return true;
+        });
+        const result = handler[invoke]({});
+        harness.settle(harness.lastStartedOperationHandle(), 1,
+          harness.allocate("nested rejected"), harness.allocate(data));
+        assert.equal(await result, true);
+        assert.equal(harness.outstandingHandles(), 0);
+        assert.equal(harness.cleanup(), 0);
+      }
+    }
+  } finally {
+    if (previousConvex === undefined) delete globalThis.Convex;
+    else globalThis.Convex = previousConvex;
+  }
+});
+
+test("native terminal errors preserve direct and SDK-serialized ConvexError data", async () => {
+  const { queryGeneric } = await import("convex/server");
+  const code = renderNativeDbGetCapabilityTarget({
+    argumentFields: [], compileProfileJavascript: "var __convexWasmCompileProfile = {};",
+    exportName: "read", udfKind: "query",
+  });
+  const source = tsrs.transpileModule(
+    `${extractedFunction(code, "__convexReportMessage")}\n${extractedFunction(code, "__convexReportThrown")}`,
+    { compilerOptions: { target: ScriptTarget.ES2022 } },
+  ).outputText;
+  let reportedMessage;
+  let reportedData;
+  let allocationFailure;
+  const report = runInNewContext(`${source}\n__convexReportThrown`, {
+    Error,
+    __convexHostHasDeveloperError: () => 0,
+    __convexHostOperationErrorHandle: () => 0,
+    __convexHostDeveloperError: (message) => { reportedMessage = message; },
+    __convexGuestEncodeTagged: (value) => convexToJson(value),
+    __convexAllocateUtf8: (source) => {
+      if (allocationFailure !== undefined && source === '"allocation failure"') throw allocationFailure;
+      return source;
+    },
+    __convexWriteUtf8: (source) => Buffer.byteLength(source),
+    __convexHostDeveloperErrorData: (source, length) => {
+      assert.equal(length, Buffer.byteLength(source));
+      reportedData = jsonToConvex(JSON.parse(source));
+    },
+    __convexFree: () => {},
+  });
+  for (const data of [null, false, "text", { count: 7n, bytes: new Uint8Array([2, 3]).buffer }]) {
+    report(new ConvexError(data));
+    assert.deepEqual(reportedData, data);
+    const wrapper = queryGeneric(() => { throw new ConvexError(data); });
+    await assert.rejects(wrapper.invokeQueryValue({}), (error) => {
+      assert.equal(error.ConvexErrorSymbol, Symbol.for("ConvexError"));
+      report(error);
+      assert.deepEqual(reportedData, data);
+      assert.equal(reportedMessage, `Uncaught ConvexError: ${error.message}`);
+      return true;
+    });
+  }
+  const rethrown = new ConvexError("Uncaught ConvexError: nested rejected");
+  rethrown.data = { code: "REJECTED" };
+  report(rethrown);
+  assert.equal(reportedMessage, rethrown.message);
+  assert.deepEqual(reportedData, rethrown.data);
+  reportedData = undefined;
+  report(new Error("ordinary"));
+  assert.equal(reportedMessage, "Uncaught Error: ordinary");
+  assert.equal(reportedData, undefined);
+  report(new Error("Uncaught Error: nested rejected"));
+  assert.equal(reportedMessage, "Uncaught Error: nested rejected");
+  const unusual = new Error();
+  unusual.name = undefined;
+  unusual.message = 0;
+  report(unusual);
+  assert.equal(reportedMessage, "Uncaught Error: 0");
+  const invalid = new ConvexError(null);
+  Object.defineProperty(invalid, "data", {
+    get() { throw new Error("error data read failed"); },
+  });
+  report(invalid);
+  assert.equal(reportedMessage, "Uncaught Error: error data read failed");
+  assert.equal(reportedData, undefined);
+  const invalidMarker = new Proxy(new ConvexError(null), {
+    has() { throw new Error("error marker read failed"); },
+  });
+  report(invalidMarker);
+  assert.equal(reportedMessage, "Uncaught Error: error marker read failed");
+  assert.equal(reportedData, undefined);
+  reportedMessage = undefined;
+  allocationFailure = new Error("Static Hermes native allocation failed");
+  assert.throws(() => report(new ConvexError("allocation failure")), (error) => error === allocationFailure);
+  assert.equal(reportedMessage, undefined);
+  assert.equal(reportedData, undefined);
+});
+
+test("rethrowing a nested SDK ConvexError preserves caller edits to its data", async () => {
+  const { componentsGeneric, queryGeneric } = await import("convex/server");
+  const harness = nativeCapabilityHarness();
+  const previousConvex = globalThis.Convex;
+  try {
+    globalThis.Convex = harness.sdkFacade;
+    harness.activateSdk("query");
+    const handler = queryGeneric(async (ctx) => {
+      try {
+        await ctx.runQuery(componentsGeneric().child.queries.read, {});
+      } catch (error) {
+        assert.ok(error instanceof ConvexError);
+        error.data.count += 1n;
+        throw error;
+      }
+    });
+    const result = handler.invokeQueryValue({});
+    harness.settle(harness.lastStartedOperationHandle(), 1,
+      harness.allocate("Uncaught ConvexError: nested rejected"), harness.allocate({ count: 7n }));
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof ConvexError);
+      assert.equal(error.message, "Uncaught ConvexError: nested rejected");
+      assert.equal(error.ConvexErrorSymbol, Symbol.for("ConvexError"));
+      assert.deepEqual(jsonToConvex(JSON.parse(error.data)), { count: 8n });
+      return true;
+    });
+    assert.equal(harness.outstandingHandles(), 0);
+    assert.equal(harness.cleanup(), 0);
+  } finally {
+    if (previousConvex === undefined) delete globalThis.Convex;
+    else globalThis.Convex = previousConvex;
+  }
+});
+
+test("native nested argument errors reject promises like the installed SDK", async () => {
+  const { componentsGeneric, mutationGeneric, queryGeneric } = await import("convex/server");
+  const reference = componentsGeneric().child.queries.read;
+  for (const [kind, method, register, invoke] of [
+    ["query", "runQuery", queryGeneric, "invokeQuery"],
+    ["mutation", "runQuery", mutationGeneric, "invokeMutation"],
+    ["mutation", "runMutation", mutationGeneric, "invokeMutation"],
+  ]) {
+    const handler = async (ctx) => {
+      const results = await Promise.allSettled([
+        ctx[method](reference, []),
+        ctx[method](reference, null),
+      ]);
+      return results.map(({ status }) => status);
+    };
+    const expected = JSON.parse(await register(handler)[invoke]("[]"));
+    assert.deepEqual(expected, ["rejected", "rejected"]);
+    const harness = nativeCapabilityHarness();
+    assert.deepEqual(await handler(harness.createContext(kind)), expected);
+    assert.equal(harness.directRunUdfStarts.length, 0);
+    assert.equal(harness.outstandingHandles(), 0);
+  }
+});
+
+test("native nested calls reject non-plain arguments before resolving the address", async () => {
+  const { mutationGeneric, queryGeneric } = await import("convex/server");
+  for (const [kind, method, register, invoke] of [
+    ["query", "runQuery", queryGeneric, "invokeQueryValue"],
+    ["mutation", "runQuery", mutationGeneric, "invokeMutationValue"],
+    ["mutation", "runMutation", mutationGeneric, "invokeMutationValue"],
+  ]) {
+    const handler = (ctx) => ctx[method](null, new Date(0));
+    const message = /The arguments to a Convex function must be an object/u;
+    await assert.rejects(register(handler)[invoke]({}), message);
+    const harness = nativeCapabilityHarness();
+    await assert.rejects(handler(harness.createContext(kind)), message);
+    assert.equal(harness.directRunUdfStarts.length, 0);
+    assert.equal(harness.outstandingHandles(), 0);
+  }
 });
 
 test("native capability starts typed nested queries for query and mutation callers", async () => {
@@ -8054,7 +8456,7 @@ test("native capability starts typed nested queries for query and mutation calle
     () => queryContext.runQuery("tasks:read", {}, { useStaleSnapshot: true }),
     /`useStaleSnapshot` is only supported in mutations, not queries\./u
   );
-  assert.throws(
+  await assert.rejects(
     () => queryContext.runQuery("tasks:read", {}, { transactionLimits: { unknown: 1 } }),
     /Transaction limit field is unsupported/u
   );

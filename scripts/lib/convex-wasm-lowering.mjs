@@ -1357,6 +1357,8 @@ CONVEX_WASM_IMPORT("convex_async_operation_completion_status")
 int convex_async_operation_completion_status(int operation_handle);
 CONVEX_WASM_IMPORT("convex_async_operation_completion_take")
 long long convex_async_operation_completion_take(int operation_handle);
+CONVEX_WASM_IMPORT("convex_async_operation_error_data_take_v1")
+long long convex_async_operation_error_data_take_v1(int operation_handle);
 CONVEX_WASM_IMPORT("convex_async_operation_cancel_all")
 int convex_async_operation_cancel_all(void);
 CONVEX_WASM_IMPORT("convex_capability_current")
@@ -1568,6 +1570,8 @@ void convex_developer_error(
     int host_operation_error_handle);
 CONVEX_WASM_IMPORT("convex_has_developer_error")
 int convex_has_developer_error(void);
+CONVEX_WASM_IMPORT("convex_developer_error_data_v1")
+void convex_developer_error_data_v1(const char *data, int data_length);
 CONVEX_WASM_IMPORT("convex_profile_mark")
 void convex_profile_mark(int phase);
 
@@ -2656,10 +2660,21 @@ function __convexSetFunctionResult(value: any): void {
 function __convexReportThrown(error: any): void {
   if (__convexHostHasDeveloperError() !== 0) return;
   const hostOperationErrorHandle = __convexHostOperationErrorHandle(error);
-  const message =
-    error instanceof Error
-      ? "Uncaught " + error.name + ": " + error.message
-      : "Uncaught " + String(error);
+  let message: string;
+  if (error instanceof Error) {
+    const rawName = error.name;
+    const rawDetail = error.message;
+    const name: string = rawName === undefined ? "Error" : String(rawName);
+    const detail: string = rawDetail === undefined ? "" : String(rawDetail);
+    // Nested calls carry the callee's already-formatted message, as on V8.
+    if (name && detail.startsWith("Uncaught " + name + ": ")) message = detail;
+    else if (name && detail) message = "Uncaught " + name + ": " + detail;
+    else if (name) message = "Uncaught " + name;
+    else if (detail) message = "Uncaught " + detail;
+    else message = "Uncaught";
+  } else {
+    message = "Uncaught " + String(error);
+  }
   const pointer = __convexAllocateUtf8(message);
   try {
     const length = __convexWriteUtf8(message, pointer);
@@ -3759,7 +3774,51 @@ function renderNativeCapabilityGuestValuePrelude() {
   __convexSetGuestFunctionResult(__convexGuestRestoreTagged(JSON.parse(source)));
 }`
   );
-  return `${ARRAY_PUSH_HELPER}\n\n${prelude}`;
+  // The SDK's registration wrapper has already serialized ConvexError.data;
+  // direct handlers still carry a Convex value. Preserve both entry contracts.
+  prelude = prelude.replace("function __convexReportThrown(", "function __convexReportMessage(");
+  return `${ARRAY_PUSH_HELPER}\n\n${prelude}
+const __convexHostDeveloperErrorData = $SHBuiltin.extern_c(
+  {include: "convex_wasm_opaque_abi_v3.h"},
+  function convex_developer_error_data_v1(data: c_ptr, length: c_int): void { throw 0; },
+);
+
+function __convexReportThrown(error: any): void {
+  if (__convexHostHasDeveloperError() !== 0) return;
+  let data: string | void;
+  try {
+    // The marker lookup can execute a Proxy trap, just like the data read.
+    const isConvexError = error !== null && typeof error === "object"
+      && Symbol.for("ConvexError") in error;
+    data = isConvexError
+      ? (error.ConvexErrorSymbol === Symbol.for("ConvexError")
+        ? error.data
+        : JSON.stringify(__convexGuestEncodeTagged(error.data === undefined ? null : error.data, [])))
+      : undefined;
+    if (isConvexError && typeof data !== "string") {
+      throw new Error("Serialized ConvexError data must be a string");
+    }
+  } catch (serializationError) {
+    // As in the SDK registration wrapper, failed data conversion becomes the
+    // terminal error. Do this before publishing the original message.
+    __convexReportMessage(serializationError);
+    return;
+  }
+  if (data === undefined) {
+    __convexReportMessage(error);
+    return;
+  }
+  const pointer = __convexAllocateUtf8(data);
+  try {
+    // Prepare both payloads before publishing an error that the host will latch.
+    const length = __convexWriteUtf8(data, pointer);
+    __convexReportMessage(error);
+    __convexHostDeveloperErrorData(pointer, length);
+  } finally {
+    __convexFree(pointer);
+  }
+}
+`;
 }
 
 function renderNativeCapabilityRequestEnvelopeHostImports() {
@@ -6946,14 +7005,14 @@ function __convexCapabilityFunctionArgs(args: any): any {
   ) {
     throw new Error("The arguments to a Convex function must be an object");
   }
-  return functionArgs;
-}
-
-function __convexCapabilityTransactionLimits(options: any): any {
-  if (options === undefined || options === null || options.transactionLimits === undefined) {
-    return null;
+  // Match SDK parseArgs before reading the address, including its cross-realm
+  // plain-object check. Native value encoding happens after address resolution.
+  const prototype = Object.getPrototypeOf(functionArgs);
+  if (prototype !== null && prototype !== Object.prototype &&
+      prototype.constructor?.name !== "Object") {
+    throw new Error("The arguments to a Convex function must be an object");
   }
-  return __convexCapabilityEncodeTransactionLimits(options.transactionLimits);
+  return functionArgs;
 }
 
 function __convexCapabilityRangeBuilder(constraints: any[]): any {
@@ -7400,12 +7459,16 @@ function __convexCapabilityCreateContext(
   startTypedWrite: any,
   startTypedRunUdf: any,
   startTypedSchedule: any,
+  sdkConvexError: any,
 ): any {
   if (udfKind !== "query" && udfKind !== "mutation") {
     throw new Error("Invocation UDF kind is invalid");
   }
   if (commitTsPlaceholder === null || typeof commitTsPlaceholder !== "object") {
     throw new Error("Invocation SDK commit timestamp placeholder is invalid");
+  }
+  if (typeof sdkConvexError !== "function") {
+    throw new Error("Invocation SDK ConvexError constructor is invalid");
   }
   if (
     typeof startTypedGet !== "function" ||
@@ -7439,6 +7502,40 @@ function __convexCapabilityCreateContext(
     db: reader,
     storage,
   };
+  // The SDK's async runUdf rejects argument/address/serialization errors. Its outer
+  // context methods still throw synchronously for invalid caller-only options.
+  async function runUdf(udfType, functionReference, args, transactionLimits): any {
+    const functionArgs = __convexCapabilityFunctionArgs(args);
+    const functionAddress = __convexCapabilityFunctionAddress(functionReference);
+    try {
+      return await __convexCapabilityStartTypedRunUdf(
+        udfType,
+        functionAddress,
+        functionArgs,
+        transactionLimits === undefined ? null : __convexCapabilityEncodeTransactionLimits(transactionLimits),
+        "hostValue",
+        startTypedRunUdf,
+      );
+    } catch (error) {
+      if (error === null || typeof error !== "object" || typeof error.message !== "string") {
+        throw error;
+      }
+      if (error.data !== undefined) {
+        // Match the SDK syscall wrapper using this application's actual class,
+        // so direct handlers observe the same instanceof and mutable data.
+        const rethrown = new sdkConvexError(error.message);
+        rethrown.data = error.data;
+        // Use the same cause chain as the SDK so attribution keeps its depth bound.
+        Object.defineProperty(rethrown, "cause", {
+          value: error,
+          configurable: true,
+          writable: true,
+        });
+        throw rethrown;
+      }
+      throw new Error(error.message, { cause: error });
+    }
+  }
   context.runQuery = function(functionReference, args, options): any {
     const useStaleSnapshot = options !== undefined && options !== null
       ? options.useStaleSnapshot
@@ -7448,13 +7545,11 @@ function __convexCapabilityCreateContext(
         "`useStaleSnapshot` is only supported in mutations, not queries."
       )});
     }
-    return __convexCapabilityStartTypedRunUdf(
+    return runUdf(
       useStaleSnapshot ? "snapshotQuery" : "query",
-      __convexCapabilityFunctionAddress(functionReference),
-      __convexCapabilityFunctionArgs(args),
-      __convexCapabilityTransactionLimits(options),
-      "hostValue",
-      startTypedRunUdf,
+      functionReference,
+      args,
+      options === undefined || options === null ? undefined : options.transactionLimits,
     );
   };
   if (udfKind === "mutation") {
@@ -7482,13 +7577,20 @@ function __convexCapabilityCreateContext(
       return __convexCapabilityStartTypedWrite(4, checkedTable, id, null, "undefined", startTypedWrite);
     };
     context.runMutation = function(functionReference, args, options): any {
-      return __convexCapabilityStartTypedRunUdf(
+      // Nested mutations share the parent transaction; the SDK rejects independent retry policy.
+      if (options !== undefined && options !== null && (
+        options.maxWriteConflictRetries !== undefined ||
+        options.writeConflictRetryDelayMs !== undefined
+      )) {
+        throw new Error(
+          "Write conflict retry options are only supported for client mutations and ActionCtx.runMutation calls. MutationCtx.runMutation runs within the parent mutation transaction and is retried with the parent mutation.",
+        );
+      }
+      return runUdf(
         "mutation",
-        __convexCapabilityFunctionAddress(functionReference),
-        __convexCapabilityFunctionArgs(args),
-        __convexCapabilityTransactionLimits(options),
-        "hostValue",
-        startTypedRunUdf,
+        functionReference,
+        args,
+        options === undefined || options === null ? undefined : options.transactionLimits,
       );
     };
     context.scheduler = {
@@ -7663,7 +7765,11 @@ function __convexCapabilitySettle(
   operationHandle: number,
   completionStatus: number,
   payloadHandle: number,
+  errorDataHandle: number,
 ): void {
+  if (errorDataHandle < 0 || (completionStatus !== 1 && errorDataHandle !== 0)) {
+    throw new Error("Convex async completion has invalid error data");
+  }
   const slot = __convexPendingOperationSlot(operationHandle, false);
   const kind = __convexPendingOperationKinds[slot];
   const resolve = __convexPendingOperationResolves[slot];
@@ -7681,6 +7787,15 @@ function __convexCapabilitySettle(
     const message = __convexGuestFromHost(payloadHandle);
     if (typeof message !== "string") throw new Error("Convex async rejection payload is invalid");
     completion = new Error(message);
+    if (errorDataHandle !== 0) {
+      // The retained JSON syscall wrapper applies jsonToConvex to rejection
+      // data too; typed SDK and direct handlers already consume Convex values.
+      completion.data = kind === "taggedJson"
+        ? JSON.parse(__convexGuestTaggedJsonFromHost(errorDataHandle))
+        : __convexGuestFromHost(errorDataHandle);
+      completion.name = "ConvexError";
+      completion[Symbol.for("ConvexError")] = true;
+    }
     __convexHostOperationErrorCandidates.set(completion, operationHandle);
   } else if (completionStatus === 0) {
     if (kind === "undefined") {

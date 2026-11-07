@@ -164,6 +164,8 @@ export const { write } = registry;\n`,
   const declaration = await fs.readFile(join(root, "functions/_generated/api.d.ts"), "utf8");
   assert.match(declaration, /"read": FunctionReference<"query", "public",[\s\S]*?ConvertReturnType<Awaited<"fresh">>>;/u);
   assert.match(declaration, /FunctionReference<"action", "internal"/u);
+  assert.match(declaration, /import type \{ AnyComponents, FunctionReference \} from "convex\/server";/u);
+  assert.match(declaration, /export declare const components: AnyComponents;/u);
   await run("--check");
 
   // Failed resolution is part of cache authority too. Exercise an absent package
@@ -351,6 +353,107 @@ export declare const internal: {};
   assert.deepEqual(capturedRoutes.functions.map(({ exportName }) => exportName), ["captured", "write", "customRead"]);
   await assert.rejects(run("--route-inventory-snapshot"), /did not infer a registered Convex function/u);
   assert.match(await fs.readFile(join(root, "functions/_generated/api.d.ts"), "utf8"), /"worktree"/u);
+});
+
+test("component applications retain root routes and generated references", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), "convex-api-components-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const files = {
+    "package.json": '{"private":true,"type":"module"}',
+    "package-lock.json": '{"lockfileVersion":3}',
+    "convex.json": '{"functions":"functions/"}',
+    "api-config.mjs": 'export default { sourceRoots: ["local-component"] };\n',
+    "functions/tsconfig.json": '{"compilerOptions":{"target":"ESNext","module":"ESNext","moduleResolution":"Bundler","strict":true,"types":[]}}',
+    "functions/convex.config.ts": `import { defineApp } from "convex/server";
+import child from "./child/convex.config";
+import installed from "example-component/convex.config";
+import local from "../local-component/convex.config";
+const app = defineApp();
+app.use(child);
+app.use(installed);
+app.use(local);
+export default app;
+`,
+    "functions/_generated/dataModel.d.ts": 'export type DataModel = import("convex/server").GenericDataModel;\n',
+    "functions/_generated/server.d.ts": `import type { QueryBuilder, GenericDataModel } from "convex/server";
+export declare const query: QueryBuilder<GenericDataModel, "public">;
+`,
+    "functions/_generated/api.d.ts": `import type { AnyComponents } from "convex/server";
+export declare const api: {};
+export declare const internal: {};
+export declare const components: AnyComponents;
+`,
+    "functions/read.ts": `import { query } from "./_generated/server";
+import { components } from "./_generated/api";
+export const read = query({ handler: async (ctx) => {
+  await ctx.runQuery(components.child.queries.read, {});
+  await ctx.runQuery(components.installed.queries.read, {});
+  await ctx.runQuery(components.local.queries.read, {});
+  return "root" as const;
+}});
+`,
+    "functions/child/convex.config.ts": 'import { defineComponent } from "convex/server";\nexport default defineComponent("child");\n',
+    "functions/child/queries.ts": 'import { queryGeneric } from "convex/server";\nexport const read = queryGeneric({ handler: () => "child" });\n',
+    "functions/child/reexports.ts": 'export * from "./queries";\n',
+    "functions/child/legacy.js": 'export const legacy = 1;\n',
+    "functions/child/_generated/api.js": 'export const api = {};\n',
+    "local-component/convex.config.js": 'import { defineComponent } from "convex/server";\nexport default defineComponent("local");\n',
+    "local-component/queries.ts": 'import { queryGeneric } from "convex/server";\nexport const read = queryGeneric({ handler: () => "local" });\n',
+    "local-component/_generated/api.js": 'export const api = {};\n',
+    "node_modules/example-component/package.json": '{"name":"example-component","type":"module","exports":{"./convex.config":"./convex.config.ts"}}',
+    "node_modules/example-component/convex.config.ts": 'import { defineComponent } from "convex/server";\nexport default defineComponent("installed");\n',
+    "node_modules/example-component/queries.ts": 'import { queryGeneric } from "convex/server";\nexport const read = queryGeneric({ handler: () => "installed" });\n',
+  };
+  for (const [path, contents] of Object.entries(files)) {
+    await fs.mkdir(dirname(join(root, path)), { recursive: true });
+    await fs.writeFile(join(root, path), contents);
+  }
+  for (const path of ["convex", "tsrs", "@tsrs", ".package-lock.json"]) {
+    await fs.cp(join(repositoryRoot, "node_modules", path), join(root, "node_modules", path), {
+      recursive: true, mode: constants.COPYFILE_FICLONE,
+    });
+  }
+  const env = { ...process.env, TSRS_CACHE_DIR: join(root, "cache") };
+  delete env.TSRS_BINARY;
+  delete env.TSRS_CACHE_NAMESPACE;
+  const run = (mode) => execFileAsync(process.execPath, [
+    join(repositoryRoot, "scripts/flatten-convex-api.mjs"), mode,
+    ...(mode.endsWith("snapshot") ? [join(root, "inventory")] : []),
+    "--project-root", root, "--config", "api-config.mjs",
+  ], { cwd: root, env, timeout: 120_000, maxBuffer: 1024 * 1024 });
+  await run("--write");
+  const declaration = await fs.readFile(join(root, "functions/_generated/api.d.ts"), "utf8");
+  assert.match(declaration, /ConvertReturnType<Awaited<Promise<"root">>>/u);
+  assert.match(declaration, /export declare const components: AnyComponents;/u);
+  const cold = JSON.parse((await run("--route-inventory-snapshot")).stdout);
+  const routes = JSON.parse(await fs.readFile(join(cold.snapshotPath, "api-routes.json"), "utf8"));
+  assert.deepEqual(routes.functions, [{
+    exportName: "read", kind: "query", modulePath: "read", visibility: "public",
+  }]);
+  const warm = JSON.parse((await run("--route-inventory-snapshot")).stdout);
+  assert.equal(warm.generatorCache, "hit");
+  assert.equal(warm.inputSha256, cold.inputSha256);
+  await fs.appendFile(join(root, "local-component/_generated/api.js"), "// changed component material\n");
+  const changed = JSON.parse((await run("--route-inventory-snapshot")).stdout);
+  assert.notEqual(changed.inputSha256, warm.inputSha256);
+  assert.equal(changed.outputSha256, warm.outputSha256);
+  await fs.rename(join(root, "functions/convex.config.ts"), join(root, "functions/convex.config.js"));
+  await run("--write");
+  const jsConfig = JSON.parse((await run("--route-inventory-snapshot")).stdout);
+  assert.notEqual(jsConfig.inputSha256, changed.inputSha256);
+  assert.equal(jsConfig.outputSha256, changed.outputSha256);
+  await execFileAsync("git", ["init", "-q"], { cwd: root });
+  const pathspecs = ["package.json", "package-lock.json", "convex.json", "functions", "api-config.mjs", "local-component"];
+  await execFileAsync("git", ["add", "--", ...pathspecs], { cwd: root });
+  const snapshotPath = await publishConvexWasmGitSourceSnapshotFile({
+    outputPath: join(root, "snapshot.json"),
+    snapshot: await captureConvexWasmGitSourceSnapshot({ repoRoot: root, pathspecs }),
+  });
+  const captured = JSON.parse((await execFileAsync(process.execPath, [
+    join(repositoryRoot, "scripts/flatten-convex-api.mjs"), "--route-inventory-snapshot", join(root, "inventory"),
+    "--project-root", root, "--config", "api-config.mjs", "--git-source-snapshot", snapshotPath,
+  ], { cwd: root, env, timeout: 120_000, maxBuffer: 1024 * 1024 })).stdout);
+  assert.equal(captured.outputSha256, cold.outputSha256);
 });
 
 

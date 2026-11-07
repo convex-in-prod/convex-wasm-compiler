@@ -142,7 +142,7 @@ use query_result_flow::{
     prove_generated_query_result_flow,
 };
 use source_graph::{
-    StaticFunctionReferenceAuthorization, adapt_generated_function_reference, is_admitted_import,
+    StaticFunctionReferenceAuthorization, adapt_generated_function_reference,
     is_admitted_module_path, is_dependency_adapter_module_path, resolve_graph_import,
     source_fingerprint, source_graph_fingerprint, validate_scheduler_function_references,
 };
@@ -154,7 +154,7 @@ const COMPILER_SCHEMA: &str = "convex-wasm-compiler-output";
 const MODULE_SUMMARY_SCHEMA: &str = "convex-wasm-module-summary";
 const ABI_VERSION: &str = "convex-wasm-opaque";
 const OXC_VERSION: &str = "0.155.0";
-const ADMITTED_LANGUAGE_VERSION: u32 = 29;
+const ADMITTED_LANGUAGE_VERSION: u32 = 30;
 const MAX_CONTROL_INPUT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_BATCH_DIAGNOSTIC_CENSUS_IDS_PER_EXPORT: usize = 16;
 const DEFAULT_MODULE_PRELOAD_WORKERS: usize = 6;
@@ -825,6 +825,7 @@ struct GeneratedApiConventionSummary {
     any_api_local: String,
     any_api_specifier: String,
     any_api_import_start: u32,
+    components: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1684,7 +1685,7 @@ fn compile_export(
                 )? {
                     continue;
                 }
-                if !is_admitted_import(&resolved, &binding.imported) {
+                if !is_admitted_module_path(graph, &resolved) {
                     diagnostics.push(diagnostic_at(
                         graph,
                         modules,
@@ -2679,7 +2680,7 @@ fn preload_compiler_modules<'a>(
             // same admitted module paths here makes the complete mutable load/cache
             // phase precede immutable parallel export analysis without reintroducing
             // source imports that esbuild removed.
-            if is_admitted_module_path(&resolved.path)
+            if is_admitted_module_path(graph, &resolved.path)
                 || is_dependency_adapter_module_path(graph, &resolved.path)
             {
                 pending.insert(resolved.path.clone());
@@ -2935,6 +2936,7 @@ fn summarize_module(
         &ast,
         &resolved_bindings,
         &binding_reference_index,
+        &imports,
         &mut callable_leaf_plans,
     )?;
     bind_callable_control_blocks(&callable_control_skeletons, &mut callable_leaf_plans)?;
@@ -3113,7 +3115,7 @@ fn summarize_module(
     collect_try_statements(&ast, &mut try_statements);
     try_statements.sort_by_key(|statement| (statement.start, statement.end));
     let mut operations = Vec::new();
-    collect_operations(&ast, source, &mut operations);
+    collect_operations(&ast, source, &imports, &mut operations);
     operations.sort_by_key(|operation| (operation.start, operation.end, operation.kind.clone()));
     let mut calls = Vec::new();
     collect_calls(&ast, &references, None, &mut calls);
@@ -3160,6 +3162,7 @@ fn summarize_module(
         None,
         None,
         DatabaseOperationSource::Raw,
+        &imports,
         &mut direct_async_batches,
     );
     direct_async_batches.sort_by_key(|batch| (batch.start, batch.end));
@@ -3575,10 +3578,15 @@ fn index_module(source: &str, ast: &Value) -> Result<ModuleIndex> {
     let mut imports = BTreeMap::new();
     let mut exports = BTreeMap::new();
     let mut units = BTreeMap::new();
+    // Imports can follow declarations, so collect the complete namespace map first.
+    for statement in body {
+        if node_type(statement)? == "ImportDeclaration" {
+            index_import(statement, &mut imports)?;
+        }
+    }
     for statement in body {
         let statement_type = node_type(statement)?;
         if statement_type == "ImportDeclaration" {
-            index_import(statement, &mut imports)?;
             continue;
         }
         if statement_type == "ExportNamedDeclaration" {
@@ -3586,7 +3594,14 @@ fn index_module(source: &str, ast: &Value) -> Result<ModuleIndex> {
                 .get("declaration")
                 .filter(|value| !value.is_null())
             {
-                index_declaration(source, declaration, true, &mut exports, &mut units)?;
+                index_declaration(
+                    source,
+                    declaration,
+                    true,
+                    &imports,
+                    &mut exports,
+                    &mut units,
+                )?;
             }
             if let Some(specifiers) = statement.get("specifiers").and_then(Value::as_array) {
                 for specifier in specifiers {
@@ -3619,11 +3634,18 @@ fn index_module(source: &str, ast: &Value) -> Result<ModuleIndex> {
                 .get("declaration")
                 .filter(|declaration| !declaration.is_null())
             {
-                index_declaration(source, declaration, false, &mut exports, &mut units)?;
+                index_declaration(
+                    source,
+                    declaration,
+                    false,
+                    &imports,
+                    &mut exports,
+                    &mut units,
+                )?;
             }
             continue;
         }
-        index_declaration(source, statement, false, &mut exports, &mut units)?;
+        index_declaration(source, statement, false, &imports, &mut exports, &mut units)?;
     }
     Ok((imports, exports, units))
 }
@@ -3672,6 +3694,7 @@ fn index_declaration(
     source: &str,
     declaration: &Value,
     exported: bool,
+    imports: &BTreeMap<String, ImportBinding>,
     exports: &mut BTreeMap<String, String>,
     units: &mut BTreeMap<String, UnitSummary>,
 ) -> Result<()> {
@@ -3691,6 +3714,7 @@ fn index_declaration(
             let direct_batch_helper = Some(parse_direct_batch_helper(
                 declaration,
                 DatabaseOperationSource::Raw,
+                imports,
             ));
             add_unit(
                 source,
@@ -3783,7 +3807,7 @@ fn index_declaration(
                     .map(|function| callable_effect_sites(function, &parameters))
                     .unwrap_or_default();
                 let direct_batch_helper = function.map(|function| {
-                    parse_direct_batch_helper(function, DatabaseOperationSource::Raw)
+                    parse_direct_batch_helper(function, DatabaseOperationSource::Raw, imports)
                 });
                 add_unit(
                     source,
@@ -4153,7 +4177,12 @@ fn collect_try_statements(value: &Value, output: &mut Vec<TryStatementCandidate>
     }
 }
 
-fn collect_operations(value: &Value, source: &str, output: &mut Vec<OperationCandidate>) {
+fn collect_operations(
+    value: &Value,
+    source: &str,
+    imports: &BTreeMap<String, ImportBinding>,
+    output: &mut Vec<OperationCandidate>,
+) {
     if let Value::Object(object) = value {
         if object.get("type").and_then(Value::as_str) == Some("CallExpression") {
             if let Some(operation) = parse_context_capability_operation(value) {
@@ -4162,7 +4191,7 @@ fn collect_operations(value: &Value, source: &str, output: &mut Vec<OperationCan
             if let Some(operation) = parse_db_operation(value, source) {
                 output.push(operation);
             }
-            if let Some(operation) = parse_scheduler_operation(value) {
+            if let Some(operation) = parse_scheduler_operation(value, imports) {
                 output.push(operation);
             }
             if let Some(operation) = parse_sha_operation(value) {
@@ -4170,11 +4199,11 @@ fn collect_operations(value: &Value, source: &str, output: &mut Vec<OperationCan
             }
         }
         for child in object.values() {
-            collect_operations(child, source, output);
+            collect_operations(child, source, imports, output);
         }
     } else if let Value::Array(values) = value {
         for child in values {
-            collect_operations(child, source, output);
+            collect_operations(child, source, imports, output);
         }
     }
 }
@@ -5133,7 +5162,7 @@ fn is_generated_api_module_path(module_key: &str) -> bool {
     components.next() == Some("api.js") && components.next() == Some("_generated")
 }
 
-fn top_level_const_identifier_initializer(ast: &Value, local: &str) -> Option<String> {
+fn top_level_const_initializer<'a>(ast: &'a Value, local: &str) -> Option<&'a Value> {
     let body = ast.get("body")?.as_array()?;
     for statement in body {
         let declaration = if node_type(statement).ok()? == "ExportNamedDeclaration" {
@@ -5161,10 +5190,7 @@ fn top_level_const_identifier_initializer(ast: &Value, local: &str) -> Option<St
             {
                 continue;
             }
-            return declarator
-                .get("init")
-                .map(unwrap_runtime_expression)
-                .and_then(|initializer| identifier_name(initializer).ok());
+            return declarator.get("init").map(unwrap_runtime_expression);
         }
     }
     None
@@ -5193,7 +5219,9 @@ fn summarize_generated_api_convention(
     let any_api = any_api_imports[0];
     for visibility in ["api", "internal"] {
         let local = exports.get(visibility)?;
-        if top_level_const_identifier_initializer(ast, local).as_deref()
+        if top_level_const_initializer(ast, local)
+            .and_then(|initializer| identifier_name(initializer).ok())
+            .as_deref()
             != Some(any_api.local.as_str())
         {
             return None;
@@ -5203,6 +5231,24 @@ fn summarize_generated_api_convention(
         any_api_local: any_api.local.clone(),
         any_api_specifier: any_api.specifier.clone(),
         any_api_import_start: any_api.start,
+        components: exports
+            .get("components")
+            .and_then(|local| top_level_const_initializer(ast, local))
+            .is_some_and(|initializer| {
+                node_type(initializer).ok() == Some("CallExpression")
+                    && !call_has_optional_callee(initializer)
+                    && initializer
+                        .get("arguments")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    && callee_identifier(initializer)
+                        .and_then(|local| imports.get(&local))
+                        .is_some_and(|binding| {
+                            !binding.type_only
+                                && binding.imported == "componentsGeneric"
+                                && binding.specifier == "convex/server"
+                        })
+            }),
     })
 }
 
@@ -6057,10 +6103,28 @@ fn parse_context_capability_operation(call: &Value) -> Option<OperationCandidate
     let callee = call.get("callee")?;
     let chain = static_member_chain(callee)?;
     let segments = static_member_segments(callee)?;
+    let arguments = call.get("arguments")?.as_array()?;
+    if segments.len() == 2
+        && chain.fields.len() == 1
+        && matches!(segments[1].as_str(), "runQuery" | "runMutation")
+        && !chain.computed
+        && !chain.optional
+        && !call_has_optional_callee(call)
+        && (1..=3).contains(&arguments.len())
+        && arguments
+            .iter()
+            .all(|argument| node_type(argument).ok() != Some("SpreadElement"))
+    {
+        return context_capability_operation_candidate(
+            call,
+            &format!("udf.{}", segments[1]),
+            None,
+            segments.join("."),
+        );
+    }
     if segments.len() != 3 || chain.fields.len() != 2 {
         return None;
     }
-    let arguments = call.get("arguments")?.as_array()?;
     let effect_path = segments.join(".");
     match &segments[1..] {
         [capability, method] if capability == "auth" && method == "getUserIdentity" => {
@@ -6491,7 +6555,10 @@ fn parse_db_operation_for_source(
     })
 }
 
-fn parse_scheduler_operation(call: &Value) -> Option<OperationCandidate> {
+fn parse_scheduler_operation(
+    call: &Value,
+    imports: &BTreeMap<String, ImportBinding>,
+) -> Option<OperationCandidate> {
     let call = unwrap_runtime_expression(call);
     if call_has_optional_callee(call) {
         return None;
@@ -6512,7 +6579,13 @@ fn parse_scheduler_operation(call: &Value) -> Option<OperationCandidate> {
     let function_reference = function_chain
         .as_ref()
         .filter(|chain| !chain.computed && !chain.optional && chain.fields.len() >= 2)
-        .map(|chain| canonical_function_reference(&chain.fields))
+        .and_then(|chain| {
+            let binding = imports.get(&chain.root)?;
+            // The export, not its local alias, determines the address namespace.
+            // Source-graph admission still authenticates this exact reference.
+            matches!(binding.imported.as_str(), "api" | "internal" | "components")
+                .then(|| canonical_function_reference(&binding.imported, &chain.fields))
+        })
         .or_else(|| {
             let arguments = function_expression.get("arguments")?.as_array()?;
             (callee_identifier(function_expression).as_deref() == Some("__convexFunctionReference")
@@ -6544,7 +6617,11 @@ fn parse_scheduler_operation(call: &Value) -> Option<OperationCandidate> {
     })
 }
 
-fn canonical_function_reference(fields: &[String]) -> String {
+fn canonical_function_reference(export_name: &str, fields: &[String]) -> String {
+    if export_name == "components" {
+        return format!("_reference/childComponent/{}", fields.join("/"));
+    }
+    assert!(matches!(export_name, "api" | "internal"));
     let function_name = fields
         .last()
         .expect("static function reference must have a function name");
@@ -7132,6 +7209,8 @@ fn admitted_operations(
                         "db.delete" => "databaseDelete",
                         "scheduler.runAfter" => "schedulerRunAfter",
                         "scheduler.runAt" => "schedulerRunAt",
+                        "udf.runQuery" => "udfRunQuery",
+                        "udf.runMutation" => "udfRunMutation",
                         "intrinsic.sha256" => "sha256",
                         other => other,
                     }

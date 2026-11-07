@@ -1137,6 +1137,14 @@ pub(super) fn analyze_owned_capabilities(
             if reference.read
                 && !reference.write
                 && represented_operations.len() == 1
+                // Nested calls use the native project's typed context, preserving host-side
+                // address resolution and routing. The blocking runtime has no such bridge.
+                && (graph.effect_execution_mode
+                    == super::EffectExecutionMode::GuestPromiseEventLoop
+                    || !matches!(
+                        represented_operations[0].kind.as_str(),
+                        "udf.runQuery" | "udf.runMutation"
+                    ))
                 && !(graph.effect_execution_mode
                     == super::EffectExecutionMode::GuestPromiseEventLoop
                     && guest_direct_effect_requires_callable_plan(&represented_operations[0].kind))
@@ -1304,6 +1312,8 @@ fn owned_operation_effect_path(owner: &str, kind: &str, path: &str) -> bool {
         "db.delete" => ".db.delete",
         "scheduler.runAfter" => ".scheduler.runAfter",
         "scheduler.runAt" => ".scheduler.runAt",
+        "udf.runQuery" => ".runQuery",
+        "udf.runMutation" => ".runMutation",
         "intrinsic.sha256" => return false,
         _ => return false,
     };

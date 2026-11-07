@@ -261,13 +261,10 @@ pub(super) fn resolve_graph_import(
     Ok(resolved.path.clone())
 }
 
-pub(super) fn is_admitted_import(resolved: &str, imported: &str) -> bool {
-    let _ = imported;
-    is_admitted_module_path(resolved)
-}
-
-pub(super) fn is_admitted_module_path(resolved: &str) -> bool {
-    resolved.starts_with("convex/") || resolved.starts_with("shared/")
+pub(super) fn is_admitted_module_path(graph: &GraphInput, resolved: &str) -> bool {
+    resolved.starts_with(&format!("{}/", graph.functions_root))
+        || resolved.starts_with("convex/")
+        || resolved.starts_with("shared/")
 }
 
 pub(super) fn is_dependency_adapter_module_path(graph: &GraphInput, resolved: &str) -> bool {
@@ -333,6 +330,7 @@ fn authenticate_generated_api_module(
     graph: &GraphInput,
     modules: &BTreeMap<String, LoadedModule>,
     resolved: &str,
+    export_name: &str,
 ) -> std::result::Result<AuthenticatedGeneratedApiMaterial, String> {
     let module = modules.get(resolved).ok_or_else(|| {
         "resolved generated api module is absent from the authenticated esbuild graph closure"
@@ -346,6 +344,9 @@ fn authenticate_generated_api_module(
             "generated api source does not import anyApi from convex/server and export both api and internal as that exact binding"
                 .to_string()
         })?;
+    if export_name == "components" && !convention.components {
+        return Err("generated api components export must be a const initialized by componentsGeneric() from convex/server".to_string());
+    }
     let any_api_resolved = resolve_graph_import(graph, resolved, &convention.any_api_specifier)
         .map_err(|error| format!("generated api anyApi import is not resolved exactly: {error}"))?;
     if !is_resolved_convex_server_module(&any_api_resolved) {
@@ -376,40 +377,41 @@ pub(super) fn adapt_generated_function_reference(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<bool> {
     if !is_generated_api_module_path(resolved)
-        || !matches!(binding.imported.as_str(), "api" | "internal")
+        || !matches!(binding.imported.as_str(), "api" | "internal" | "components")
     {
         return Ok(false);
     }
 
-    let material = match authenticate_generated_api_module(graph, modules, resolved) {
-        Ok(material) => material,
-        Err(message) => {
-            let (file, start) =
-                modules
-                    .get(resolved)
-                    .map_or((module_key, binding.start), |module| {
-                        (
-                            resolved,
-                            module
-                                .summary
-                                .generated_api_convention
-                                .as_ref()
-                                .map_or(0, |convention| convention.any_api_import_start),
-                        )
-                    });
-            diagnostics.push(diagnostic_at(
-                graph,
-                modules,
-                "generated-api-source-mismatch",
-                message,
-                file,
-                start,
-                Some("GeneratedApiConvention".to_string()),
-                dependency_chain.to_vec(),
-            )?);
-            return Ok(true);
-        }
-    };
+    let material =
+        match authenticate_generated_api_module(graph, modules, resolved, &binding.imported) {
+            Ok(material) => material,
+            Err(message) => {
+                let (file, start) =
+                    modules
+                        .get(resolved)
+                        .map_or((module_key, binding.start), |module| {
+                            (
+                                resolved,
+                                module
+                                    .summary
+                                    .generated_api_convention
+                                    .as_ref()
+                                    .map_or(0, |convention| convention.any_api_import_start),
+                            )
+                        });
+                diagnostics.push(diagnostic_at(
+                    graph,
+                    modules,
+                    "generated-api-source-mismatch",
+                    message,
+                    file,
+                    start,
+                    Some("GeneratedApiConvention".to_string()),
+                    dependency_chain.to_vec(),
+                )?);
+                return Ok(true);
+            }
+        };
 
     if let Some(existing) = generated_api_materials.get(resolved) {
         ensure!(
@@ -521,7 +523,7 @@ pub(super) fn adapt_generated_function_reference(
         )?);
         return Ok(true);
     }
-    let function_reference = canonical_function_reference(&member_chain.fields);
+    let function_reference = canonical_function_reference(&binding.imported, &member_chain.fields);
     authorizations.push(StaticFunctionReferenceAuthorization {
         unit_id: unit_id.to_string(),
         module: module_key.to_string(),
@@ -571,7 +573,7 @@ pub(super) fn validate_scheduler_function_references(
                     graph,
                     modules,
                     "unproved-generated-function-reference",
-                    "scheduler function reference is not one exact static api/internal chain from an authenticated generated api module"
+                    "scheduler function reference is not one exact static api/internal/components chain from an authenticated generated api module"
                         .to_string(),
                     &unit.module,
                     operation.function_reference_start.unwrap_or(operation.start),
@@ -581,7 +583,10 @@ pub(super) fn validate_scheduler_function_references(
                 continue;
             };
             ensure!(
-                matches!(authorization.visibility.as_str(), "api" | "internal"),
+                matches!(
+                    authorization.visibility.as_str(),
+                    "api" | "internal" | "components"
+                ),
                 "authenticated function reference has unsupported visibility"
             );
             if operation.function_reference.as_deref()

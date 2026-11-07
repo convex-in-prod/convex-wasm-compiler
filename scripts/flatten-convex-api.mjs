@@ -149,6 +149,7 @@ const configPath = resolve(convexDir, "tsconfig.json");
 const profileGeneration = process.env.CONVEX_WASM_PROFILE_API === "1";
 const generatedServerPath = resolve(convexDir, "_generated/server.d.ts");
 const componentConfigPath = resolve(convexDir, "convex.config.ts");
+const componentConfigJsPath = resolve(convexDir, "convex.config.js");
 const convexRegistrationPath = resolve(
   rootDir,
   "node_modules/convex/dist/esm-types/server/registration.d.ts"
@@ -464,21 +465,28 @@ function isTypeScriptImplementationSource(path) {
   );
 }
 
+const componentDirectories = new Set();
 function typeScriptInputFilesUnder(dir) {
   const rootStatus = lstatSync(dir);
   if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) {
     throw new Error(`Convex API source discovery requires a real directory: ${dir}`);
   }
   const paths = [];
-  const generatedDirectory = resolve(convexDir, "_generated");
-  function walk(current) {
-    for (const entry of readdirSync(current, { withFileTypes: true }).sort((left, right) =>
+  function walk(current, insideComponent) {
+    const entries = readdirSync(current, { withFileTypes: true }).sort((left, right) =>
       compareStrings(left.name, right.name)
+    );
+    if (!pathsEqualForHost(current, convexDir) && entries.some((entry) =>
+      entry.name === "convex.config.ts" || entry.name === "convex.config.js"
     )) {
+      insideComponent = true;
+      componentDirectories.add(normalizePathForHostComparison(current));
+    }
+    for (const entry of entries) {
       const path = resolve(current, entry.name);
       if (entry.isDirectory()) {
-        if (!pathsEqualForHost(path, generatedDirectory)) {
-          walk(path);
+        if (!(entry.name === "_generated" && pathsEqualForHost(current, convexDir))) {
+          walk(path, insideComponent);
         }
       } else if (entry.isSymbolicLink()) {
         throw new Error(`Convex API source discovery does not support symbolic links: ${path}`);
@@ -488,7 +496,9 @@ function typeScriptInputFilesUnder(dir) {
           path.endsWith(".tsx") ||
           path.endsWith(".mts") ||
           path.endsWith(".cts") ||
-          path.endsWith(".json"))
+          path.endsWith(".json") ||
+          path === componentConfigJsPath ||
+          (insideComponent && /\.[cm]?[jt]sx?$/u.test(path)))
       ) {
         paths.push(path);
       } else if (
@@ -503,7 +513,7 @@ function typeScriptInputFilesUnder(dir) {
       }
     }
   }
-  walk(dir);
+  walk(dir, false);
   return paths.sort(compareStrings);
 }
 
@@ -521,8 +531,21 @@ function convexModulePath(sourcePath) {
 
 const convexTypeScriptInputPaths = typeScriptInputFilesUnder(convexDir);
 const additionalTypeScriptInputPaths = additionalSourceDirs.flatMap(typeScriptInputFilesUnder);
-const convexSourcePaths = convexTypeScriptInputPaths.filter(isTypeScriptImplementationSource);
-const additionalSourcePaths = additionalTypeScriptInputPaths.filter(isTypeScriptImplementationSource);
+// Keep component sources exact, including components in additional source roots. Only the
+// functions directory contributes root routes; every discovery/cache path uses this census.
+function isUnderComponent(sourcePath) {
+  const normalizedPath = normalizePathForHostComparison(sourcePath);
+  for (const directory of componentDirectories) {
+    if (normalizedPath.startsWith(`${directory}${sep}`)) return true;
+  }
+  return false;
+}
+const convexSourcePaths = convexTypeScriptInputPaths.filter(
+  (path) => isTypeScriptImplementationSource(path) && !isUnderComponent(path)
+);
+const additionalSourcePaths = additionalTypeScriptInputPaths.filter(
+  (path) => isTypeScriptImplementationSource(path) && !isUnderComponent(path)
+);
 const convexSourceByModulePath = new Map();
 for (const sourcePath of convexSourcePaths) {
   const modulePath = convexModulePath(sourcePath);
@@ -582,7 +605,9 @@ if (gitSourceSnapshot !== undefined) {
           path.endsWith(".tsx") ||
           path.endsWith(".mts") ||
           path.endsWith(".cts") ||
-          path.endsWith(".json"))
+          path.endsWith(".json") ||
+          resolve(rootDir, path) === componentConfigJsPath ||
+          (isUnderComponent(resolve(rootDir, path)) && /\.[cm]?[jt]sx?$/u.test(path)))
     )
     .sort(compareStrings);
   const discoveredSourcePaths = [...convexTypeScriptInputPaths, ...additionalTypeScriptInputPaths]
@@ -1917,27 +1942,9 @@ if (convexTypeScriptInputPaths.includes(componentConfigPath)) {
   if (componentConfigSource === undefined) {
     throw new Error("Convex component configuration is not valid TypeScript.");
   }
+  // Keep the complete component configuration in the authenticated input set. Component
+  // definitions use Convex's normal deployment path; this flattener emits only root routes.
   sourceFileCache.set(componentConfigPath, componentConfigSource);
-  let usesComponents = false;
-  function findComponentUse(node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "app" &&
-      node.expression.name.text === "use"
-    ) {
-      usesComponents = true;
-      return;
-    }
-    node.forEachChild(findComponentUse);
-  }
-  findComponentUse(componentConfigSource);
-  if (usesComponents) {
-    throw new Error(
-      "Flattened Convex API generation does not yet support app.use(...) components. Add explicit component type generation before enabling a component."
-    );
-  }
 }
 let analysisApi;
 if (routeInventoryOnly) {
@@ -1960,13 +1967,13 @@ if (routeInventoryOnly) {
   // Declaration generation infers fresh handler returns even when the staged API is stale.
   analysisApi = `
 ${virtualImports.join("\n")}
-import type { ApiFromModules, FilterApi, FunctionReference } from "convex/server";
+import type { AnyComponents, ApiFromModules, FilterApi, FunctionReference } from "convex/server";
 declare const fullApi: ApiFromModules<{
 ${fullApiEntries.join("\n")}
 }>;
 export declare const api: FilterApi<typeof fullApi, FunctionReference<any, "public">>;
 export declare const internal: FilterApi<typeof fullApi, FunctionReference<any, "internal">>;
-export declare const components: {};
+export declare const components: AnyComponents;
 `;
 }
 
@@ -2699,7 +2706,7 @@ function flattenedDeclarationOutput() {
  * @module
  */
 
-import type { FunctionReference } from "convex/server";
+import type { AnyComponents, FunctionReference } from "convex/server";
 
 type ConvertReturnType<T> = T extends void ? null : T;
 
@@ -2709,7 +2716,7 @@ export declare const api: ${publicTree};
 /** Internal Convex function references. */
 export declare const internal: ${internalTree};
 
-export declare const components: {};
+export declare const components: AnyComponents;
 `;
   const outputHash = createHash("sha256").update(output).digest("hex");
   return output.replace(

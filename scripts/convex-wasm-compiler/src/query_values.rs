@@ -3013,7 +3013,14 @@ mod tests {
             }
         }
         let mut leaves = Vec::new();
-        collect_callable_leaf_plans(&ast, &bindings, &binding_references, &mut leaves).unwrap();
+        collect_callable_leaf_plans(
+            &ast,
+            &bindings,
+            &binding_references,
+            &BTreeMap::new(),
+            &mut leaves,
+        )
+        .unwrap();
         leaves
             .into_iter()
             .filter_map(|leaf| match leaf.control {
@@ -3072,7 +3079,14 @@ mod tests {
             }
         }
         let mut leaves = Vec::new();
-        collect_callable_leaf_plans(&ast, &bindings, &binding_references, &mut leaves).unwrap();
+        collect_callable_leaf_plans(
+            &ast,
+            &bindings,
+            &binding_references,
+            &BTreeMap::new(),
+            &mut leaves,
+        )
+        .unwrap();
         leaves
             .into_iter()
             .filter_map(|leaf| match leaf.control {

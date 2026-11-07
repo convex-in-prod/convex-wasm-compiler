@@ -57,6 +57,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_operation_completion_status")
 int32_t convex_wasm_graph_import_async_operation_completion_status(int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_operation_completion_take")
 int64_t convex_wasm_graph_import_async_operation_completion_take(int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_operation_error_data_take_v1")
+int64_t convex_wasm_graph_import_async_operation_error_data_take_v1(int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_operation_wait_any")
 int32_t convex_wasm_graph_import_async_operation_wait_any(void);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_async_operation_poll_ready")
@@ -112,6 +114,8 @@ CONVEX_WASM_GRAPH_HOST_IMPORT("convex_crypto_random_uuid")
 void convex_wasm_graph_import_crypto_random_uuid(int64_t, char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_developer_error")
 void convex_wasm_graph_import_developer_error(const char *, int32_t, int32_t);
+CONVEX_WASM_GRAPH_HOST_IMPORT("convex_developer_error_data_v1")
+void convex_wasm_graph_import_developer_error_data_v1(const char *, int32_t);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_has_developer_error")
 int32_t convex_wasm_graph_import_has_developer_error(void);
 CONVEX_WASM_GRAPH_HOST_IMPORT("convex_invocation_unix_timestamp_ms")
@@ -144,6 +148,9 @@ int32_t convex_async_operation_completion_status(int32_t operation) {
 }
 int64_t convex_async_operation_completion_take(int32_t operation) {
   return convex_wasm_graph_import_async_operation_completion_take(operation);
+}
+int64_t convex_async_operation_error_data_take_v1(int32_t operation) {
+  return convex_wasm_graph_import_async_operation_error_data_take_v1(operation);
 }
 int32_t convex_async_operation_wait_any(void) {
   return convex_wasm_graph_import_async_operation_wait_any();
@@ -252,6 +259,9 @@ void convex_crypto_random_uuid(int64_t capability, char *output, int32_t length)
 void convex_developer_error(
     const char *message, int32_t length, int32_t host_operation_error) {
   convex_wasm_graph_import_developer_error(message, length, host_operation_error);
+}
+void convex_developer_error_data_v1(const char *data, int32_t length) {
+  convex_wasm_graph_import_developer_error_data_v1(data, length);
 }
 int32_t convex_has_developer_error(void) {
   return convex_wasm_graph_import_has_developer_error();

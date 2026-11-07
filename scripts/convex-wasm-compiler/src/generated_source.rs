@@ -173,8 +173,11 @@ fn bind_generated_helper_continuation(
         continuation.helper_binding
     );
     let function = matching_functions[0].function;
-    let generated_helper =
-        parse_direct_batch_helper(function, DatabaseOperationSource::CompilerGenerated);
+    let generated_helper = parse_direct_batch_helper(
+        function,
+        DatabaseOperationSource::CompilerGenerated,
+        &BTreeMap::new(),
+    );
     ensure!(
         generated_helper.shape_error.is_none()
             && generated_helper.dynamic_parameter_indices == helper_dynamic_argument_indices,
@@ -233,6 +236,7 @@ pub(super) fn bind_generated_direct_async_batches(
         None,
         None,
         DatabaseOperationSource::CompilerGenerated,
+        &BTreeMap::new(),
         &mut candidates,
     );
     if value_mode == ValueMode::GuestNativeJson {
@@ -786,6 +790,7 @@ fn collect_generated_source_edits(
                     None,
                     false,
                     DatabaseOperationSource::CompilerGenerated,
+                    &BTreeMap::new(),
                 )
                 .sequential_value_map_safe
                 && let Some(arguments) = object.get("arguments").and_then(Value::as_array)
@@ -1471,6 +1476,7 @@ fn generated_expression_is_proved_array(
                         None,
                         false,
                         DatabaseOperationSource::CompilerGenerated,
+                        &BTreeMap::new(),
                     )
                     .sequential_value_map_safe)
             {
@@ -3754,6 +3760,7 @@ pub(super) fn lower_generated_javascript_for_effect_execution_mode(
         None,
         None,
         DatabaseOperationSource::Raw,
+        &BTreeMap::new(),
         &mut remaining_batches,
     );
     if effect_execution_mode == EffectExecutionMode::BlockingFiber {

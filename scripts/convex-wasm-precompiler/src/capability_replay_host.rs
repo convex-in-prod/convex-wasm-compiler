@@ -742,7 +742,11 @@ fn dispatch(
             Val::I32(0)
         }
         "convex_profile_mark" => return Ok(None),
-        "convex_developer_error" => {
+        "convex_async_operation_error_data_take_v1" => {
+            // Replay cases currently contain successful completions only.
+            return Err(Error::msg("Replay has no structured error completion"));
+        }
+        "convex_developer_error" | "convex_developer_error_data_v1" => {
             return Err(Error::msg("Guest reported a replay developer error"));
         }
         _ => return Err(Error::msg(format!("Unsupported replay import: {name}"))),

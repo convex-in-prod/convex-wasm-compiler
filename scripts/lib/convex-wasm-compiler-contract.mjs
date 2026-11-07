@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const convexWasmCompilerOutputKind = "convex-wasm-compiler-output";
 export const convexWasmCompilerAbiVersion = "convex-wasm-opaque";
 export const convexWasmCompilerOpaqueValueAbiVersion = 3;
-export const convexWasmCompilerAdmittedLanguageVersion = 29;
+export const convexWasmCompilerAdmittedLanguageVersion = 30;
 export const convexWasmCompilerModuleSummarySchema = "convex-wasm-module-summary";
 export const convexWasmCompilerOxcVersion = "0.155.0";
 export const convexWasmBlockingEffectExecutionMode = "blocking-fiber";
@@ -171,6 +171,8 @@ function validateOperations(operations) {
     "databasePatch",
     "databaseReplace",
     "functionHandleCreate",
+    "udfRunQuery",
+    "udfRunMutation",
     "schedulerRunAfter",
     "schedulerRunAt",
     "sha256",
@@ -286,7 +288,7 @@ function validateOperations(operations) {
       fail(`${description} non-index descriptor must not have index metadata`);
     }
     if (
-      ["authenticationGetUserIdentity", "functionHandleCreate"].includes(operation.kind) &&
+      ["authenticationGetUserIdentity", "functionHandleCreate", "udfRunQuery", "udfRunMutation"].includes(operation.kind) &&
       [
         operation.algorithm,
         operation.functionReference,

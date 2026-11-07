@@ -13179,34 +13179,25 @@ export const {export_name} = query({{
 mod generated_function_reference_tests {
     use super::{
         CompilerModeOutput, EsbuildImport, EsbuildInput, EsbuildMetafile, GeneratedSourceMode,
-        GraphInput, LoadedModule, PhaseMeasurements, TEST_GENERATED_SERVER_MODULE,
-        TEST_GENERATED_SERVER_SOURCE, Toolchain, compile_export, hash_bytes, summarize_module,
-        test_registration_adapter_material, with_test_registration_imports,
+        GraphInput, PhaseMeasurements, TEST_GENERATED_SERVER_SOURCE, Toolchain, compile_export,
+        preload_compiler_modules, test_registration_adapter_material,
+        with_test_registration_imports,
     };
-    use std::{collections::BTreeMap, path::Path, time::Instant};
+    use std::{
+        collections::BTreeMap,
+        env, fs,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
 
-    const ENTRY: &str = "convex/fixture.ts";
-    const GENERATED_API: &str = "convex/_generated/api.js";
+    const ENTRY: &str = "functions/fixture.ts";
+    const GENERATED_API: &str = "functions/_generated/api.js";
+    const TEST_GENERATED_SERVER_MODULE: &str = "functions/_generated/server.js";
     const CONVEX_SERVER: &str = "node_modules/convex/dist/esm/server/index.js";
     const GENERATED_SOURCE: &str = r#"
 import { anyApi } from "convex/server";
 export const api = anyApi;
 export const internal = anyApi;
 "#;
-
-    fn summary(module_key: &str, source: &str) -> super::ModuleSummary {
-        summarize_module(
-            module_key,
-            Path::new(module_key),
-            source,
-            &hash_bytes(source.as_bytes()),
-            "fixture-cache-key",
-            "fixture-pipeline",
-            "fixture-context-policy",
-            &mut PhaseMeasurements::default(),
-        )
-        .unwrap()
-    }
 
     fn compile_with_generated_source(
         source: &str,
@@ -13231,30 +13222,27 @@ export const internal = anyApi;
         effect_execution_mode: super::EffectExecutionMode,
     ) -> super::CompilerOutput {
         let source = with_test_registration_imports(source);
-        let modules = BTreeMap::from([
-            (
-                ENTRY.to_string(),
-                LoadedModule::new(summary(ENTRY, &source), source),
-            ),
-            (
-                GENERATED_API.to_string(),
-                LoadedModule::new(
-                    summary(GENERATED_API, generated_source),
-                    generated_source.to_string(),
-                ),
-            ),
-            (
-                TEST_GENERATED_SERVER_MODULE.to_string(),
-                LoadedModule::new(
-                    summary(TEST_GENERATED_SERVER_MODULE, TEST_GENERATED_SERVER_SOURCE),
-                    TEST_GENERATED_SERVER_SOURCE.to_string(),
-                ),
-            ),
-        ]);
+        let root = env::temp_dir().join(format!(
+            "convex-generated-reference-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (path, source) in [
+            (ENTRY, source.as_str()),
+            (GENERATED_API, generated_source),
+            (TEST_GENERATED_SERVER_MODULE, TEST_GENERATED_SERVER_SOURCE),
+        ] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, source).unwrap();
+        }
         let graph = GraphInput {
             kind: "convex-wasm-esbuild-graph".to_string(),
-            repo_root: Path::new("/fixture").to_path_buf(),
-            functions_root: "convex".to_string(),
+            repo_root: root.clone(),
+            functions_root: "functions".to_string(),
             entry_path: ENTRY.to_string(),
             export_name: export_name.to_string(),
             toolchain: Toolchain {
@@ -13308,16 +13296,29 @@ export const internal = anyApi;
             },
             phase_timings_us: BTreeMap::new(),
         };
-        compile_export(
+        // Exercise the real preload path too: generated references must remain available
+        // when the configured functions directory is not named convex.
+        let mut modules = BTreeMap::new();
+        let cache = root.join("cache");
+        preload_compiler_modules(
             &graph,
-            Path::new("/fixture-cache"),
+            std::iter::once(ENTRY),
+            &cache,
+            &mut modules,
+            &mut PhaseMeasurements::default(),
+            1,
+        )
+        .unwrap();
+        let output = compile_export(
+            &graph,
+            &cache,
             &mut PhaseMeasurements::default(),
             Instant::now(),
             &modules,
             GeneratedSourceMode::Inline,
-        )
-        .unwrap()
-        .output
+        );
+        fs::remove_dir_all(root).unwrap();
+        output.unwrap().output
     }
 
     fn compile(source: &str, export_name: &str) -> super::CompilerOutput {
@@ -13718,7 +13719,7 @@ export const internal = {};
             source,
             "schedule",
             GENERATED_SOURCE,
-            "convex/testing/fake-server.js",
+            "node_modules/fake/server.js",
         );
         assert!(!unpinned.eligible);
         assert!(unpinned.diagnostics.iter().any(|diagnostic| {
@@ -13797,6 +13798,278 @@ export const invoke = mutation({
                     | "generated-api-source-mismatch"
             )
         }));
+    }
+
+    #[test]
+    fn guest_nested_udfs_preserve_root_and_component_addresses_without_callee_code() {
+        let generated = format!(
+            "{GENERATED_SOURCE}\nimport {{ componentsGeneric as makeComponents }} from \"convex/server\";\nexport const components = makeComponents();\n"
+        );
+        for (caller, method, reference, address) in [
+            (
+                "query",
+                "runQuery",
+                "api.tasks.read",
+                "_reference/function/tasks:read",
+            ),
+            (
+                "mutation",
+                "runQuery",
+                "internal.tasks.read",
+                "_reference/function/tasks:read",
+            ),
+            (
+                "mutation",
+                "runMutation",
+                "api.tasks.write",
+                "_reference/function/tasks:write",
+            ),
+            (
+                "query",
+                "runQuery",
+                "children.child.queries.read",
+                "_reference/childComponent/child/queries/read",
+            ),
+            (
+                "mutation",
+                "runQuery",
+                "children.child.queries.read",
+                "_reference/childComponent/child/queries/read",
+            ),
+            (
+                "mutation",
+                "runMutation",
+                "children.child.mutations.write",
+                "_reference/childComponent/child/mutations/write",
+            ),
+        ] {
+            let source = format!(
+                r#"
+import {{ api, internal, components as children }} from "./_generated/api.js";
+async function invoke(ctx, args) {{
+  return await ctx.{method}({reference}, args, {{ transactionLimits: {{ bytesRead: 1024 }} }});
+}}
+export const selected = {caller}({{
+  args: {{ value: null }},
+  handler: async (ctx, args) => await invoke(ctx, args),
+}});
+"#
+            );
+            let output = compile_with_generated_source_in_effect_mode(
+                &source,
+                "selected",
+                &generated,
+                CONVEX_SERVER,
+                super::EffectExecutionMode::GuestPromiseEventLoop,
+            );
+            assert!(
+                output.eligible,
+                "{caller}/{method}/{reference}: {:#?}",
+                serde_json::to_string_pretty(&output.diagnostics).unwrap()
+            );
+            let CompilerModeOutput::Compile(compiled) = output.mode_output else {
+                panic!("expected compile output")
+            };
+            assert_eq!(compiled.operations.len(), 1);
+            assert_eq!(
+                compiled.operations[0].kind,
+                if method == "runQuery" {
+                    "udfRunQuery"
+                } else {
+                    "udfRunMutation"
+                }
+            );
+            assert_eq!(compiled.operations[0].function_reference, None);
+            assert_eq!(compiled.reachable_modules, vec![ENTRY.to_string()]);
+            let source = compiled
+                .generated_javascript_artifact
+                .unwrap()
+                .source
+                .unwrap();
+            assert!(
+                source.contains(&format!("__convexFunctionReference(\"{address}\")")),
+                "{source}"
+            );
+            assert!(source.contains(&format!("ctx.{method}(")), "{source}");
+            assert!(source.contains("transactionLimits"), "{source}");
+        }
+    }
+
+    #[test]
+    fn component_scheduler_descriptors_match_aliased_generated_references() {
+        let generated = format!(
+            "{GENERATED_SOURCE}\nimport {{ componentsGeneric }} from \"convex/server\";\nexport const components = componentsGeneric();\n"
+        );
+        for (method, operation_kind) in [
+            ("runAfter", "schedulerRunAfter"),
+            ("runAt", "schedulerRunAt"),
+        ] {
+            let source = format!(
+                r#"
+import {{ components as children }} from "./_generated/api.js";
+async function scheduleOne(ctx, args) {{
+  return await ctx.scheduler.{method}(0, children.child.jobs.cleanup, args);
+}}
+export const selected = mutation({{
+  args: {{}}, handler: async (ctx, args) => await scheduleOne(ctx, args),
+}});
+"#
+            );
+            let output = compile_with_generated_source_in_effect_mode(
+                &source,
+                "selected",
+                &generated,
+                CONVEX_SERVER,
+                super::EffectExecutionMode::GuestPromiseEventLoop,
+            );
+            assert!(
+                output.eligible,
+                "{method}: {}",
+                serde_json::to_string_pretty(&output.diagnostics).unwrap()
+            );
+            let CompilerModeOutput::Compile(compiled) = output.mode_output else {
+                panic!("expected compile output")
+            };
+            let operation = compiled
+                .operations
+                .iter()
+                .find(|operation| operation.kind == operation_kind)
+                .unwrap();
+            assert_eq!(
+                operation.function_reference.as_deref(),
+                Some("_reference/childComponent/child/jobs/cleanup")
+            );
+            let source = compiled
+                .generated_javascript_artifact
+                .unwrap()
+                .source
+                .unwrap();
+            assert!(
+                source.contains(
+                    "__convexFunctionReference(\"_reference/childComponent/child/jobs/cleanup\")"
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn component_scheduler_batches_preserve_generated_reference_namespace() {
+        let generated = format!(
+            "{GENERATED_SOURCE}\nimport {{ componentsGeneric }} from \"convex/server\";\nexport const components = componentsGeneric();\n"
+        );
+        for body in [
+            "Promise.all([ctx.scheduler.runAfter(0, children.child.jobs.cleanup, args.payload)])",
+            "Promise.all(args.delays.map((delay) => ctx.scheduler.runAfter(delay, children.child.jobs.cleanup, args.payload)))",
+            "Promise.all(args.delays.map((delay) => scheduleOne(ctx, delay, args.payload)))",
+        ] {
+            let source = format!(
+                r#"
+async function scheduleOne(ctx, delay, payload) {{
+  return await ctx.scheduler.runAfter(delay, children.child.jobs.cleanup, payload);
+}}
+import {{ components as children }} from "./_generated/api.js";
+export const selected = mutation({{
+  args: {{ delays: v.array(null), payload: null }},
+  handler: async (ctx, args) => await {body},
+}});
+"#
+            );
+            let output = compile_with_generated_source_in_effect_mode(
+                &source,
+                "selected",
+                &generated,
+                CONVEX_SERVER,
+                super::EffectExecutionMode::BlockingFiber,
+            );
+            assert!(
+                output.eligible,
+                "{body}: {}",
+                serde_json::to_string_pretty(&output.diagnostics).unwrap()
+            );
+            let CompilerModeOutput::Compile(compiled) = output.mode_output else {
+                panic!("expected compile output")
+            };
+            let operations = compiled
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == "schedulerRunAfter")
+                .collect::<Vec<_>>();
+            assert!(!operations.is_empty());
+            assert!(operations.iter().all(|operation| {
+                operation.function_reference.as_deref()
+                    == Some("_reference/childComponent/child/jobs/cleanup")
+            }));
+        }
+    }
+
+    #[test]
+    fn guest_nested_udfs_keep_query_and_call_shape_restrictions() {
+        for (caller, call) in [
+            ("query", "ctx.runMutation(api.tasks.write, {})"),
+            ("mutation", "ctx.runAction(api.tasks.write, {})"),
+            ("mutation", "ctx.runQuery()"),
+            ("mutation", "ctx.runQuery(api.tasks.read, {}, {}, {})"),
+            ("mutation", "ctx.runQuery(...args.values)"),
+        ] {
+            let source = format!(
+                r#"
+import {{ api }} from "./_generated/api.js";
+export const selected = {caller}({{
+  args: {{ values: null }}, handler: async (ctx, args) => await {call},
+}});
+"#
+            );
+            let output = compile_with_generated_source_in_effect_mode(
+                &source,
+                "selected",
+                GENERATED_SOURCE,
+                CONVEX_SERVER,
+                super::EffectExecutionMode::GuestPromiseEventLoop,
+            );
+            assert!(!output.eligible, "{caller}/{call}");
+            assert!(
+                output.diagnostics.iter().any(|diagnostic| matches!(
+                    diagnostic.code.as_str(),
+                    "unsupported-convex-effect" | "unsupported-construct"
+                )),
+                "{:#?}",
+                serde_json::to_string_pretty(&output.diagnostics).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn component_reference_admission_authenticates_the_generated_factory() {
+        let source = r#"
+import { components } from "./_generated/api.js";
+export const selected = query({
+  args: {}, handler: async (ctx) => await ctx.runQuery(components.child.read, {}),
+});
+"#;
+        for invalid in [
+            "export const components = {};",
+            "import { componentsGeneric } from 'convex/server'; export let components = componentsGeneric();",
+            "import { componentsGeneric } from 'convex/server'; export const components = componentsGeneric(1);",
+            "import { componentsGeneric } from './fake.js'; export const components = componentsGeneric();",
+        ] {
+            let output = compile_with_generated_source_in_effect_mode(
+                source,
+                "selected",
+                &format!("{GENERATED_SOURCE}\n{invalid}"),
+                CONVEX_SERVER,
+                super::EffectExecutionMode::GuestPromiseEventLoop,
+            );
+            assert!(!output.eligible, "{invalid}");
+            assert!(
+                output
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "generated-api-source-mismatch"),
+                "{invalid}: {:#?}",
+                serde_json::to_string_pretty(&output.diagnostics).unwrap()
+            );
+        }
     }
 }
 

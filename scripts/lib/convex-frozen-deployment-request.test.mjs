@@ -357,6 +357,55 @@ test("authenticates a push-all-modules request against the installed bundler ses
   );
 });
 
+test("authenticates component definitions while keeping Wasm authority root-only", () => {
+  const value = fixture();
+  value.request.componentDefinitions = [
+    {
+      definitionPath: "node_modules/example-component/convex.config.ts",
+      definition: moduleConfig(
+        "components/example/definition.js",
+        "export default {};\n",
+        undefined,
+        "isolate"
+      ),
+      dependencies: [],
+      schema: null,
+      functions: [
+        moduleConfig(
+          "components/example/read.js",
+          "export const read = 1;\n",
+          undefined,
+          "isolate"
+        ),
+      ],
+      udfServerVersion: convexSdkVersion,
+    },
+  ];
+  value.requestBytes = Buffer.from(canonicalJson(value.request));
+
+  const inspected = inspectFrozenStartPushRequest(value);
+  assert.equal(inspected.request.componentDefinitions.length, 1);
+  assert.equal(inspected.evidence.selectedRouteCount, 1);
+  assert.deepEqual(
+    inspected.evidence.selectedModules.map(({ path }) => path),
+    ["read.js"]
+  );
+
+  const preflight = preflightForFixture(value);
+  const changedRequest = structuredClone(value.request);
+  changedRequest.componentDefinitions[0].functions[0].source += "changed\n";
+  const changedBytes = Buffer.from(canonicalJson(changedRequest));
+  assert.throws(
+    () =>
+      rebindFrozenStartPushAdminKey({
+        adminKey: "ephemeral-admin-key",
+        preflight,
+        requestBytes: changedBytes,
+      }),
+    /bytes do not match their stored preflight/u
+  );
+});
+
 test("rebinds only the frozen admin key and derived request identity", () => {
   const value = fixture();
   value.request.nodeDependencies = [{ name: "impers", version: "0.0.9" }];
