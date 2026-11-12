@@ -56,7 +56,8 @@ export async function acquireNativeReleaseForHost({ selection, cacheRoot, signal
   if (references === undefined) {
     throw new Error(`native packages are unavailable for ${runtime}`);
   }
-  const [compiler, precompiler] = await Promise.all(
+  // Both acquisitions own cache writes. Drain them before a failed publisher releases its lock.
+  const results = await Promise.allSettled(
     KINDS.map((kind) =>
       acquireNativePackage({
         kind,
@@ -66,5 +67,8 @@ export async function acquireNativeReleaseForHost({ selection, cacheRoot, signal
       })
     )
   );
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure !== undefined) throw failure.reason;
+  const [compiler, precompiler] = results.map((result) => result.value);
   return Object.freeze({ compiler, precompiler });
 }

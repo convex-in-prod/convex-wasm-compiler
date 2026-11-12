@@ -118,3 +118,34 @@ and table references, mutable globals, stack limits, host state and source/confi
 authority. A linear-memory copy alone is not a reusable Store snapshot. See
 [runtime reclamation primitives](memory-reclamation.md) for GC and allocator
 ownership contracts.
+
+## Static snapshot metadata
+
+Registry publication runs the packaged precompiler's `--snapshot-metadata`
+command on each distinct final Core module. It records supported mutable-global
+exports and stack restoration rules, or an explicit unsupported result. These
+are static layout facts, not initialized heap bytes. Linking and normalization
+must finish before inspection.
+
+The `module-snapshot-metadata` derivation cache is keyed by the
+`convex-wasm-module-snapshot-v1` rules version and the Core digest and size.
+Publication puts the result inline as `snapshotMetadata` on Core artifact
+records in `generation.json`. Existing Core/AOT entries, graph packages and
+payload filenames remain unchanged. Republishing cached modules can derive the
+metadata without recompilation; subsequent publications reuse the derivation.
+The generation owns its small copy, so removing the derivation cache does not
+affect published generations.
+
+A compatible backend trusts this metadata as compiler output and skips the
+Core instruction scan when loading AOT. Runtime Store binding and restoration
+checks still apply. Older generations without metadata use runtime inspection.
+Malformed, wrong-Core or unknown-version metadata is rejected. The producer's
+`scripts/convex-wasm-precompiler/src/snapshot_metadata.rs` and the backend's
+`wasm_snapshot_metadata.rs` must keep identical inspection rules; changing their
+semantics requires a new metadata kind.
+
+New publications need the updated JavaScript package and native precompiler.
+Upgrade the backend first: older backends reject the new optional record field.
+See the backend's
+[compiler and artifact contract](https://github.com/convex-in-prod/convex-backend/blob/main/patches/static_hermes_wasm_udfs/compiler_and_artifact_contract.md#static-snapshot-metadata)
+for the schema and runtime compatibility rules.

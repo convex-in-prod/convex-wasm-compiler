@@ -146,6 +146,46 @@ test("release selection names all host assets and installs both verified package
   assert.equal(requests.length, 4);
 });
 
+test("failed release acquisition drains the sibling package before returning", async (t) => {
+  const f = await releaseFixture(t);
+  if (!Object.hasOwn(nativeReleaseTargets, f.runtime)) return;
+  await createNativePackageSelection({
+    assetsRoot: f.assetsRoot,
+    output: f.selectionPath,
+    repository: "example/compiler",
+    tag: "v1.2.3",
+  });
+  const failure = new Error("compiler download rejected");
+  const precompilerStarted = Promise.withResolvers();
+  const releasePrecompiler = Promise.withResolvers();
+  t.mock.method(globalThis, "fetch", async (url) => {
+    const name = new URL(url).pathname.split("/").at(-1);
+    if (name.includes("-compiler-")) throw failure;
+    if (name.endsWith("-manifest.json")) {
+      precompilerStarted.resolve();
+      await releasePrecompiler.promise;
+    }
+    return new Response(f.assetBytes.get(name));
+  });
+  const cacheRoot = join(f.root, "cache");
+  let settled = false;
+  const acquisition = acquireNativeReleaseFromSelectionFile({
+    selectionPath: f.selectionPath,
+    cacheRoot,
+  }).finally(() => { settled = true; });
+  const rejected = assert.rejects(acquisition, (error) => error === failure);
+  try {
+    await precompilerStarted.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, "the precompiler still owns its staged package");
+  } finally {
+    releasePrecompiler.resolve();
+    await rejected;
+  }
+  assert.equal(existsSync(join(cacheRoot, "precompiler", nativeReleaseTargets[f.runtime],
+    f.precompiler.manifest.packageId, "manifest.json")), true);
+});
+
 test("selection generation rejects missing assets and index target drift", async (t) => {
   const f = await releaseFixture(t);
   const targetTriple = nativeReleaseTargets["linux-x64"];

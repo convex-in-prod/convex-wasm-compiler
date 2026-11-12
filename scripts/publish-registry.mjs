@@ -27,6 +27,8 @@ import {
   publishFreshRuntimeRegistry,
 } from "./lib/runtime-registry-publication.mjs";
 
+import { prepareRuntimeRegistrySnapshotMetadata } from "./lib/convex-wasm-snapshot-metadata.mjs";
+
 function parseArguments(argv) {
   const required = new Set([
     "--config",
@@ -177,7 +179,14 @@ async function publishProjectRegistryWithCacheLock({
       ...createRuntimeRegistryModuleGraphRecord(verified, cacheLayout),
     });
   }
-  const moduleGraphs = await prepareFreshRuntimeRegistryModuleGraphs(verifiedModuleGraphs);
+  const withSnapshots = await prepareRuntimeRegistrySnapshotMetadata(verifiedModuleGraphs, {
+    toolchainRoot: config.toolchainRoot,
+    precompilerPackageDirectory: config.precompilerPackage,
+    nativeReleaseSelectionPath: config.nativeReleaseSelectionPath,
+    nativePackageCacheRoot: config.nativePackageCacheRoot,
+    concurrency: config.jobs,
+  });
+  const moduleGraphs = await prepareFreshRuntimeRegistryModuleGraphs(withSnapshots);
   const deployment = await readConvexWasmPrivateEvidence(
     deploymentPath,
     "bound deployment manifest",

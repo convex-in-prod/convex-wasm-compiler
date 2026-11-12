@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadAndVerifyPrecompilerPackage } from "./lib/convex-wasm-precompiler-package.mjs";
+import { validateSnapshotMetadata } from "./lib/convex-wasm-snapshot-metadata.mjs";
 import {
   describeNativeCommandTermination,
   runBoundedNativeCommand,
@@ -76,7 +77,7 @@ export async function smokePackagedPrecompiler(
   if (!Number.isSafeInteger(jobs) || jobs <= 0 || jobs > availableParallelism()) {
     throw new Error("precompiler smoke jobs must be within the available CPU count");
   }
-  const { manifest } = await loadAndVerifyPrecompilerPackage(packageDirectory);
+  const { manifest, binaryPath } = await loadAndVerifyPrecompilerPackage(packageDirectory);
   const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-precompiler-smoke-"));
   await fs.chmod(root, 0o700);
   try {
@@ -104,6 +105,15 @@ export async function smokePackagedPrecompiler(
     const { instance } = await WebAssembly.instantiate(normalized);
     if (instance.exports.answer() !== 42) {
       throw new Error("packaged precompiler normalization changed the representative result");
+    }
+    const snapshotPath = join(root, "snapshot.json");
+    await runBounded(binaryPath, ["--snapshot-metadata", normalizedPath, snapshotPath]);
+    const snapshot = validateSnapshotMetadata(JSON.parse(await fs.readFile(snapshotPath, "utf8")), {
+      sha256: createHash("sha256").update(normalized).digest("hex"),
+      size: normalized.length,
+    });
+    if (snapshot.state.kind !== "supported" || snapshot.state.globals.length !== 0 || snapshot.state.stackLimits) {
+      throw new Error("packaged precompiler returned an unexpected snapshot layout");
     }
     const modes = [undefined];
     if (manifest.engineContract.fuelEpochPolling === true) modes.push(100_000);

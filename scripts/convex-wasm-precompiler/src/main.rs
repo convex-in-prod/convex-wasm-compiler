@@ -29,7 +29,8 @@ const USAGE: &str = "usage: convex-wasm-precompiler INPUT.wasm OUTPUT.cwasm \
     --parallel-compilation-workers POSITIVE_INTEGER_UP_TO_AVAILABLE_CPUS \
     [--fuel-epoch-poll-interval POSITIVE_SAFE_INTEGER] \
     [--incremental-cache-trace ABSOLUTE_NEW_JSONL]\n\
-    or: convex-wasm-precompiler --normalize-core INPUT.wasm OUTPUT.wasm";
+    or: convex-wasm-precompiler --normalize-core INPUT.wasm OUTPUT.wasm\n\
+    or: convex-wasm-precompiler --snapshot-metadata INPUT.wasm OUTPUT.json";
 const MAX_CORE_WASM_BYTES: usize = 320 * 1024 * 1024;
 const MAX_AOT_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -157,6 +158,30 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let first = required_argument(arguments.next(), "input Core Wasm path or --normalize-core")?;
+    if first == "--snapshot-metadata" {
+        use convex_wasm_precompiler::snapshot_metadata::{
+            SNAPSHOT_METADATA_KIND, SnapshotMetadata, SnapshotState,
+        };
+        let input = PathBuf::from(required_argument(arguments.next(), "input Core Wasm path")?);
+        let output = PathBuf::from(required_argument(
+            arguments.next(),
+            "snapshot metadata path",
+        )?);
+        if arguments.next().is_some() {
+            return Err(USAGE.into());
+        }
+        let bytes = read_bounded_file(&input, MAX_CORE_WASM_BYTES, "Core Wasm input")?;
+        let metadata = SnapshotMetadata {
+            kind: SNAPSHOT_METADATA_KIND.to_owned(),
+            core_sha256: format!("{:x}", Sha256::digest(&bytes)),
+            core_size: bytes.len() as u64,
+            state: SnapshotState::inspect(&bytes)?,
+        };
+        let mut json = serde_json::to_vec(&metadata)?;
+        json.push(b'\n');
+        write_and_sync_new_file(&output, &json)?;
+        return Ok(());
+    }
     if first == "--normalize-core" {
         let input = PathBuf::from(required_argument(arguments.next(), "input Core Wasm path")?);
         let output = PathBuf::from(required_argument(

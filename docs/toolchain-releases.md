@@ -155,6 +155,13 @@ failure can leave that tag behind; inspect the run before retrying.
 
 ### JavaScript-only releases
 
+The `--snapshot-metadata` precompiler command changes the native source contract.
+The first release that publishes static snapshot metadata therefore uses the native
+release path and includes the matching JavaScript package. A JavaScript-only
+release cannot add the command to a retained precompiler. Downstream publishers
+update both packages after upgrading the backend to accept `snapshotMetadata`;
+older generations without the field remain readable by the updated backend.
+
 For changes that preserve the native source contract, bump the npm package version
 and lockfile, push the source to `main`, and wait for its normal CI run to succeed.
 Then dispatch the dedicated workflow, naming that CI run and the previous release

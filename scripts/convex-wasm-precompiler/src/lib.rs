@@ -6,5 +6,6 @@ pub mod capability_replay_codec;
 pub mod capability_replay_host;
 #[cfg(feature = "capability-replay")]
 pub mod graph_initialization;
+pub mod snapshot_metadata;
 #[cfg(feature = "capability-replay")]
 pub mod wasmtime_wasi;
