@@ -913,12 +913,13 @@ This section covers the compiler's local build cache. The backend separately
 owns [runtime registry retention](https://github.com/convex-in-prod/convex-backend/tree/main/patches/static_hermes_wasm_udfs/operations.md#publication-reload-and-retention),
 where removing a serving generation has different lifetime constraints.
 
-Cache maintenance defaults to a dry run. It authenticates recent-success
-snapshots and referenced packages before planning immutable eviction. Above
+Cache maintenance defaults to a dry run. It authenticates the latest deployed
+snapshot and referenced packages before planning immutable eviction. Above
 the caller's high watermark, explicit and automatic sweeps remove old,
 unretained certificate lookup roots, packages, artifacts, and C-bundle entries.
-Certificate lookup roots are retired together with their preferred pointers
-and superseded certificates. Each deletion wave preserves the dependencies of every
+Unretained lookup roots are removed with their pointers. Superseded certificates
+sharing a retained lookup root are removed individually. Each deletion wave
+preserves the dependencies of every
 physical authority root: certificates pin their packages, and packages pin
 their artifacts. Newly unreachable dependencies become eligible on later
 waves. One maintenance invocation authenticates a single inventory under the cache
@@ -927,19 +928,31 @@ removals release dependency edges. It stops when measured occupancy reaches the 
 watermark or no eligible entries remain. The low-level `sweepConvexWasmImmutableGc` executes one plan. There is no
 entry-count or reclaimed-byte ceiling. Roots take priority over independent
 artifacts, and each plan stops selecting entries when estimated reclaim covers
-the excess above the high watermark. Maintenance preserves eight recent successful
-snapshots and a 24-hour reuse grace, including their complete closure; retained
-data can keep occupancy above the target. The report includes accumulated removals,
+the excess above the high watermark. Maintenance retains only the latest
+confirmed deployment and its complete closure.
+There is no age-based reuse or failure-recovery retention. Call
+`recordConvexWasmSuccessfulDeployment` under the cache lock after activation is
+confirmed, never after compilation or preparation alone. Keep builds and activation
+mutually exclusive with maintenance until this update, through the cache lock or
+the caller's existing deployment operation lock. The recorder atomically replaces
+`state/v1/cache-retention/v1/deployed-success/current.json`. Historical success
+records do not grant retention authority. Failed build scratch is removed when
+the build ends; maintenance removes interrupted work once it acquires the exclusive
+build/cache lock. A portable deployment without local compiler artifacts calls
+`clearConvexWasmDeploymentSnapshot` under the same lock instead of retaining the
+previous deployment. Retained deployment data can keep occupancy above the target.
+The report includes accumulated removals,
 compact wave summaries, the most recently derived plan, measured
 `immutable.sweep.remainingAllocatedBytes`, and `remainingExcessBytes`.
 `termination` distinguishes `watermark-reached`, `no-eligible-candidates`,
-`blocked-work`, and cooldown-only `recovery-completed`. An unreachable watermark
+and cooldown-only `recovery-completed`. An unreachable watermark
 is a successful exhausted-plan outcome. Both CLI summaries report recovered record
 counts and post-sweep occupancy when a sweep ran. Monotonic diagnostics separate lock wait, inventory,
 plan derivation, admission, physical fences, quarantine, unlink, recovery, and
 occupancy. Nested/concurrent phase times overlap and are not a wall-time partition;
 they never affect plan hashes or producer identities.
-Unknown invalid certificate roots conservatively prevent package retirement.
+Invalid unreferenced cache entries grant no retention authority; a missing or
+invalid reference from the deployed snapshot stops cleanup.
 Removal uses authenticated durable quarantine and resumes after interruption.
 Automatic maintenance also resumes pending quarantine below the high watermark.
 Each selected batch is quarantined and verified before any payload is unlinked,
@@ -980,7 +993,7 @@ acquire it around their builds. `convex-wasm-bind` and
 `convex-wasm-publish-registry` acquire the same lock for binding and publication,
 holding it until all cache reads and artifact copies finish, including on failure.
 Hosts that serialize compilation with a broader lock can pass a `cacheLock`
-object to the lease, successful-use, maintenance, and immutable-GC functions.
+object to the lease, deployed-snapshot, maintenance, and immutable-GC functions.
 It supplies `acquire({ environment })`, `requireAuthority(environment)`, and
 `inheritedAuthorityEnvironment(environment)`; acquisition returns the release
 function. Use the same lock for every operation on that cache. The compiler

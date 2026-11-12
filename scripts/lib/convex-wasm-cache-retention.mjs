@@ -29,22 +29,17 @@ import {
 import { readAutomaticCacheMaintenanceSchedule } from "./convex-wasm-cache-maintenance-schedule.mjs";
 
 export const convexWasmBuildWorkRecordName = "build-work.json";
-export const defaultConvexWasmWorkQuiescentMilliseconds = 24 * 60 * 60 * 1_000;
-export const defaultConvexWasmAbandonedRecoveryMilliseconds = 7 * 24 * 60 * 60 * 1_000;
-export const defaultConvexWasmFailedRecoveryMilliseconds = 7 * 24 * 60 * 60 * 1_000;
-export const defaultConvexWasmCompletedRetentionMilliseconds = 24 * 60 * 60 * 1_000;
-export const convexWasmRecentSuccessSnapshotLimit = 8;
-export const convexWasmRecentSuccessSnapshotPackageLimit = 256;
-export const convexWasmRecentSuccessSnapshotCompilerOutputLimit = 256;
-export const convexWasmRecentSuccessSnapshotCertificateLimit = 8;
+export const convexWasmDeploymentSnapshotPackageLimit = 256;
+export const convexWasmDeploymentSnapshotCompilerOutputLimit = 256;
+export const convexWasmDeploymentSnapshotCertificateLimit = 8;
 export const convexWasmCacheHighWatermarkEnvironmentName = "CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES";
 
 const BUILD_WORK_RECORD_KIND = "convex-wasm-build-work-record-v1";
-const RECENT_SUCCESS_SNAPSHOT_KIND = "convex-wasm-cache-recent-success-v1";
+const DEPLOYMENT_SNAPSHOT_KIND = "convex-wasm-cache-deployment-v1";
 const BUILD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const MAX_BUILD_WORK_RECORD_BYTES = 16 * 1_024;
-const MAX_RECENT_SUCCESS_SNAPSHOT_BYTES = 64 * 1_024;
+const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 64 * 1_024;
 
 function fail(message) {
   throw new Error(`Convex Wasm cache retention: ${message}`);
@@ -137,10 +132,6 @@ function processOwner(pid) {
   return { kind: "process", pid: requirePositiveSafeInteger(pid, "build owner PID") };
 }
 
-function legacyOwner() {
-  return { kind: "untracked-legacy" };
-}
-
 function validateOwner(owner) {
   if (typeof owner !== "object" || owner === null || Array.isArray(owner)) {
     fail("build work record owner must be an object");
@@ -150,12 +141,6 @@ function validateOwner(owner) {
       fail("process build work record owner has unexpected fields");
     }
     return processOwner(owner.pid);
-  }
-  if (owner.kind === "untracked-legacy") {
-    if (Object.keys(owner).join(",") !== "kind") {
-      fail("legacy build work record owner has unexpected fields");
-    }
-    return legacyOwner();
   }
   fail("build work record owner kind is unsupported");
 }
@@ -184,57 +169,11 @@ function completedRecord(record, nowMs) {
   };
 }
 
-function failedRecord(record, nowMs, failedRecoveryMilliseconds) {
+function failedRecord(record, nowMs) {
   return {
     ...record,
-    outcome: {
-      failedAtMs: requireNonNegativeSafeInteger(nowMs, "build failure time"),
-      kind: "deployment-failed",
-      recoverableUntilMs: safeIntegerSum(
-        nowMs,
-        requirePositiveSafeInteger(failedRecoveryMilliseconds, "failed build recovery period"),
-        "failed build recovery deadline"
-      ),
-    },
+    outcome: { failedAtMs: requireNonNegativeSafeInteger(nowMs, "build failure time"), kind: "deployment-failed" },
     status: "failed",
-    updatedAtMs: nowMs,
-  };
-}
-
-function boundLegacyFailedRecord(record, failedRecoveryMilliseconds) {
-  const failedAtMs = requireNonNegativeSafeInteger(record.outcome.failedAtMs, "build failure time");
-  return {
-    ...record,
-    outcome: {
-      failedAtMs,
-      kind: "deployment-failed",
-      recoverableUntilMs: safeIntegerSum(
-        failedAtMs,
-        requirePositiveSafeInteger(failedRecoveryMilliseconds, "failed build recovery period"),
-        "failed build recovery deadline"
-      ),
-    },
-    status: "failed",
-  };
-}
-
-function abandonedRecord(record, nowMs, abandonedRecoveryMilliseconds, previousStatus) {
-  return {
-    ...record,
-    outcome: {
-      abandonedAtMs: requireNonNegativeSafeInteger(nowMs, "build abandonment time"),
-      kind: "quiescent-lock-abandonment",
-      previousStatus,
-      recoverableUntilMs: safeIntegerSum(
-        nowMs,
-        requireNonNegativeSafeInteger(
-          abandonedRecoveryMilliseconds,
-          "abandoned build recovery period"
-        ),
-        "abandoned build recovery deadline"
-      ),
-    },
-    status: "abandoned",
     updatedAtMs: nowMs,
   };
 }
@@ -309,85 +248,11 @@ function validateBuildWorkRecord(value, expectedBuildId) {
     };
   }
   if (value.status === "failed") {
-    const outcomeKeys = Object.keys(value.outcome).sort().join(",");
-    const legacyOutcome = outcomeKeys === "failedAtMs,kind,recoverable";
-    if (outcomeKeys !== "failedAtMs,kind,recoverableUntilMs" && !legacyOutcome) {
-      fail("failed build outcome fields are invalid");
-    }
-    if (
-      value.outcome.kind !== "deployment-failed" ||
-      (legacyOutcome && value.outcome.recoverable !== true)
-    ) {
+    requireExactKeys(value.outcome, ["failedAtMs", "kind"], "failed build outcome");
+    if (value.outcome.kind !== "deployment-failed" || value.outcome.failedAtMs !== record.updatedAtMs) {
       fail("failed build outcome is invalid");
     }
-    const failedAtMs = requireNonNegativeSafeInteger(
-      value.outcome.failedAtMs,
-      "build failure time"
-    );
-    if (failedAtMs !== record.updatedAtMs) {
-      fail("build failure time must match the record update time");
-    }
-    if (legacyOutcome) {
-      return {
-        ...record,
-        outcome: {
-          failedAtMs,
-          kind: "deployment-failed",
-          recoverable: true,
-        },
-      };
-    }
-    const recoverableUntilMs = requireNonNegativeSafeInteger(
-      value.outcome.recoverableUntilMs,
-      "failed build recovery deadline"
-    );
-    if (recoverableUntilMs < failedAtMs) {
-      fail("failed build recovery deadline precedes failure");
-    }
-    return {
-      ...record,
-      outcome: {
-        failedAtMs,
-        kind: "deployment-failed",
-        recoverableUntilMs,
-      },
-    };
-  }
-  if (value.status === "abandoned") {
-    requireExactKeys(
-      value.outcome,
-      ["abandonedAtMs", "kind", "previousStatus", "recoverableUntilMs"],
-      "abandoned build outcome"
-    );
-    if (
-      value.outcome.kind !== "quiescent-lock-abandonment" ||
-      (value.outcome.previousStatus !== "active" && value.outcome.previousStatus !== "legacy")
-    ) {
-      fail("abandoned build outcome is invalid");
-    }
-    const abandonedAtMs = requireNonNegativeSafeInteger(
-      value.outcome.abandonedAtMs,
-      "build abandonment time"
-    );
-    const recoverableUntilMs = requireNonNegativeSafeInteger(
-      value.outcome.recoverableUntilMs,
-      "abandoned build recovery deadline"
-    );
-    if (recoverableUntilMs < abandonedAtMs) {
-      fail("abandoned build recovery deadline precedes abandonment");
-    }
-    if (abandonedAtMs !== record.updatedAtMs) {
-      fail("build abandonment time must match the record update time");
-    }
-    return {
-      ...record,
-      outcome: {
-        abandonedAtMs,
-        kind: "quiescent-lock-abandonment",
-        previousStatus: value.outcome.previousStatus,
-        recoverableUntilMs,
-      },
-    };
+    return { ...record, outcome: { failedAtMs: record.updatedAtMs, kind: "deployment-failed" } };
   }
   fail("build work record status is unsupported");
 }
@@ -445,11 +310,6 @@ export async function createConvexWasmBuildWorkLease({
   cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(layout);
   const buildId = buildIdFromLayout(cacheLayout);
-  const failedRecoveryMilliseconds = millisecondsFromEnvironment(
-    environment,
-    "CONVEX_WASM_FAILED_WORK_RECOVERY_MILLISECONDS",
-    defaultConvexWasmFailedRecoveryMilliseconds
-  );
   const normalizedNowMs = requireNonNegativeSafeInteger(nowMs, "build lease start time");
   await fs.mkdir(cacheLayout.work.root, { mode: 0o700, recursive: true });
   await requirePrivateCacheDirectory(cacheLayout.cacheRoot, cacheLayout.work.root);
@@ -502,7 +362,7 @@ export async function createConvexWasmBuildWorkLease({
     async fail(failedAtMs = Date.now()) {
       cacheLock.requireAuthority(environment);
       // Publication may have succeeded before removal of its completed work root failed. Preserve
-      // that completed state so maintenance can remove it after the normal recovery interval.
+      // that completed state; the next locked maintenance removes any remaining scratch.
       if (state.status === "completed") return;
       if (state.status !== "active") {
         fail(`cannot fail build work in ${state.status} state`);
@@ -510,10 +370,10 @@ export async function createConvexWasmBuildWorkLease({
       await transition(
         failedRecord(
           state,
-          requireNonNegativeSafeInteger(failedAtMs, "build failure time"),
-          failedRecoveryMilliseconds
+          requireNonNegativeSafeInteger(failedAtMs, "build failure time")
         )
       );
+      await removeConvexWasmCacheTree(cacheLayout.work.buildRoot);
     },
   });
 }
@@ -524,23 +384,14 @@ function safeIntegerSum(left, right, description) {
   return value;
 }
 
-function millisecondsFromEnvironment(environment, name, fallback) {
-  const raw = environment[name];
-  if (raw === undefined || raw === "") return fallback;
-  if (!/^[1-9][0-9]*$/u.test(raw)) {
-    fail(`${name} must be a positive integer number of milliseconds`);
-  }
-  return requirePositiveSafeInteger(Number(raw), name);
-}
-
-export function convexWasmRecentSuccessSnapshotRoot(cacheRoot) {
+export function convexWasmDeploymentSnapshotRoot(cacheRoot) {
   return join(
     requireNormalizedCacheRoot(cacheRoot),
     "state",
     "v1",
     "cache-retention",
     "v1",
-    "recent-success"
+    "deployed-success"
   );
 }
 
@@ -572,7 +423,7 @@ function successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs }) {
   const normalizedPackageKeys = sortedUniqueSha256s(
     packageKeys,
     "successful deployment module graph package keys",
-    convexWasmRecentSuccessSnapshotPackageLimit
+    convexWasmDeploymentSnapshotPackageLimit
   );
   const buildReport = deployment.buildReport;
   if (
@@ -593,7 +444,7 @@ function successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs }) {
   if (artifactReports !== undefined) {
     if (
       !Array.isArray(artifactReports) ||
-      artifactReports.length > convexWasmRecentSuccessSnapshotCompilerOutputLimit
+      artifactReports.length > convexWasmDeploymentSnapshotCompilerOutputLimit
     ) {
       fail("successful deployment compiler artifact reports exceed their bound");
     }
@@ -627,15 +478,15 @@ function successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs }) {
     certificateSha256s: sortedUniqueSha256s(
       certificateSha256s,
       "successful deployment result certificate SHA-256 values",
-      convexWasmRecentSuccessSnapshotCertificateLimit
+      convexWasmDeploymentSnapshotCertificateLimit
     ),
     compilerOutputKeys: sortedUniqueSha256s(
       compilerOutputKeys,
       "successful deployment compiler-output cache keys",
-      convexWasmRecentSuccessSnapshotCompilerOutputLimit
+      convexWasmDeploymentSnapshotCompilerOutputLimit
     ),
     deploymentSha256: manifest.deploymentSha256,
-    kind: RECENT_SUCCESS_SNAPSHOT_KIND,
+    kind: DEPLOYMENT_SNAPSHOT_KIND,
     packageKeys: normalizedPackageKeys,
     recordedAtMs: requireNonNegativeSafeInteger(recordedAtMs, "successful deployment time"),
     schemaVersion: 2,
@@ -643,7 +494,7 @@ function successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs }) {
   return { ...payload, snapshotSha256: fingerprintJson(payload) };
 }
 
-export async function recordConvexWasmSuccessfulCacheUse({
+export async function recordConvexWasmSuccessfulDeployment({
   buildId,
   cacheLayout: layout,
   cacheLock = convexWasmCacheLock,
@@ -653,8 +504,8 @@ export async function recordConvexWasmSuccessfulCacheUse({
 }) {
   cacheLock.requireAuthority(environment);
   const cacheLayout = normalizeConvexWasmCacheLayout(layout);
-  const snapshot = successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs });
-  const root = convexWasmRecentSuccessSnapshotRoot(cacheLayout.cacheRoot);
+  let snapshot = successfulDeploymentSnapshot({ buildId, deployment, recordedAtMs });
+  const root = convexWasmDeploymentSnapshotRoot(cacheLayout.cacheRoot);
   // Do not recursively create this authority path: a pre-existing state ancestor symlink would
   // otherwise make fs.mkdir populate an outside tree before private-cache validation rejects it.
   await fs.mkdir(cacheLayout.cacheRoot, { mode: 0o700, recursive: true });
@@ -673,70 +524,68 @@ export async function recordConvexWasmSuccessfulCacheUse({
     }
     await requirePrivateCacheDirectory(cacheLayout.cacheRoot, directory);
   }
-  const finalPath = join(root, `${snapshot.snapshotSha256}.json`);
+  const finalPath = join(root, "current.json");
+  // Certificate hits omit per-artifact build reports. Reconfirming the same deployment
+  // must not discard its existing compiler-output roots and turn the next edit cold.
+  if (deployment.buildReport?.artifacts === undefined && await pathExists(finalPath)) {
+    await requirePrivateCacheFile(cacheLayout.cacheRoot, finalPath);
+    const previous = JSON.parse(await readPrivateRegularFile(
+      finalPath, MAX_DEPLOYMENT_SNAPSHOT_BYTES, "deployed snapshot"
+    ));
+    const { snapshotSha256: previousDigest, ...previousPayload } = previous;
+    if (previous.kind !== DEPLOYMENT_SNAPSHOT_KIND || previous.schemaVersion !== 2 ||
+        fingerprintJson(previousPayload) !== previousDigest) {
+      fail("previous deployed snapshot does not authenticate");
+    }
+    if (previous.deploymentSha256 === snapshot.deploymentSha256) {
+      const { snapshotSha256: ignored, ...payload } = snapshot;
+      payload.compilerOutputKeys = sortedUniqueSha256s(
+        previous.compilerOutputKeys, "deployed compiler-output cache keys",
+        convexWasmDeploymentSnapshotCompilerOutputLimit
+      );
+      snapshot = { ...payload, snapshotSha256: fingerprintJson(payload) };
+    }
+  }
   const temporaryPath = join(
     root,
     `.publish-${snapshot.snapshotSha256}-${process.pid}-${randomBytes(8).toString("hex")}`
   );
   try {
-    await fs.writeFile(temporaryPath, `${canonicalJson(snapshot)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    await requirePrivateCacheFile(cacheLayout.cacheRoot, temporaryPath);
+    const source = `${canonicalJson(snapshot)}\n`;
+    if (Buffer.byteLength(source) > MAX_DEPLOYMENT_SNAPSHOT_BYTES) fail("deployed snapshot exceeds its size limit");
+    const file = await fs.open(temporaryPath, "wx", 0o600);
     try {
-      await fs.rename(temporaryPath, finalPath);
-    } catch (error) {
-      if (!(error instanceof Error) || error.code !== "EEXIST") throw error;
+      await file.writeFile(source);
+      await file.sync();
+    } finally {
+      await file.close();
     }
+    await requirePrivateCacheFile(cacheLayout.cacheRoot, temporaryPath);
+    await fs.rename(temporaryPath, finalPath);
+    const directory = await fs.open(root, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
     await requirePrivateCacheFile(cacheLayout.cacheRoot, finalPath);
   } finally {
     await fs.rm(temporaryPath, { force: true });
   }
-  const names = (await fs.readdir(root)).sort(compareStrings);
-  const snapshots = [];
-  for (const name of names) {
-    if (!/^[0-9a-f]{64}\.json$/u.test(name)) continue;
-    const path = join(root, name);
-    await requirePrivateCacheFile(cacheLayout.cacheRoot, path);
-    const snapshotStatus = await fs.lstat(path);
-    if (snapshotStatus.size > MAX_RECENT_SUCCESS_SNAPSHOT_BYTES) continue;
-    const bytes = await readPrivateRegularFile(
-      path,
-      MAX_RECENT_SUCCESS_SNAPSHOT_BYTES,
-      "recent-success snapshot"
-    );
-    try {
-      const source = bytes.toString("utf8");
-      const value = JSON.parse(source);
-      if (
-        `${canonicalJson(value)}\n` === source &&
-        value.kind === RECENT_SUCCESS_SNAPSHOT_KIND &&
-        (value.schemaVersion === 1 || value.schemaVersion === 2) &&
-        value.snapshotSha256 === name.slice(0, -5) &&
-        fingerprintJson(
-          Object.fromEntries(Object.entries(value).filter(([key]) => key !== "snapshotSha256"))
-        ) === value.snapshotSha256 &&
-        Number.isSafeInteger(value.recordedAtMs) &&
-        value.recordedAtMs >= 0
-      ) {
-        snapshots.push({ name, recordedAtMs: value.recordedAtMs });
-      }
-    } catch {
-      // Invalid authority files are retained so immutable GC can fail closed on them.
-    }
-  }
-  snapshots.sort(
-    (left, right) => right.recordedAtMs - left.recordedAtMs || compareStrings(right.name, left.name)
-  );
-  await settleRetentionWork(
-    snapshots.slice(convexWasmRecentSuccessSnapshotLimit).map(async ({ name }) => {
-      const path = join(root, name);
-      await requirePrivateCacheFile(cacheLayout.cacheRoot, path);
-      await fs.unlink(path);
-    })
-  );
   return snapshot;
+}
+
+export async function clearConvexWasmDeploymentSnapshot({
+  cacheRoot,
+  cacheLock = convexWasmCacheLock,
+  environment = process.env,
+}) {
+  cacheLock.requireAuthority(environment);
+  const root = convexWasmDeploymentSnapshotRoot(cacheRoot);
+  if (!(await pathExists(root))) return;
+  await requirePrivateCacheDirectory(cacheRoot, root);
+  const path = join(root, "current.json");
+  if (!(await pathExists(path))) return;
+  await requirePrivateCacheFile(cacheRoot, path);
+  await fs.unlink(path);
+  const directory = await fs.open(root, "r");
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
 export async function measureConvexWasmCacheOccupancy(path) {
@@ -842,15 +691,7 @@ function immutableRootMarkers(cacheRoot) {
   ];
 }
 
-async function inspectWorkRoot({
-  abandonedRecoveryMilliseconds,
-  apply,
-  cacheRoot,
-  completedRetentionMilliseconds,
-  failedRecoveryMilliseconds,
-  nowMs,
-  quiescentMilliseconds,
-}) {
+async function inspectWorkRoot({ apply, cacheRoot }) {
   const workRoot = join(cacheRoot, "work", "v1");
   if (!(await pathExists(workRoot))) return [];
   await requirePrivateCacheDirectory(cacheRoot, workRoot);
@@ -864,157 +705,19 @@ async function inspectWorkRoot({
       results.push({ action: "retain", buildId, reason: "unsafe-work-root", status: "invalid" });
       continue;
     }
+    await requirePrivateCacheDirectory(cacheRoot, buildRoot);
+    let status;
     try {
-      await requirePrivateCacheDirectory(cacheRoot, buildRoot);
+      const record = await readBuildWorkRecord(cacheRoot, buildRoot, buildId);
+      status = record?.status ?? "legacy";
     } catch (error) {
       if (!(error instanceof Error)) throw error;
-      results.push({
-        action: "retain",
-        buildId,
-        reason: "invalid-private-work-root",
-        status: "invalid",
-      });
-      continue;
+      status = "invalid";
     }
-    const rootStatus = await fs.lstat(buildRoot);
-    let record;
-    try {
-      record = await readBuildWorkRecord(cacheRoot, buildRoot, buildId);
-    } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      results.push({
-        action: "retain",
-        buildId,
-        reason: "invalid-build-work-record",
-        status: "invalid",
-      });
-      continue;
-    }
-    if (record === undefined) {
-      const lastObservedAtMs = Math.floor(rootStatus.mtimeMs);
-      if (lastObservedAtMs > nowMs || nowMs - lastObservedAtMs < quiescentMilliseconds) {
-        results.push({
-          action: "retain",
-          buildId,
-          lastObservedAtMs,
-          reason: "legacy-root-not-yet-quiescent",
-          status: "legacy",
-        });
-        continue;
-      }
-      const nextRecord = abandonedRecord(
-        activeRecord({
-          buildId,
-          nowMs: lastObservedAtMs,
-          owner: legacyOwner(),
-          startedAtMs: lastObservedAtMs,
-        }),
-        nowMs,
-        abandonedRecoveryMilliseconds,
-        "legacy"
-      );
-      if (apply) await writeBuildWorkRecord(cacheRoot, buildRoot, nextRecord, { exclusive: true });
-      results.push({
-        action: "mark-abandoned",
-        buildId,
-        reason: "legacy-root-observed-under-quiescent-heavy-lock",
-        recoverableUntilMs: nextRecord.outcome.recoverableUntilMs,
-        status: "legacy",
-      });
-      continue;
-    }
-    if (record.updatedAtMs > nowMs) {
-      results.push({
-        action: "retain",
-        buildId,
-        reason: "build-work-record-is-from-the-future",
-        status: "invalid",
-      });
-      continue;
-    }
-    if (record.status === "failed") {
-      if (record.outcome.recoverable === true) {
-        const nextRecord = boundLegacyFailedRecord(record, failedRecoveryMilliseconds);
-        if (apply) await writeBuildWorkRecord(cacheRoot, buildRoot, nextRecord);
-        results.push({
-          action: "set-recovery-deadline",
-          buildId,
-          reason: "legacy-failed-build-recovery-bounded-under-heavy-lock",
-          recoverableUntilMs: nextRecord.outcome.recoverableUntilMs,
-          status: "failed",
-        });
-        continue;
-      }
-      if (nowMs < record.outcome.recoverableUntilMs) {
-        results.push({
-          action: "retain",
-          buildId,
-          reason: "failed-build-recovery-window-open",
-          recoverableUntilMs: record.outcome.recoverableUntilMs,
-          status: "failed",
-        });
-        continue;
-      }
-    }
-    if (record.status === "active") {
-      if (nowMs - record.updatedAtMs < quiescentMilliseconds) {
-        results.push({
-          action: "retain",
-          buildId,
-          reason: "active-lease-not-yet-quiescent",
-          status: "active",
-        });
-        continue;
-      }
-      const nextRecord = abandonedRecord(record, nowMs, abandonedRecoveryMilliseconds, "active");
-      if (apply) await writeBuildWorkRecord(cacheRoot, buildRoot, nextRecord);
-      results.push({
-        action: "mark-abandoned",
-        buildId,
-        reason: "active-lease-ended-before-completion-under-quiescent-heavy-lock",
-        recoverableUntilMs: nextRecord.outcome.recoverableUntilMs,
-        status: "active",
-      });
-      continue;
-    }
-    const removable =
-      record.status === "failed" || record.status === "abandoned"
-        ? nowMs >= record.outcome.recoverableUntilMs
-        : nowMs - record.updatedAtMs >= completedRetentionMilliseconds;
-    if (!removable) {
-      results.push({
-        action: "retain",
-        buildId,
-        reason:
-          record.status === "failed"
-            ? "failed-build-recovery-window-open"
-            : record.status === "abandoned"
-              ? "abandoned-build-recovery-window-open"
-              : "completed-build-retention-window-open",
-        status: record.status,
-      });
-      continue;
-    }
-    if (apply) {
-      await requirePrivateCacheDirectory(cacheRoot, buildRoot);
-      const current = await readBuildWorkRecord(cacheRoot, buildRoot, buildId);
-      if (current === undefined || JSON.stringify(current) !== JSON.stringify(record)) {
-        fail(`build work record changed before removal: ${buildId}`);
-      }
-      // The top-level lock must cover admitted child removals even when one fails.
-      await removeConvexWasmCacheTree(buildRoot);
-    }
-    results.push({
-      action: "remove",
-      buildId,
-      reason:
-        record.status === "failed"
-          ? "failed-build-recovery-window-expired"
-          : record.status === "abandoned"
-            ? "abandoned-build-recovery-window-expired"
-            : "completed-build-retention-window-expired",
-      status: record.status,
-    });
+    // Maintenance owns the same exclusive lock as builds. Once acquired, no work
+    // directory has a live build owner, regardless of its last recorded state or age.
+    if (apply) await removeConvexWasmCacheTree(buildRoot);
+    results.push({ action: "remove", buildId, reason: "unowned-work-under-cache-lock", status });
   }
   return results;
 }
@@ -1022,42 +725,33 @@ async function inspectWorkRoot({
 function workSummary(roots) {
   const summary = {
     active: 0,
-    abandoned: 0,
     completed: 0,
     failed: 0,
     invalid: 0,
     legacy: 0,
-    markAbandoned: 0,
     remove: 0,
     retain: 0,
-    setRecoveryDeadline: 0,
     total: roots.length,
   };
   for (const root of roots) {
     summary[root.status] += 1;
-    if (root.action === "mark-abandoned") summary.markAbandoned += 1;
-    else if (root.action === "set-recovery-deadline") summary.setRecoveryDeadline += 1;
-    else summary[root.action] += 1;
+    summary[root.action] += 1;
   }
   return summary;
 }
 
 async function maintainConvexWasmCacheMeasured({
   clock = Date.now,
-  abandonedRecoveryMilliseconds = defaultConvexWasmAbandonedRecoveryMilliseconds,
   apply = false,
   automaticImmutableSweep = false,
   cacheRoot = defaultConvexWasmCacheRoot(),
   cacheLock = convexWasmCacheLock,
-  completedRetentionMilliseconds = defaultConvexWasmCompletedRetentionMilliseconds,
   environment = process.env,
-  failedRecoveryMilliseconds = defaultConvexWasmFailedRecoveryMilliseconds,
   immutableHighWatermarkAllocatedBytes,
   immutablePlanOutput,
   immutableSweep = false,
   includeImmutableOccupancy = true,
   nowMs,
-  quiescentMilliseconds = defaultConvexWasmWorkQuiescentMilliseconds,
 } = {}) {
   const normalizedCacheRoot = requireNormalizedCacheRoot(cacheRoot);
   const suppliedNowMs =
@@ -1065,16 +759,12 @@ async function maintainConvexWasmCacheMeasured({
   const normalizedImmutableHighWatermarkAllocatedBytes =
     immutableHighWatermarkAllocatedBytes ??
     convexWasmCacheHighWatermarkBytesFromEnvironment(environment);
-  requireNonNegativeSafeInteger(abandonedRecoveryMilliseconds, "abandoned build recovery period");
-  requireNonNegativeSafeInteger(completedRetentionMilliseconds, "completed build retention period");
-  requirePositiveSafeInteger(failedRecoveryMilliseconds, "failed build recovery period");
   if (normalizedImmutableHighWatermarkAllocatedBytes !== undefined) {
     requirePositiveSafeInteger(
       normalizedImmutableHighWatermarkAllocatedBytes,
       "immutable high watermark"
     );
   }
-  requireNonNegativeSafeInteger(quiescentMilliseconds, "work quiescence period");
   if (
     immutablePlanOutput !== undefined &&
     (typeof immutablePlanOutput !== "string" ||
@@ -1133,12 +823,9 @@ async function maintainConvexWasmCacheMeasured({
           cacheRoot: normalizedCacheRoot,
           nowMs: normalizedNowMs,
           policy: {
-            abandonedRecoveryMilliseconds,
-            completedRetentionMilliseconds,
-            failedRecoveryMilliseconds,
+            retention: "latest-deployed-snapshot",
             immutableHighWatermarkAllocatedBytes: normalizedImmutableHighWatermarkAllocatedBytes,
             includeImmutableOccupancy,
-            quiescentMilliseconds,
           },
         })
       : undefined;
@@ -1165,20 +852,7 @@ async function maintainConvexWasmCacheMeasured({
         ? measureConvexWasmRetentionPhase("immutableOccupancy", () => measureConvexWasmRetentionPhase("immutableOccupancyWalk", () => measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)))
         : undefined,
     ]);
-    const roots = await inspectWorkRoot({
-      abandonedRecoveryMilliseconds,
-      apply,
-      cacheRoot: normalizedCacheRoot,
-      completedRetentionMilliseconds,
-      failedRecoveryMilliseconds,
-      nowMs: normalizedNowMs,
-      quiescentMilliseconds,
-    });
-    // A failed/completed build has no live owner of immutable entries. Its small work root stays
-    // available for diagnosis, but must not pin the entire cache for its recovery window.
-    const immutableSweepBlockers = roots.filter(
-      ({ action, status }) => action !== "remove" && status !== "failed" && status !== "completed"
-    );
+    const roots = await inspectWorkRoot({ apply, cacheRoot: normalizedCacheRoot });
     const automaticImmutableSweepAboveHighWatermark =
       automaticImmutableSweep && automaticSchedule?.status !== "deferred" &&
       immutableOccupancy.uniqueAllocatedBytes > normalizedImmutableHighWatermarkAllocatedBytes;
@@ -1201,7 +875,7 @@ async function maintainConvexWasmCacheMeasured({
     // accidentally authorize a new pressure sweep or advance the existing receipt.
     const recoveryOnly = automaticSchedule?.status === "deferred" && pendingQuarantine;
     let immutableSweepResult;
-    if (recoveryOnly && immutableSweepBlockers.length === 0) {
+    if (recoveryOnly) {
       const recovered = await recoverConvexWasmImmutableGc(immutableGcOptions);
       // Recovery only changes quarantine outside immutable/, so the admission measurement
       // remains current without a second full immutable walk.
@@ -1214,7 +888,7 @@ async function maintainConvexWasmCacheMeasured({
         remainingExcessBytes: Math.max(0, remainingAllocatedBytes - normalizedImmutableHighWatermarkAllocatedBytes),
         termination: "recovery-completed",
       };
-    } else if (immutableSweepRequested && immutableSweepBlockers.length === 0) {
+    } else if (immutableSweepRequested) {
       immutableSweepResult = await maintainConvexWasmImmutableGc({
         ...immutableGcOptions,
         // Quarantine recovery never removes immutable roots. Reuse the automatic
@@ -1224,7 +898,7 @@ async function maintainConvexWasmCacheMeasured({
     }
     const shouldPlanImmutableGc =
       immutablePlanOutput !== undefined ||
-      (!recoveryOnly && immutableSweepRequested && (immutableSweep || immutableSweepBlockers.length === 0));
+      (!recoveryOnly && immutableSweepRequested);
     const immutablePlan =
       immutableSweepResult?.plan ??
       (shouldPlanImmutableGc
@@ -1257,22 +931,13 @@ async function maintainConvexWasmCacheMeasured({
             }
           : {}),
         rootMarkers,
-        sweepAuthorized: immutableSweepRequested && immutableSweepBlockers.length === 0,
-        sweepBlocker:
-          immutableSweepBlockers.length === 0
-            ? immutableSweepRequested
-              ? undefined
-              : automaticImmutableSweep
-                ? "immutable cache is at or below its high watermark"
-                : "immutable cache deletion requires explicit immutable sweep mode"
-            : "active or unresolved build work remains",
+        sweepAuthorized: immutableSweepRequested,
+        sweepBlocker: immutableSweepRequested ? undefined
+          : automaticImmutableSweep ? "immutable cache is at or below its high watermark"
+          : "immutable cache deletion requires explicit immutable sweep mode",
         ...(immutableSweepRequested
           ? {
               sweep: {
-                blockedWorkRoots: immutableSweepBlockers.map(({ buildId, status }) => ({
-                  buildId,
-                  status,
-                })),
                 recovered: immutableSweepResult?.recovered ?? [],
                 removed: immutableSweepResult?.removed ?? [],
                 requested: true,
@@ -1282,14 +947,10 @@ async function maintainConvexWasmCacheMeasured({
                     ? "above-high-watermark"
                     : "interrupted-sweep",
                 skipped: immutableSweepResult?.skipped ?? 0,
-                ...(immutableSweepResult === undefined
-                  ? { termination: "blocked-work" }
-                  : {
-                      remainingAllocatedBytes: immutableSweepResult.remainingAllocatedBytes,
-                      ...(immutableSweepResult.waves === undefined ? {} : { waves: immutableSweepResult.waves }),
-                      remainingExcessBytes: immutableSweepResult.remainingExcessBytes,
-                      termination: immutableSweepResult.termination,
-                    }),
+                remainingAllocatedBytes: immutableSweepResult.remainingAllocatedBytes,
+                ...(immutableSweepResult.waves === undefined ? {} : { waves: immutableSweepResult.waves }),
+                remainingExcessBytes: immutableSweepResult.remainingExcessBytes,
+                termination: immutableSweepResult.termination,
               },
             }
           : {}),
@@ -1303,18 +964,11 @@ async function maintainConvexWasmCacheMeasured({
         scope: includeImmutableOccupancy ? "entire-cache" : "work-only",
       },
       work: {
-        abandonedRecoveryMilliseconds,
-        completedRetentionMilliseconds,
-        failedRecoveryMilliseconds,
-        quiescentMilliseconds,
         roots,
         summary: workSummary(roots),
       },
     };
-    // A blocked sweep did not complete its requested work. Keep it due so clearing the
-    // lease can admit the next invocation immediately, including during v1 migration.
-    if (automaticSchedule?.status === "due" &&
-        !(immutableSweepRequested && immutableSweepBlockers.length !== 0)) {
+    if (automaticSchedule?.status === "due") {
       await automaticSchedule.complete(clock());
     }
     return report;

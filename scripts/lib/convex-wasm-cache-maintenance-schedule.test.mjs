@@ -129,15 +129,13 @@ async function maintenanceFixture(t) {
     automaticImmutableSweep: true,
     includeImmutableOccupancy: false,
     immutableHighWatermarkAllocatedBytes: 1,
-    abandonedRecoveryMilliseconds: 1_000,
-    quiescentMilliseconds: 0,
     nowMs: 2_000_000_000,
     clock: () => options.nowMs,
   };
   return { cacheLayout, options, receiptPath: join(cacheRoot, "automatic-maintenance.json") };
 }
 
-test("blocked automatic sweeps neither create nor replace completion receipts", async (t) => {
+test("interrupted work is removed before automatic sweeps publish completion receipts", async (t) => {
   for (const receiptKind of ["absent", "v1", "v2"]) {
     await t.test(receiptKind, async (t) => {
       const { cacheLayout, options, receiptPath } = await maintenanceFixture(t);
@@ -158,15 +156,6 @@ test("blocked automatic sweeps neither create nor replace completion receipts", 
           cacheLayout, environment: options.environment, nowMs: options.nowMs,
         });
       } finally { release(); }
-      const blocked = await maintainConvexWasmCache(options);
-      assert.equal(blocked.immutable.sweep.termination, "blocked-work");
-      assert.equal(blocked.immutable.sweepAuthorized, false);
-      await fs.lstat(artifactPath);
-      if (previous === undefined) await assert.rejects(fs.lstat(receiptPath), { code: "ENOENT" });
-      else assert.equal(await fs.readFile(receiptPath, "utf8"), previous);
-
-      // The abandonment window ends before the cooldown would have expired.
-      options.nowMs += 1_000;
       const retry = await maintainConvexWasmCache(options);
       assert.equal(retry.immutable.sweep.termination,
         retry.immutable.sweep.remainingAllocatedBytes <= options.immutableHighWatermarkAllocatedBytes
@@ -178,7 +167,7 @@ test("blocked automatic sweeps neither create nor replace completion receipts", 
   }
 });
 
-test("failed automatic deletion preserves the receipt and recovery still observes work admission", async (t) => {
+test("failed automatic deletion preserves the receipt and recovery removes interrupted work", async (t) => {
   const { cacheLayout, options, receiptPath } = await maintenanceFixture(t);
   await maintainConvexWasmCache(options);
   const previous = await fs.readFile(receiptPath, "utf8");
@@ -207,11 +196,6 @@ test("failed automatic deletion preserves the receipt and recovery still observe
       cacheLayout, environment: options.environment, nowMs: options.nowMs,
     });
   } finally { release(); }
-  const blocked = await maintainConvexWasmCache(options);
-  assert.equal(blocked.immutable.sweep.termination, "blocked-work");
-  assert.deepEqual(blocked.immutable.sweep.recovered, []);
-  assert.equal(await fs.readFile(receiptPath, "utf8"), previous);
-  options.nowMs += 1_000;
   const recovered = await maintainConvexWasmCache(options);
   assert.equal(recovered.immutable.sweep.termination, "recovery-completed");
   assert.equal(recovered.immutable.sweep.recovered.length, 1);

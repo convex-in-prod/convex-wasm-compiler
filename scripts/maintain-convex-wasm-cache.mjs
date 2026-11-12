@@ -4,9 +4,6 @@ import { resolve } from "node:path";
 
 import { defaultConvexWasmCacheRoot } from "./lib/convex-wasm-cache-layout.mjs";
 import {
-  defaultConvexWasmAbandonedRecoveryMilliseconds,
-  defaultConvexWasmCompletedRetentionMilliseconds,
-  defaultConvexWasmWorkQuiescentMilliseconds,
   maintainConvexWasmCache,
 } from "./lib/convex-wasm-cache-retention.mjs";
 
@@ -14,25 +11,11 @@ function usage() {
   return [
     "usage: convex-wasm-cache [--dry-run | --apply]",
     "       [--cache-root PATH] [--work-only]",
-    "       [--quiescent-hours N] [--abandoned-recovery-hours N]",
-    "       [--completed-retention-hours N] [--failed-recovery-hours N]",
     "       [--immutable-plan-output PATH] [--immutable-high-watermark-bytes N]",
     "       [--immutable-sweep | --automatic]",
     "",
     "The default is a dry run. Sweeping requires --immutable-high-watermark-bytes or CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES.",
   ].join("\n");
-}
-
-function hours(value, option) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`${option} must be a non-negative number\n${usage()}`);
-  }
-  const milliseconds = parsed * 60 * 60 * 1_000;
-  if (!Number.isSafeInteger(milliseconds)) {
-    throw new Error(`${option} is outside the supported range\n${usage()}`);
-  }
-  return milliseconds;
 }
 
 function bytes(value, option) {
@@ -52,10 +35,6 @@ export function parseArguments(argumentsList) {
   let modeSeen = false;
   let cacheRoot = defaultConvexWasmCacheRoot();
   let includeImmutableOccupancy = true;
-  let quiescentMilliseconds = defaultConvexWasmWorkQuiescentMilliseconds;
-  let abandonedRecoveryMilliseconds = defaultConvexWasmAbandonedRecoveryMilliseconds;
-  let completedRetentionMilliseconds = defaultConvexWasmCompletedRetentionMilliseconds;
-  let failedRecoveryMilliseconds;
   let immutableHighWatermarkAllocatedBytes;
   let immutablePlanOutput;
   let immutableSweep = false;
@@ -83,18 +62,7 @@ export function parseArguments(argumentsList) {
     if (value === undefined) throw new Error(usage());
     index += 1;
     if (option === "--cache-root") cacheRoot = resolve(value);
-    else if (option === "--quiescent-hours") {
-      quiescentMilliseconds = hours(value, option);
-    } else if (option === "--abandoned-recovery-hours") {
-      abandonedRecoveryMilliseconds = hours(value, option);
-    } else if (option === "--completed-retention-hours") {
-      completedRetentionMilliseconds = hours(value, option);
-    } else if (option === "--failed-recovery-hours") {
-      failedRecoveryMilliseconds = hours(value, option);
-      if (failedRecoveryMilliseconds <= 0) {
-        throw new Error(`${option} must be positive\n${usage()}`);
-      }
-    } else if (option === "--immutable-plan-output") {
+    else if (option === "--immutable-plan-output") {
       immutablePlanOutput = resolve(value);
     } else if (option === "--immutable-high-watermark-bytes") {
       immutableHighWatermarkAllocatedBytes = bytes(value, option);
@@ -112,14 +80,10 @@ export function parseArguments(argumentsList) {
     throw new Error(`--automatic requires --apply without --immutable-sweep\n${usage()}`);
   }
   return {
-    abandonedRecoveryMilliseconds,
     apply,
     automaticImmutableSweep,
     cacheRoot,
-    completedRetentionMilliseconds,
     includeImmutableOccupancy,
-    quiescentMilliseconds,
-    ...(failedRecoveryMilliseconds === undefined ? {} : { failedRecoveryMilliseconds }),
     ...(immutableHighWatermarkAllocatedBytes === undefined
       ? {}
       : { immutableHighWatermarkAllocatedBytes }),

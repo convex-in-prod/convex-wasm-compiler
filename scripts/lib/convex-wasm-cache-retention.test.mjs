@@ -18,7 +18,7 @@ import {
   createConvexWasmBuildWorkLease,
   maintainConvexWasmCache,
   measureConvexWasmCacheOccupancy,
-  recordConvexWasmSuccessfulCacheUse,
+  recordConvexWasmSuccessfulDeployment,
 } from "./convex-wasm-cache-retention.mjs";
 import {
   currentConvexWasmRetentionPhase,
@@ -72,12 +72,9 @@ async function isVerifiedQuarantineRoot(path) {
 function maintenanceOptions(fixtureValue, overrides = {}) {
   return {
     clock: () => overrides.nowMs ?? Date.now(),
-    abandonedRecoveryMilliseconds: 1_000,
     cacheRoot: fixtureValue.cacheRoot,
-    completedRetentionMilliseconds: 1_000,
     environment: fixtureValue.environment,
     includeImmutableOccupancy: false,
-    quiescentMilliseconds: 1_000,
     ...overrides,
   };
 }
@@ -96,6 +93,14 @@ import {
   materializeModuleGraphPackageFixture,
   writeLegacyDeploymentResultCertificate
 } from "../test-fixtures/cache-retention.mjs";
+
+async function retainCompilerOutput(value, cacheLayout, compilerOutput) {
+  const { manifest } = await materializeModuleGraphPackageFixture(value);
+  await withHeavyLock(value.environment, () => recordConvexWasmSuccessfulDeployment({
+    buildId: "deployed-fixture", cacheLayout, environment: value.environment,
+    deployment: { manifest, buildReport: { artifacts: [{ buildReport: { compilerOutputCache: { cacheKey: compilerOutput.key } } }] } },
+  }));
+}
 
 test("inventory canonical JSON retains parsed data and rejects alternate byte encodings", async (t) => {
   for (const numericKeys of [false, true]) {
@@ -117,6 +122,7 @@ test("inventory canonical JSON retains parsed data and rejects alternate byte en
         cacheLayout, environment: value.environment,
       }));
       await write(source);
+      await retainCompilerOutput(value, cacheLayout, compilerOutput);
       assert.ok((await plan()).retained.artifacts.includes(`${compilerOutput.stage}\0${compilerOutput.key}`));
       for (const changed of [
         `\ufeff${source}`,
@@ -133,7 +139,7 @@ test("inventory canonical JSON retains parsed data and rejects alternate byte en
         // Reauthenticate the altered payload in its entry so only structured JSON validation
         // can reject it, rather than the earlier generic payload hash or metadata validator.
         await write(changed);
-        await assert.rejects(plan(), /recent immutable authority is corrupt/u);
+        await assert.rejects(plan(), /retained compiler-output cache entry is unavailable/u);
       }
     });
   }
@@ -245,232 +251,6 @@ test("work cleanup and lease completion drain admitted deletions before lock rel
   }
 });
 
-test("failed work has bounded recovery and is removed after expiry", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("failed-build");
-  await withHeavyLock(value.environment, async () => {
-    const lease = await createConvexWasmBuildWorkLease({
-      cacheLayout: layout,
-      environment: value.environment,
-      nowMs: 1_000,
-    });
-    await fs.mkdir(layout.work.reports, { mode: 0o700 });
-    await fs.writeFile(join(layout.work.reports, "failure-evidence.json"), "{}\n", {
-      mode: 0o600,
-    });
-    await lease.fail(2_000);
-  });
-
-  const report = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 1_000_000 })
-  );
-  assert.deepEqual(report.work.roots, [
-    {
-      action: "retain",
-      buildId: "failed-build",
-      reason: "failed-build-recovery-window-open",
-      recoverableUntilMs: 604802000,
-      status: "failed",
-    },
-  ]);
-  const record = JSON.parse(
-    await fs.readFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "utf8")
-  );
-  assert.equal(record.status, "failed");
-  assert.deepEqual(record.outcome, {
-    failedAtMs: 2_000,
-    kind: "deployment-failed",
-    recoverableUntilMs: 604802000,
-  });
-  assert.equal(
-    await fs.readFile(join(layout.work.reports, "failure-evidence.json"), "utf8"),
-    "{}\n"
-  );
-  const expired = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 604802000 })
-  );
-  assert.equal(expired.work.roots[0].action, "remove");
-  assert.equal(expired.work.roots[0].status, "failed");
-  await assert.rejects(fs.lstat(layout.work.buildRoot), { code: "ENOENT" });
-});
-
-test("legacy failed records receive a deadline before any removal", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("legacy-failed-build");
-  await withHeavyLock(value.environment, async () => {
-    const lease = await createConvexWasmBuildWorkLease({
-      cacheLayout: layout,
-      environment: value.environment,
-      nowMs: 1_000,
-    });
-    await lease.fail(2_000);
-    const recordPath = join(layout.work.buildRoot, convexWasmBuildWorkRecordName);
-    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
-    await fs.writeFile(
-      recordPath,
-      `${JSON.stringify({
-        ...record,
-        outcome: { failedAtMs: 2_000, kind: "deployment-failed", recoverable: true },
-      })}\n`,
-      { mode: 0o600 }
-    );
-  });
-  const first = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 1_000_000 })
-  );
-  assert.equal(first.work.roots[0].action, "set-recovery-deadline");
-  assert.equal(first.work.roots[0].recoverableUntilMs, 604_802_000);
-  assert.equal(
-    JSON.parse(
-      await fs.readFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "utf8")
-    ).outcome.recoverableUntilMs,
-    604_802_000
-  );
-});
-
-test("interrupted work is abandoned under quiescence and removed only after recovery", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("interrupted-build");
-  await withHeavyLock(value.environment, async () => {
-    await createConvexWasmBuildWorkLease({
-      cacheLayout: layout,
-      environment: value.environment,
-      nowMs: 1_000,
-    });
-    await fs.mkdir(layout.work.timings, { mode: 0o700 });
-    await fs.writeFile(join(layout.work.timings, "phase.json"), "{}\n", { mode: 0o600 });
-  });
-
-  const dryRun = await maintainConvexWasmCache(maintenanceOptions(value, { nowMs: 3_000 }));
-  assert.equal(dryRun.work.roots[0].action, "mark-abandoned");
-  assert.equal(
-    JSON.parse(
-      await fs.readFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "utf8")
-    ).status,
-    "active"
-  );
-
-  const first = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 3_000 })
-  );
-  assert.equal(first.work.roots[0].action, "mark-abandoned");
-  assert.equal(first.work.roots[0].recoverableUntilMs, 4_000);
-  assert.equal(
-    JSON.parse(
-      await fs.readFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "utf8")
-    ).status,
-    "abandoned"
-  );
-
-  const recoverable = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 3_999 })
-  );
-  assert.equal(recoverable.work.roots[0].action, "retain");
-  assert.equal(await fs.readFile(join(layout.work.timings, "phase.json"), "utf8"), "{}\n");
-
-  const expired = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 4_000 })
-  );
-  assert.equal(expired.work.roots[0].action, "remove");
-  await assert.rejects(fs.lstat(layout.work.buildRoot), { code: "ENOENT" });
-});
-
-test("completed work left by an interrupted cleanup is removed after retention", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("completed-build");
-  await withHeavyLock(value.environment, async () => {
-    await createConvexWasmBuildWorkLease({
-      cacheLayout: layout,
-      environment: value.environment,
-      nowMs: 1_000,
-    });
-    const recordPath = join(layout.work.buildRoot, convexWasmBuildWorkRecordName);
-    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
-    await fs.writeFile(
-      recordPath,
-      `${JSON.stringify({
-        ...record,
-        outcome: { completedAtMs: 2_000, kind: "deployment-completed" },
-        status: "completed",
-        updatedAtMs: 2_000,
-      })}\n`
-    );
-  });
-
-  const retained = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 2_999 })
-  );
-  assert.equal(retained.work.roots[0].action, "retain");
-  const removed = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 3_000 })
-  );
-  assert.equal(removed.work.roots[0].action, "remove");
-  assert.equal(removed.work.roots[0].status, "completed");
-  await assert.rejects(fs.lstat(layout.work.buildRoot), { code: "ENOENT" });
-});
-
-test("invalid work records are reported and never removed", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("invalid-build");
-  await fs.mkdir(layout.work.buildRoot, { mode: 0o700, recursive: true });
-  for (const path of [
-    value.cacheRoot,
-    join(value.cacheRoot, "work"),
-    layout.work.root,
-    layout.work.buildRoot,
-  ]) {
-    await fs.chmod(path, 0o700);
-  }
-  await fs.writeFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "not-json\n", {
-    mode: 0o600,
-  });
-
-  const report = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 1_000_000 })
-  );
-  assert.deepEqual(report.work.roots, [
-    {
-      action: "retain",
-      buildId: "invalid-build",
-      reason: "invalid-build-work-record",
-      status: "invalid",
-    },
-  ]);
-  assert.equal(
-    await fs.readFile(join(layout.work.buildRoot, convexWasmBuildWorkRecordName), "utf8"),
-    "not-json\n"
-  );
-});
-
-test("legacy roots use the same two-phase abandonment protocol", async (t) => {
-  const value = await fixture(t);
-  const layout = value.layout("legacy-build");
-  await fs.mkdir(layout.work.buildRoot, { mode: 0o700, recursive: true });
-  for (const path of [
-    value.cacheRoot,
-    join(value.cacheRoot, "work"),
-    layout.work.root,
-    layout.work.buildRoot,
-  ]) {
-    await fs.chmod(path, 0o700);
-  }
-  await fs.writeFile(join(layout.work.buildRoot, "old-output"), "old", { mode: 0o600 });
-  await fs.utimes(layout.work.buildRoot, new Date(1_000), new Date(1_000));
-
-  const marked = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 3_000 })
-  );
-  assert.equal(marked.work.roots[0].action, "mark-abandoned");
-  assert.equal(marked.work.roots[0].status, "legacy");
-  assert.equal(await fs.readFile(join(layout.work.buildRoot, "old-output"), "utf8"), "old");
-
-  const removed = await maintainConvexWasmCache(
-    maintenanceOptions(value, { apply: true, nowMs: 4_000 })
-  );
-  assert.equal(removed.work.roots[0].action, "remove");
-  await assert.rejects(fs.lstat(layout.work.buildRoot), { code: "ENOENT" });
-});
-
 test("dry-run reports immutable root candidates and hard-linked physical occupancy", async (t) => {
   const value = await fixture(t);
   const artifacts = join(value.cacheRoot, "immutable", "v6", "artifacts", "stage", "entry");
@@ -533,7 +313,7 @@ test("build leases and maintenance reject missing or inherited lock authority", 
   });
 });
 
-test("successful cache-use authority is bounded and immutable GC is dry-run only", async (t) => {
+test("deployment authority keeps only one atomic current snapshot", async (t) => {
   const value = await fixture(t);
   const layout = value.layout("authority-build");
   const deployment = {
@@ -553,7 +333,7 @@ test("successful cache-use authority is bounded and immutable GC is dry-run only
         moduleGraphBinding: deployment.manifest.moduleGraphBinding,
       };
       manifest.deploymentSha256 = fingerprintJson(manifest);
-      await recordConvexWasmSuccessfulCacheUse({
+      await recordConvexWasmSuccessfulDeployment({
         buildId: `authority-${index}`,
         cacheLayout: layout,
         deployment: { manifest },
@@ -563,9 +343,9 @@ test("successful cache-use authority is bounded and immutable GC is dry-run only
     }
   });
   const snapshots = await fs.readdir(
-    join(value.cacheRoot, "state", "v1", "cache-retention", "v1", "recent-success")
+    join(value.cacheRoot, "state", "v1", "cache-retention", "v1", "deployed-success")
   );
-  assert.equal(snapshots.filter((name) => name.endsWith(".json")).length, 8);
+  assert.deepEqual(snapshots, ["current.json"]);
 });
 
 test("successful-cache snapshot publication rejects a redirected state ancestor", async (t) => {
@@ -582,7 +362,7 @@ test("successful-cache snapshot publication rejects a redirected state ancestor"
 
   await assert.rejects(
     withHeavyLock(value.environment, () =>
-      recordConvexWasmSuccessfulCacheUse({
+      recordConvexWasmSuccessfulDeployment({
         buildId: "snapshot-state-redirect",
         cacheLayout: value.layout("snapshot-state-redirect"),
         deployment: { manifest },
@@ -605,7 +385,6 @@ test("immutable GC authenticates and retires a coherent legacy module graph v2 p
       cacheLayout,
       environment: value.environment,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -624,7 +403,6 @@ test("immutable GC authenticates and retires a coherent legacy module graph v2 p
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.deepEqual(sweep.removed.map(({ key, type }) => ({ key, type })), [
@@ -658,12 +436,9 @@ test("immutable GC rejects a legacy v2 package whose provenance identity does no
     }),
   ]);
 
-  await assert.rejects(
-    withHeavyLock(value.environment, () =>
+  assert.equal((await withHeavyLock(value.environment, () =>
       planConvexWasmImmutableGc({ cacheLayout, environment: value.environment })
-    ),
-    /recent immutable authority is corrupt/u
-  );
+    )).authenticated.invalid, 1);
 });
 
 test("immutable GC rejects every mixed module graph package triple version", async (t) => {
@@ -686,12 +461,9 @@ test("immutable GC rejects every mixed module graph package triple version", asy
       }),
     ]);
 
-    await assert.rejects(
-      withHeavyLock(value.environment, () =>
+    assert.equal((await withHeavyLock(value.environment, () =>
         planConvexWasmImmutableGc({ cacheLayout, environment: value.environment })
-      ),
-      /recent immutable authority is corrupt/u
-    );
+      )).authenticated.invalid, 1);
   });
 
   await t.test("v2 manifest and provenance with v3 package entry", async (t) => {
@@ -703,12 +475,9 @@ test("immutable GC rejects every mixed module graph package triple version", asy
       mode: 0o600,
     });
 
-    await assert.rejects(
-      withHeavyLock(value.environment, () =>
+    assert.equal((await withHeavyLock(value.environment, () =>
         planConvexWasmImmutableGc({ cacheLayout, environment: value.environment })
-      ),
-      /recent immutable authority is corrupt/u
-    );
+      )).authenticated.invalid, 1);
   });
 
   await t.test("v3 manifest with v2 provenance", async (t) => {
@@ -722,12 +491,9 @@ test("immutable GC rejects every mixed module graph package triple version", asy
       mode: 0o600,
     });
 
-    await assert.rejects(
-      withHeavyLock(value.environment, () =>
+    assert.equal((await withHeavyLock(value.environment, () =>
         planConvexWasmImmutableGc({ cacheLayout, environment: value.environment })
-      ),
-      /recent immutable authority is corrupt/u
-    );
+      )).authenticated.invalid, 1);
   });
 
   await t.test("v3 manifest and provenance with v2 package entry", async (t) => {
@@ -740,16 +506,13 @@ test("immutable GC rejects every mixed module graph package triple version", asy
       mode: 0o600,
     });
 
-    await assert.rejects(
-      withHeavyLock(value.environment, () =>
+    assert.equal((await withHeavyLock(value.environment, () =>
         planConvexWasmImmutableGc({ cacheLayout, environment: value.environment })
-      ),
-      /recent immutable authority is corrupt/u
-    );
+      )).authenticated.invalid, 1);
   });
 });
 
-test("recent successful use retains its legacy certificate and complete immutable closure", async (t) => {
+test("latest deployment retains its legacy certificate and complete immutable closure", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, graphManifestSha256, manifest, packageMaterial } =
     await materializeModuleGraphPackageFixture(value);
@@ -765,7 +528,7 @@ test("recent successful use retains its legacy certificate and complete immutabl
   } = await writeCompilerOutputFixture(cacheLayout);
 
   const snapshot = await withHeavyLock(value.environment, () =>
-    recordConvexWasmSuccessfulCacheUse({
+    recordConvexWasmSuccessfulDeployment({
       buildId: "closure-build",
       cacheLayout,
       deployment: {
@@ -795,7 +558,6 @@ test("recent successful use retains its legacy certificate and complete immutabl
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -834,14 +596,13 @@ test("recent successful use retains its legacy certificate and complete immutabl
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /retained compiler-output cache entry is unavailable/u
   );
 });
 
-test("missing package material makes an older success snapshot stale without authorizing its certificate", async (t) => {
+test("missing package material does not discard the deployed snapshot", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, graphManifestSha256, manifest, packageMaterial } =
     await materializeModuleGraphPackageFixture(value);
@@ -852,7 +613,7 @@ test("missing package material makes an older success snapshot stale without aut
     packageMaterial,
   });
   await withHeavyLock(value.environment, () =>
-    recordConvexWasmSuccessfulCacheUse({
+    recordConvexWasmSuccessfulDeployment({
       buildId: "stale-success",
       cacheLayout,
       deployment: {
@@ -866,21 +627,12 @@ test("missing package material makes an older success snapshot stale without aut
   );
   await fs.rm(join(cacheLayout.immutable.packages, graphManifestSha256), { recursive: true });
 
-  const plan = await withHeavyLock(value.environment, () =>
-    planConvexWasmImmutableGc({
-      cacheLayout,
-      environment: value.environment,
-      highWatermarkAllocatedBytes: 1,
-      nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
-    })
-  );
-  assert.equal(plan.authenticated.staleSnapshots, 1);
-  assert.equal(plan.authenticated.retainedSnapshots, 0);
-  assert.deepEqual(plan.retained.certificates, []);
+  await assert.rejects(withHeavyLock(value.environment, () =>
+    planConvexWasmImmutableGc({ cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1 })
+  ), /deployed snapshot references an unavailable package/u);
 });
 
-test("recent successful use retains an older certificate after compact preference changes", async (t) => {
+test("latest deployment retains an older certificate after compact preference changes", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, graphManifest, graphManifestSha256, manifest, packageMaterial } =
     await materializeModuleGraphPackageFixture(value);
@@ -909,7 +661,7 @@ test("recent successful use retains an older certificate after compact preferenc
     mode: 0o600,
   });
   await withHeavyLock(value.environment, () =>
-    recordConvexWasmSuccessfulCacheUse({
+    recordConvexWasmSuccessfulDeployment({
       buildId: "older-certificate-success",
       cacheLayout,
       deployment: {
@@ -932,7 +684,6 @@ test("recent successful use retains an older certificate after compact preferenc
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -940,7 +691,7 @@ test("recent successful use retains an older certificate after compact preferenc
   assert.deepEqual(plan.retained.packages, [graphManifestSha256]);
 });
 
-test("immutable GC retains a recently modified schema-4 certificate root", async (t) => {
+test("immutable GC retains the deployed schema-4 certificate root", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, graphManifest, graphManifestSha256, manifest, packageMaterial } =
     await materializeModuleGraphPackageFixture(value);
@@ -953,6 +704,10 @@ test("immutable GC retains a recently modified schema-4 certificate root", async
     schemaVersion: 4,
   });
 
+  await withHeavyLock(value.environment, () => recordConvexWasmSuccessfulDeployment({
+    buildId: "deployed", cacheLayout, environment: value.environment,
+    deployment: { manifest, buildReport: { cache: { certificateSha256: certificate.certificateSha256 } } },
+  }));
   const plan = await withHeavyLock(value.environment, () =>
     planConvexWasmImmutableGc({
       cacheLayout,
@@ -991,12 +746,11 @@ test("immutable GC rejects a non-private preferred certificate pointer", async (
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 1);
   assert.deepEqual(plan.retained.certificates, []);
-  assert.deepEqual(plan.evictions, []);
+  assert.deepEqual(plan.evictions.map(({ key }) => key), [graphManifestSha256]);
 });
 
 test("immutable GC bounds certificate candidates before reading their contents", async (t) => {
@@ -1026,19 +780,16 @@ test("immutable GC bounds certificate candidates before reading their contents",
     )
   );
 
-  await assert.rejects(
-    withHeavyLock(value.environment, () =>
+  assert.equal((await withHeavyLock(value.environment, () =>
       planConvexWasmImmutableGc({
         cacheLayout,
         environment: value.environment,
         nowMs: Date.now(),
       })
-    ),
-    /recent immutable authority is corrupt/u
-  );
+    )).authenticated.invalid, 1);
 });
 
-test("rotated compiler-output schemas remain ordinary age-bounded artifacts", async (t) => {
+test("rotated compiler-output schemas remain ordinary collectible artifacts", async (t) => {
   const value = await fixture(t);
   const { cacheLayout, manifest } = await materializeModuleGraphPackageFixture(value);
   const legacyCompilerOutput = await writeGenericArtifact({
@@ -1054,7 +805,7 @@ test("rotated compiler-output schemas remain ordinary age-bounded artifacts", as
     stage: "module-graph-compiler-output",
   });
   await withHeavyLock(value.environment, () =>
-    recordConvexWasmSuccessfulCacheUse({
+    recordConvexWasmSuccessfulDeployment({
       buildId: "rotated-compiler-output",
       cacheLayout,
       deployment: {
@@ -1097,13 +848,13 @@ test("schema-4/v8 and schema-5/v8 compiler-output records retain their strict cl
         recordSchemaVersion,
       });
 
+      await retainCompilerOutput(value, cacheLayout, compilerOutput);
       const plan = await withHeavyLock(value.environment, () =>
         planConvexWasmImmutableGc({
           cacheLayout,
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 5_000,
         })
       );
 
@@ -1118,7 +869,7 @@ test("schema-4/v8 and schema-5/v8 compiler-output records retain their strict cl
   }
 });
 
-test("pre-transport schema-4/v8 compiler-output records remain age-bounded", async (t) => {
+test("pre-transport schema-4/v8 compiler-output records remain collectible", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("compiler-output-schema-4-pre-transport");
   const { compilerOutput, dependencies, record } = await writeCompilerOutputFixture(cacheLayout, {
@@ -1135,7 +886,6 @@ test("pre-transport schema-4/v8 compiler-output records remain age-bounded", asy
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1155,7 +905,6 @@ test("pre-transport schema-4/v8 compiler-output records remain age-bounded", asy
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 2_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /cohort capsule compiler-output cache record has an unsupported descriptor family/u
@@ -1206,7 +955,6 @@ test("schema-5 compiler-output compact authority corruption cannot retain depend
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         })
       );
 
@@ -1220,7 +968,7 @@ test("schema-5 compiler-output compact authority corruption cannot retain depend
   }
 });
 
-test("maintenance removes an old certificate and package closure while preserving published and recent data", async (t) => {
+test("maintenance removes an old certificate and package closure while preserving published hardlinks", async (t) => {
   const value = await fixture(t);
   const material = await materializeModuleGraphPackageFixture(value);
   const { cacheLayout, graphManifestSha256, packageMaterial } = material;
@@ -1253,7 +1001,7 @@ test("maintenance removes an old certificate and package closure while preservin
 
   assert.deepEqual(report.immutable.plan.retained.packages, []);
   assert.deepEqual(
-    report.immutable.sweep.removed.slice(0, 2).map(({ key, type }) => ({ key, type })),
+    report.immutable.sweep.removed.filter(({ type }) => type !== "artifact").map(({ key, type }) => ({ key, type })),
     [
       { key: fingerprintJson(certificate.lookupIdentity), type: "certificate-root" },
       { key: graphManifestSha256, type: "package" },
@@ -1261,17 +1009,17 @@ test("maintenance removes an old certificate and package closure while preservin
   );
   assert.equal(report.immutable.plan.incomplete, true);
   assert.equal(report.immutable.plan.candidates, 0);
-  assert.deepEqual(report.immutable.plan.retained.artifacts, [`${retained.stage}\0${retained.key}`]);
+  assert.deepEqual(report.immutable.plan.retained.artifacts, []);
   await assert.rejects(fs.lstat(packagePath), { code: "ENOENT" });
   assert.equal(report.immutable.plan.authenticated.invalid, 0);
-  assert.equal(report.immutable.sweep.removed.length, 2 + packageMaterial.artifactReferences.length * 2);
+  assert.equal(report.immutable.sweep.removed.length, 3 + packageMaterial.artifactReferences.length * 2);
   const aotRemoval = report.immutable.sweep.removed.find(({ key }) => key === aot.cacheKey);
   const survivingAllocation = (await fs.lstat(publishedAot)).blocks * 512;
   assert.equal(aotRemoval.estimatedReclaimBytes, aotRemoval.allocationBytes - survivingAllocation);
   await assert.rejects(fs.lstat(aotPath), { code: "ENOENT" });
   assert.deepEqual(await fs.readFile(publishedAot), aotBytes);
   assert.deepEqual(await fs.readFile(publishedManifest), manifestBytes);
-  await fs.lstat(join(cacheLayout.immutable.artifacts, retained.stage, retained.key));
+  await assert.rejects(fs.lstat(join(cacheLayout.immutable.artifacts, retained.stage, retained.key)), { code: "ENOENT" });
   assert.ok(report.immutable.sweep.remainingAllocatedBytes > 1);
   assert.equal(report.immutable.sweep.remainingAllocatedBytes,
     (await measureConvexWasmCacheOccupancy(cacheLayout.immutable.root)).uniqueAllocatedBytes);
@@ -1304,7 +1052,6 @@ test("immutable plans retire certificate roots before packages and artifacts acr
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       };
       const first = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
       assert.deepEqual(first.removed.map(({ type }) => type), ["certificate-root", "artifact"]);
@@ -1336,7 +1083,7 @@ test("immutable plans retire certificate roots before packages and artifacts acr
   }
 });
 
-test("retiring an old certificate preserves a recently reused package", async (t) => {
+test("retiring an old certificate releases even a freshly written package", async (t) => {
   const value = await fixture(t);
   const material = await materializeModuleGraphPackageFixture(value);
   const { cacheLayout, graphManifestSha256 } = material;
@@ -1351,8 +1098,8 @@ test("retiring an old certificate preserves a recently reused package", async (t
   const first = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
   assert.deepEqual(first.removed.map(({ key }) => key), [fingerprintJson(certificate.lookupIdentity)]);
   const second = await withHeavyLock(value.environment, () => sweepConvexWasmImmutableGc(options));
-  assert.deepEqual(second.removed, []);
-  assert.deepEqual(second.plan.retained.packages, [graphManifestSha256]);
+  assert.deepEqual(second.removed.map(({ key }) => key), [graphManifestSha256]);
+  assert.deepEqual(second.plan.retained.packages, []);
 });
 
 test("immutable planning reads a shared payload once per plan across certificates and packages", async (t) => {
@@ -1391,7 +1138,7 @@ test("immutable planning reads a shared payload once per plan across certificate
   }
 });
 
-test("retained certificate roots preserve both preferred and superseded package closures", async (t) => {
+test("certificate entries retain their packages until their individual removal", async (t) => {
   for (const selected of ["preferred", "superseded", "preferred-with-missing-sibling-package"]) {
     await t.test(`${selected} success snapshot`, async (t) => {
       const value = await fixture(t);
@@ -1420,7 +1167,7 @@ test("retained certificate roots preserve both preferred and superseded package 
       if (missingSiblingPackage) await fs.rm(supersededPackage.root, { recursive: true });
       const selectedCertificate = selected === "superseded" ? superseded : preferred;
       await withHeavyLock(value.environment, async () => {
-        await recordConvexWasmSuccessfulCacheUse({
+        await recordConvexWasmSuccessfulDeployment({
           buildId: `${selected}-certificate-success`,
           cacheLayout,
           deployment: {
@@ -1434,11 +1181,11 @@ test("retained certificate roots preserve both preferred and superseded package 
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         });
         assert.deepEqual(
           result.removed.map(({ key }) => key).sort(),
-          missingSiblingPackage ? [supersededPackage.aot.key, supersededPackage.coreWasm.key].sort() : []
+          missingSiblingPackage ? [supersededPackage.aot.key, supersededPackage.coreWasm.key].sort()
+            : [selected === "superseded" ? preferred.certificateSha256 : superseded.certificateSha256]
         );
         assert.equal(result.plan.authenticated.invalid, missingSiblingPackage ? 1 : 0);
         assert.equal(result.plan.authenticated.retainedSnapshots, 1);
@@ -1466,7 +1213,6 @@ test("artifact-only sweep removes a compiler-output root before its strict depen
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1509,7 +1255,6 @@ test("artifact-only sweep removes a topology certificate before its full-record 
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1530,7 +1275,7 @@ test("artifact-only sweep removes a topology certificate before its full-record 
   );
 });
 
-test("v6 topology material is age-bounded only after complete authentication", async (t) => {
+test("v6 topology material is collectible only after complete authentication", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("rotated-compiler-output-topology-identity");
   const { compilerOutput, dependencies, record } = await writeCompilerOutputFixture(cacheLayout, {
@@ -1573,13 +1318,12 @@ test("v6 topology material is age-bounded only after complete authentication", a
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 60_000,
     })
   );
 
   assert.equal(plan.authenticated.invalid, 0);
   assert.ok(
-    plan.retained.artifacts.includes(`${topologyCertificate.stage}\0${topologyCertificate.key}`)
+    plan.evictions.some(({ key }) => key === topologyCertificate.key)
   );
   assert.ok(
     [legacyCompilerOutput, ...dependencies].every(
@@ -1612,7 +1356,6 @@ test("v6 topology material is age-bounded only after complete authentication", a
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 2_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(partialPlan.authenticated.invalid, 1);
@@ -1660,7 +1403,6 @@ test("v6 compiler-output records authenticate descriptor and engine facts before
           environment: fixtureValue.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         })
       );
 
@@ -1698,7 +1440,6 @@ test("immutable GC rejects compiler-output closure authority from an extended v8
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1737,7 +1478,6 @@ test("immutable GC rejects a v8 identity relabeled onto a different compiler out
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1780,7 +1520,6 @@ test("immutable GC rejects a compiler-output closure with a disagreeing stage en
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /compiler-output cache closure artifact disagrees with its record/u
@@ -1814,7 +1553,6 @@ test("immutable GC rejects compiler-output retention authority for a different a
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 1);
@@ -1865,13 +1603,13 @@ test("immutable GC authenticates a large cohort capsule and retains its compiler
   await Promise.all(
     [...closure, unrelated].map((artifact) => ageGenericArtifact(cacheLayout, artifact))
   );
+  await retainCompilerOutput(value, cacheLayout, compilerOutput);
   const plan = await withHeavyLock(value.environment, () =>
     planConvexWasmImmutableGc({
       cacheLayout,
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now(),
-      recentRetentionMilliseconds: 60_000,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -1904,14 +1642,13 @@ test("artifact-only sweep removes a cohort capsule before its strict compiler cl
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 5_000,
     })
   );
   const strictClosure = [compilerOutput, topologyCertificate, ...dependencies].map(
     ({ key, stage }) => `${stage}\0${key}`
   );
   assert.ok(strictClosure.every((key) => recentPlan.retained.artifacts.includes(key)));
-  assert.equal(recentPlan.evictions.length, 0);
+  assert.deepEqual(recentPlan.evictions.map(({ key }) => key), [capsule.key]);
 
   await ageGenericArtifact(cacheLayout, capsule);
   const result = await withHeavyLock(value.environment, () =>
@@ -1920,7 +1657,6 @@ test("artifact-only sweep removes a cohort capsule before its strict compiler cl
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -1964,20 +1700,17 @@ test("immutable GC removes an old capsule whose compiler-output record is alread
 
   assert.equal(result.plan.authenticated.orphanedCapsules, 1);
   assert.equal(result.plan.authenticated.orphanedTopologyCertificates, 1);
-  assert.deepEqual(
-    result.removed.map(({ key }) => key),
-    [capsule.key]
-  );
+  assert.ok(result.removed.some(({ key }) => key === capsule.key));
   await assert.rejects(
     fs.lstat(join(cacheLayout.immutable.artifacts, capsule.stage, capsule.key)),
     { code: "ENOENT" }
   );
-  await fs.lstat(
+  await assert.rejects(fs.lstat(
     join(cacheLayout.immutable.artifacts, topologyCertificate.stage, topologyCertificate.key)
-  );
+  ), { code: "ENOENT" });
 });
 
-test("immutable GC treats rotated v2 through v5 cohort capsules as age-bounded artifacts", async (t) => {
+test("immutable GC treats rotated v2 through v5 cohort capsules as collectible artifacts", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("legacy-cohort-capsule");
   const capsules = [];
@@ -2001,7 +1734,6 @@ test("immutable GC treats rotated v2 through v5 cohort capsules as age-bounded a
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
 
@@ -2036,7 +1768,6 @@ test("immutable GC does not classify a current capsule as legacy from metadata a
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /cohort capsule legacy metadata does not match its cache identity/u
@@ -2083,7 +1814,6 @@ test("immutable GC authenticates the outer key before classifying a capsule as l
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /cache entry identity does not match its key/u
@@ -2113,7 +1843,6 @@ test("immutable GC rejects a corrupted rotated v3 capsule before legacy classifi
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /cache artifact digest or size does not match metadata/u
@@ -2136,7 +1865,6 @@ test("immutable GC fails closed for a non-JSON artifact in the cohort capsule st
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /cohort capsule cache entry has an unsupported artifact family/u
@@ -2169,7 +1897,6 @@ test("immutable GC rejects a capsule bound to a rotated compiler-output schema",
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule compiler-output cache record has an unsupported schema/u
@@ -2217,7 +1944,6 @@ test("immutable GC rejects a capsule bound to a pre-v8 compiler-output identity"
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule compiler-output cache identity has an unsupported schema/u
@@ -2264,7 +1990,6 @@ test("immutable GC closes the exact v8 capsule identity before following referen
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule compiler-output cache identity has unknown field\(s\): unexpected/u
@@ -2315,7 +2040,6 @@ test("immutable GC shares exact v6 capsule identity normalization", async (t) =>
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule identity has unsupported fields/u
@@ -2357,7 +2081,6 @@ test("immutable GC rejects a capsule topology certificate that disagrees with it
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule compiler-output topology bridge object disagrees/u
@@ -2410,7 +2133,6 @@ test("immutable GC rejects a capsule topology descriptor that disagrees with its
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 60_000,
       })
     ),
     /cohort capsule compiler-output topology descriptor disagrees/u
@@ -2561,7 +2283,6 @@ test("immutable GC authenticates and evicts only valid runtime header snapshots"
     environment: value.environment,
     highWatermarkAllocatedBytes: 1,
     nowMs: Date.now() + 60_000,
-    recentRetentionMilliseconds: 0,
   };
   const plan = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
   assert.equal(plan.authenticated.invalid, 1);
@@ -2595,7 +2316,6 @@ test("immutable GC ignores stale artifact publication scratch", async (t) => {
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -2618,7 +2338,6 @@ test("immutable GC ignores stale package publication scratch", async (t) => {
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 0);
@@ -2639,7 +2358,7 @@ test("immutable GC authenticates retained layout bytes before admitting a C bund
   });
   const options = {
     cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
-    nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+    nowMs: Date.now() + 1_000,
   };
   const valid = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
   assert.equal(valid.authenticated.invalid, 0);
@@ -2650,7 +2369,7 @@ test("immutable GC authenticates retained layout bytes before admitting a C bund
   assert.ok(corrupt.evictions.every(({ key }) => key !== artifact.key));
 });
 
-test("immutable GC preserves layout choices with their retained C bundles", async (t) => {
+test("immutable GC collects unreferenced layout choices and C bundles regardless of age", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("layout-closure");
   await fs.mkdir(cacheLayout.cacheRoot, { mode: 0o700 });
@@ -2670,12 +2389,11 @@ test("immutable GC preserves layout choices with their retained C bundles", asyn
   for (const reference of references) await ageGenericArtifact(cacheLayout, reference);
   const options = {
     cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
-    nowMs: Date.now(), recentRetentionMilliseconds: 60_000,
+    nowMs: Date.now(),
   };
   const live = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
   assert.equal(live.authenticated.invalid, 0);
-  for (const { key, stage } of references) assert.ok(live.retained.artifacts.includes(`${stage}\0${key}`));
-  assert.equal(live.evictions.length, 0);
+  for (const { key } of [...references, artifact]) assert.ok(live.evictions.some((entry) => entry.key === key));
   await ageGenericArtifact(cacheLayout, artifact);
   const obsolete = await withHeavyLock(value.environment, () => planConvexWasmImmutableGc(options));
   for (const { key } of [...references, artifact]) assert.ok(obsolete.evictions.some((entry) => entry.key === key));
@@ -2696,7 +2414,6 @@ test("immutable GC never selects an incomplete C bundle as authenticated garbage
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(plan.authenticated.invalid, 1);
@@ -2731,7 +2448,6 @@ test("immutable GC does not claim blocks held by a surviving hardlink as reclaim
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   const candidate = plan.evictions.find(({ key }) => key === artifact.key);
@@ -2765,7 +2481,6 @@ test("immutable sweep uses a compact quarantine identity for a large C bundle", 
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 1_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.deepEqual(
@@ -2805,7 +2520,6 @@ test("immutable sweep rejects a redirected state ancestor before quarantine", as
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: Date.now() + 1_000,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /symlink/u
@@ -3082,14 +2796,14 @@ test("maintenance advances four layers with one inventory and fresh cross-wave h
   } finally { fs.open = open; }
   assert.equal(result.diagnostics.phases.inventory.calls, 1);
   assert.equal(result.diagnostics.phases.immutableOccupancy.calls, 5);
-  assert.equal(retainedOpens, 1);
+  assert.equal(retainedOpens, 2);
   assert.equal(result.immutable.sweep.waves.length, 4);
-  assert.equal(result.immutable.sweep.removed.length, 7);
+  assert.equal(result.immutable.sweep.removed.length, 8);
   assert.equal(result.immutable.sweep.termination, "no-eligible-candidates");
   assert.equal(result.immutable.sweep.remainingExcessBytes, result.immutable.sweep.remainingAllocatedBytes - 1);
   assert.equal(result.immutable.plan.evictions.length, 0);
-  assert.deepEqual(result.immutable.plan.retained.artifacts, [`${retained.stage}\0${retained.key}`]);
-  assert.equal(await fs.readFile(retainedPath, "utf8"), "unchanged retained bytes");
+  assert.deepEqual(result.immutable.plan.retained.artifacts, []);
+  await assert.rejects(fs.lstat(retainedPath), { code: "ENOENT" });
 });
 
 test("unchanged retained authentication and structured parsing do not grow across deletion waves", async (t) => {
@@ -3176,7 +2890,7 @@ test("unchanged retained authentication and structured parsing do not grow acros
       payload: `${canonicalJson(topologyPayload)}\n`,
     });
     // Keep the compiler/package authorities by a durable snapshot, not by creation time.
-    const snapshot = await withHeavyLock(value.environment, () => recordConvexWasmSuccessfulCacheUse({
+    await withHeavyLock(value.environment, () => recordConvexWasmSuccessfulDeployment({
       buildId: "retained-work", cacheLayout, environment: value.environment, recordedAtMs: 1_000,
       deployment: {
         manifest: material.manifest,
@@ -3224,7 +2938,7 @@ test("unchanged retained authentication and structured parsing do not grow acros
       await addTarget(join(cacheLayout.immutable.packages, material.graphManifestSha256, name), true, "package");
     }
     await addTarget(join(certificateRoot, certificate.certificateSha256, "certificate.json"), false, "certificate");
-    await addTarget(join(value.cacheRoot, "state", "v1", "cache-retention", "v1", "recent-success", `${snapshot.snapshotSha256}.json`), false, "snapshot");
+    await addTarget(join(value.cacheRoot, "state", "v1", "cache-retention", "v1", "deployed-success", "current.json"), false, "snapshot");
     const contents = [...targets.values()].map(({ label, sha256 }) => [label, sha256]).sort();
     if (arms.length !== 0) assert.deepEqual(contents, arms[0].contents, "both arms must contain identical retained bytes");
 
@@ -3732,7 +3446,7 @@ test("immutable sweep handles shared payloads before unlinking or recovering a b
       await fs.link(join(paths[0], "artifact.wasm"), join(paths[1], "artifact.wasm"));
       const options = {
         cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
-        nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+        nowMs: Date.now() + 1_000,
       };
       const original = { open: fs.open, readdir: fs.readdir };
       let verifiedWrites = 0;
@@ -3780,7 +3494,7 @@ test("immutable recovery completes an interrupted source-directory sync before r
   const sourceParent = dirname(candidatePath);
   const options = {
     cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
-    nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+    nowMs: Date.now() + 1_000,
   };
   const open = fs.open;
   fs.open = async (path, ...args) => {
@@ -3820,7 +3534,7 @@ test("immutable sweep recovers incomplete marker writes without treating them as
       });
       const options = {
         cacheLayout, environment: value.environment, highWatermarkAllocatedBytes: 1,
-        nowMs: Date.now() + 1_000, recentRetentionMilliseconds: 0,
+        nowMs: Date.now() + 1_000,
       };
       const open = fs.open;
       let interruptedPath;
@@ -3888,7 +3602,6 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         })
       ),
       /synthetic immutable trash removal failure/u
@@ -3921,7 +3634,6 @@ test("immutable sweep quarantines a selected root before fallible recursive remo
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 2_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(retry.recovered.length, 1);
@@ -3949,7 +3661,6 @@ test("maintenance recovers interrupted package and certificate retirement and fi
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         };
         const original = { open: fs.open, rename: fs.rename, readdir: fs.readdir, unlink: fs.unlink };
         const interrupt = () => {
@@ -4043,7 +3754,6 @@ test("immutable sweep rejects changed or redirected package and certificate quar
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         };
         const originalRename = fs.rename;
         let quarantinedPath;
@@ -4115,7 +3825,6 @@ test("immutable sweep does not delete a candidate mutated after reauthentication
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: 2_000_000_000,
-          recentRetentionMilliseconds: 0,
         })
       ),
       /candidate changed while it was quarantined/u
@@ -4146,7 +3855,6 @@ test("immutable sweep does not delete a candidate mutated after reauthentication
         environment: value.environment,
         highWatermarkAllocatedBytes: 1,
         nowMs: 2_000_000_001,
-        recentRetentionMilliseconds: 0,
       })
     ),
     /candidate changed before recovery/u
@@ -4193,7 +3901,6 @@ test("immutable sweep recovers a partially removed quarantine root", async (t) =
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         })
       ),
       /synthetic partial immutable trash removal failure/u
@@ -4208,7 +3915,6 @@ test("immutable sweep recovers a partially removed quarantine root", async (t) =
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 2_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(retry.recovered.length, 1);
@@ -4255,7 +3961,6 @@ test("immutable sweep recovers a fully removed quarantine root", async (t) => {
           environment: value.environment,
           highWatermarkAllocatedBytes: 1,
           nowMs: Date.now() + 1_000,
-          recentRetentionMilliseconds: 0,
         })
       ),
       /synthetic full immutable trash removal failure/u
@@ -4270,7 +3975,6 @@ test("immutable sweep recovers a fully removed quarantine root", async (t) => {
       environment: value.environment,
       highWatermarkAllocatedBytes: 1,
       nowMs: Date.now() + 2_000,
-      recentRetentionMilliseconds: 0,
     })
   );
   assert.equal(retry.recovered.length, 1);
@@ -4278,7 +3982,7 @@ test("immutable sweep recovers a fully removed quarantine root", async (t) => {
   await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
 });
 
-test("immutable sweep waits for an active build lease to enter bounded recovery", async (t) => {
+test("immutable sweep removes interrupted work after acquiring its exclusive lock", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("active-lease-sweep");
   const artifact = await writeGenericArtifact({
@@ -4314,15 +4018,13 @@ test("immutable sweep waits for an active build lease to enter bounded recovery"
     })
   );
 
-  assert.equal(report.immutable.sweepAuthorized, false);
-  assert.deepEqual(report.immutable.sweep.removed, []);
-  assert.deepEqual(report.immutable.sweep.blockedWorkRoots, [
-    { buildId: "active-lease-sweep", status: "active" },
-  ]);
-  await fs.lstat(artifactPath);
+  assert.equal(report.immutable.sweepAuthorized, true);
+  assert.deepEqual(report.immutable.sweep.removed.map(({ key }) => key), [artifact.key]);
+  await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
+  await assert.rejects(fs.lstat(cacheLayout.work.buildRoot), { code: "ENOENT" });
 });
 
-test("immutable sweep reclaims artifacts while retaining a failed build work root", async (t) => {
+test("immutable sweep reclaims artifacts after removing failed build work", async (t) => {
   const value = await fixture(t);
   const cacheLayout = value.layout("failed-lease-sweep");
   const artifact = await writeGenericArtifact({
@@ -4364,7 +4066,6 @@ test("immutable sweep reclaims artifacts while retaining a failed build work roo
     report.immutable.sweep.removed.map(({ key }) => key),
     [artifact.key]
   );
-  assert.deepEqual(report.immutable.sweep.blockedWorkRoots, []);
   await assert.rejects(fs.lstat(artifactPath), { code: "ENOENT" });
-  await fs.lstat(cacheLayout.work.buildRoot);
+  await assert.rejects(fs.lstat(cacheLayout.work.buildRoot), { code: "ENOENT" });
 });
