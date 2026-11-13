@@ -433,8 +433,6 @@ function validatorPrototype(json, asOptional, methods) {
 
 function baseValidator(prototype, isOptional) {
   const validator = Object.create(prototype);
-  validator.type = undefined;
-  validator.fieldPaths = undefined;
   validator.isOptional = isOptional;
   validator.isConvexValidator = true;
   return validator;
@@ -684,7 +682,7 @@ function makeRecord(key, value, isOptional) {
     throw new Error("Record validator cannot have optional values");
   }
   if (!key.isConvexValidator || !value.isConvexValidator) {
-    throw new Error("Key and value of v.record() but be validators");
+    throw new Error("Key and value of v.record() must be validators");
   }
   validator.key = key;
   validator.value = value;
