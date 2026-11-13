@@ -8,6 +8,7 @@ import { runInNewContext } from "node:vm";
 
 import { main as flattenConvexApi } from "../flatten-convex-api.mjs";
 import { resolveConvexWasmApplicationPackageSet } from "./convex-wasm-application-package-set.mjs";
+import { fingerprintJson } from "./convex-wasm-artifact-contract.mjs";
 import {
   authenticateConvexWasmCompileProfile,
   buildConvexWasmCompileProfile,
@@ -20,7 +21,7 @@ import {
 
 const compilerRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-test("authenticates the exact Zod source before applying the target transform", async () => {
+test("transforms supported Zod 4 allowsEval implementations structurally", async () => {
   const packageManifestPath = join(compilerRoot, "node_modules", "zod", "package.json");
   const [lockfile, packageManifest, source] = await Promise.all([
     fs.readFile(join(compilerRoot, "package-lock.json")),
@@ -32,19 +33,106 @@ test("authenticates the exact Zod source before applying the target transform", 
     packageManifest,
     source,
   });
-  assert.equal(
-    transformed.contents.length,
-    convexWasmTargetZodJitlessTransformPolicy.transformedSource.size
-  );
+  const sourceText = source.toString("utf8");
+  const transformedText = transformed.contents.toString("utf8");
+  assert.equal(transformed.identity.policy, convexWasmTargetZodJitlessTransformPolicy);
+  assert.equal(transformed.identity.package.version, "4.4.3");
+  assert.equal(transformed.identity.lock.rootRequirement, ">=4.0.0 <5.0.0");
+  assert.equal(transformedText.split("\n").length, sourceText.split("\n").length);
   assert.doesNotMatch(transformed.contents.toString("utf8"), /\bnavigator\b/u);
+  assert.equal(transformed.identity.source.size, source.length);
+  assert.equal(transformed.identity.transformedSource.size, transformed.contents.length);
+
+  const legacySource = Buffer.from(`const cached = (factory) => factory();
+export const allowsEval = cached(() => {
+    if (typeof navigator !== "undefined" && navigator.userAgent.includes("Cloudflare")) {
+        return false;
+    }
+    try {
+        const F = Function;
+        new F("");
+        return true;
+    } catch (_) {
+        return false;
+    }
+});
+export const trailing = true;
+`);
+  for (const version of ["4.0.0", "4.6.7"]) {
+    const manifest = Buffer.from(JSON.stringify({ name: "zod", version }));
+    const lock = JSON.parse(lockfile.toString("utf8"));
+    lock.packages[""].dependencies.zod = version;
+    lock.packages["node_modules/zod"] = {
+      version,
+      resolved: `https://registry.npmjs.org/zod/-/${version}.tgz`,
+      integrity: "sha512-test",
+    };
+    const result = transformConvexWasmTargetZodJitlessSource({
+      lockfile: Buffer.from(JSON.stringify(lock)),
+      packageManifest: manifest,
+      source: legacySource,
+    });
+    assert.equal(result.identity.package.version, version);
+    assert.doesNotMatch(result.contents.toString("utf8"), /\bnavigator\b/u);
+    assert.equal(result.contents.toString("utf8").split("\n").length, legacySource.toString("utf8").split("\n").length);
+  }
+
+  const unsupportedManifest = Buffer.from(JSON.stringify({ name: "zod", version: "5.0.0" }));
   assert.throws(
-    () =>
-      transformConvexWasmTargetZodJitlessSource({
-        lockfile,
+    () => transformConvexWasmTargetZodJitlessSource({ lockfile, packageManifest: unsupportedManifest, source }),
+    /outside the supported range/u
+  );
+  for (const rootRequirement of ["*", "^5.0.0", "^4.0.0 || ^5.0.0", "04.0.0"]) {
+    const malformedLock = JSON.parse(lockfile.toString("utf8"));
+    malformedLock.packages[""].dependencies.zod = rootRequirement;
+    assert.throws(
+      () => transformConvexWasmTargetZodJitlessSource({
+        lockfile: Buffer.from(JSON.stringify(malformedLock)),
         packageManifest,
-        source: Buffer.concat([source, Buffer.from("\n")]),
+        source,
       }),
-    /util source changed outside the authenticated segment/u
+      /toolchain package lock must declare the installed Zod dependency/u
+    );
+  }
+  const inconsistentLock = JSON.parse(lockfile.toString("utf8"));
+  inconsistentLock.packages[""].dependencies.zod = "4.0.0";
+  assert.throws(
+    () => transformConvexWasmTargetZodJitlessSource({
+      lockfile: Buffer.from(JSON.stringify(inconsistentLock)),
+      packageManifest,
+      source,
+    }),
+    /toolchain package lock must declare the installed Zod dependency/u
+  );
+  const malformedPackageManifest = Buffer.from(JSON.stringify({ name: "zod", version: "04.0.0" }));
+  assert.throws(
+    () => transformConvexWasmTargetZodJitlessSource({ lockfile, packageManifest: malformedPackageManifest, source }),
+    /outside the supported range/u
+  );
+  const malformedLock = JSON.parse(lockfile.toString("utf8"));
+  malformedLock.packages["node_modules/zod"].integrity = "";
+  assert.throws(
+    () => transformConvexWasmTargetZodJitlessSource({
+      lockfile: Buffer.from(JSON.stringify(malformedLock)),
+      packageManifest,
+      source,
+    }),
+    /authenticate the installed Zod package entry/u
+  );
+  const crlfSource = Buffer.from(sourceText.replace(/\n/gu, "\r\n"));
+  const crlfResult = transformConvexWasmTargetZodJitlessSource({
+    lockfile,
+    packageManifest,
+    source: crlfSource,
+  });
+  assert.doesNotMatch(crlfResult.contents.toString("utf8"), /(?<!\r)\n/u);
+  assert.throws(
+    () => transformConvexWasmTargetZodJitlessSource({
+      lockfile,
+      packageManifest,
+      source: Buffer.from(sourceText.replace("new F(\"\")", "new F(\"different\")")),
+    }),
+    /missing its expected eval probe/u
   );
 });
 
@@ -78,11 +166,13 @@ test("builds a target profile using the explicit application package root", asyn
       join(applicationRoot, "functions", "read.ts"),
       'import { queryGeneric as query } from "convex/server";\n' +
         'import { ConvexError } from "convex/values";\n' +
+        'import { z } from "zod";\n' +
         'import { components } from "./_generated/api.js";\n' +
         'import { type Answer } from "./answer";\n' +
         'import { answer } from "./answer";\n' +
+        'const answerSchema = z.number();\n' +
         'export const read = query({ args: {}, handler: async (ctx): Promise<Answer> => {\n' +
-        '  try { return await ctx.runQuery(components.child.queries.read, { answer }); }\n' +
+        '  try { return await ctx.runQuery(components.child.queries.read, { answer: answerSchema.parse(answer) }); }\n' +
         '  catch (error) { if (error instanceof ConvexError) return answer; throw error; }\n' +
         '} });\n'
     ),
@@ -127,6 +217,27 @@ test("builds a target profile using the explicit application package root", asyn
   };
   const profile = await buildConvexWasmCompileProfile(options);
   authenticateConvexWasmCompileProfile(profile);
+  const zodInputPath = Object.keys(profile.identity.inputs).find((path) =>
+    /(?:^|\/)node_modules\/zod\/v4\/core\/util\.js$/u.test(path)
+  );
+  assert.notEqual(zodInputPath, undefined);
+  for (const [field, value, error] of [
+    ["package", "version", "target Zod jitless transform package identity changed"],
+    ["lock", "rootRequirement", "target Zod jitless transform lock identity changed"],
+  ]) {
+    const identity = structuredClone(profile.identity);
+    identity.inputs[zodInputPath].transform[field][value] =
+      field === "package" ? "4.0.0" : "^4.0.0";
+    assert.deepEqual(
+      identity.inputs[zodInputPath].transform.materials,
+      profile.identity.inputs[zodInputPath].transform.materials
+    );
+    const driftedProfile = { ...profile, identity, sha256: fingerprintJson(identity) };
+    assert.throws(
+      () => authenticateConvexWasmCompileProfile(driftedProfile),
+      new RegExp(error, "u")
+    );
+  }
   const answerImports = profile.identity.inputs["functions/read.ts"].imports.filter(
     ({ path, original }) => (original ?? path) === "./answer"
   );

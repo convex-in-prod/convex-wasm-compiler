@@ -815,11 +815,15 @@ tsrs parser to include relative imports. Adding a toolchain source file
 requires updating `scripts/convex-wasm-artifact-producer-source-manifest.json`.
 The manifest currently covers the source modules present here; it will expand
 as build and publication modules move into this repository.
-Target compile profiles currently require the authenticated Zod 4.4.3 package
-and its root lock entry. The adopting application supplies
-`sourceConfigurationPaths` for the files that affect its source build. The
-source-preparation test builds a profile from a separate synthetic application
-whose function directory is `functions/`.
+Target compile profiles support stable Zod 4 releases (`>=4.0.0 <5.0.0`).
+The compiler parses the installed `v4/core/util.js` module, locates the single
+exported `allowsEval` cached-function declaration, and replaces that declaration
+with a line-preserving cached `false` implementation. The package manifest,
+lockfile material, source bytes, matched declaration, and transformed bytes
+remain part of the profile identity; an unrecognised source shape fails closed.
+The adopting application supplies `sourceConfigurationPaths` for the files that
+affect its source build. The source-preparation test builds a profile from a
+separate synthetic application whose function directory is `functions/`.
 
 ### Native tools and artifact caches
 

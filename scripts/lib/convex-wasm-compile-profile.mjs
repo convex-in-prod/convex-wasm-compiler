@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 import { dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { parse as parseJavaScript } from "@babel/parser";
+
 import {
   captureConvexApiInstalledMaterial,
   convexApiCompilerMaterialPaths,
@@ -53,85 +55,29 @@ export const convexWasmCompileProfileCommitTsPlaceholderExportName =
   "__convexWasmSdkCommitTsPlaceholder";
 const SDK_COMMIT_TS_PLACEHOLDER_EXPORT_NAME = convexWasmCompileProfileCommitTsPlaceholderExportName;
 const SDK_CONVEX_ERROR_EXPORT_NAME = "__convexWasmSdkConvexError";
-const TARGET_ZOD_VERSION = "4.4.3";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/u;
-const TARGET_ZOD_PACKAGE_MANIFEST_SHA256 =
-  "c630bd10b52dcf71c112a2bf78dbf2734b9db58d62de663b8d86c2ec2c8cda2e";
-const TARGET_ZOD_UTIL_SOURCE_SHA256 =
-  "968e3433e810cf7ba5efb609a1cb6d9a6cfb51215fd1f699938228f7ac25deb3";
-const TARGET_ZOD_UTIL_TRANSFORMED_SHA256 =
-  "55876c30743828077b7fff78a015f6fdd1d8fa1fdbfba3d83cf6dcacec9f102b";
-const TARGET_ZOD_ALLOWS_EVAL_SOURCE = `export const allowsEval = /* @__PURE__*/ cached(() => {
-    // Skip the probe under \`jitless\`: strict CSPs report the caught \`new Function\`
-    // as a \`securitypolicyviolation\` even though the throw is swallowed.
-    if (globalConfig.jitless) {
-        return false;
-    }
-    // @ts-ignore
-    if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare")) {
-        return false;
-    }
-    try {
-        const F = Function;
-        new F("");
-        return true;
-    }
-    catch (_) {
-        return false;
-    }
-});
-`;
-// Keep the replacement at 19 lines so mappings after this unit still address the installed source.
-const TARGET_ZOD_ALLOWS_EVAL_JITLESS_SOURCE = [
-  "export const allowsEval = /* @__PURE__*/ cached(() => {",
-  "",
-  "",
-  "",
-  "        return false;",
-  ...Array(13).fill(""),
-  "});",
-  "",
-].join("\n");
-const TARGET_ZOD_LOCK_ENTRY = Object.freeze({
-  funding: Object.freeze({ url: "https://github.com/sponsors/colinhacks" }),
-  integrity:
-    "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==",
-  license: "MIT",
-  resolved: "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz",
-  version: TARGET_ZOD_VERSION,
-});
 export const convexWasmTargetZodJitlessTransformPolicy = Object.freeze({
   commonJs: Object.freeze({
     path: "v4/core/util.cjs",
     reachable: "reject",
   }),
-  kind: "convex-wasm-target-zod-jitless-source-transform-v1",
+  kind: "convex-wasm-target-zod-jitless-source-transform-v2",
   lock: Object.freeze({
-    packageEntry: TARGET_ZOD_LOCK_ENTRY,
-    rootRequirement: "^4.4.3",
+    packagePath: "node_modules/zod",
+    rootDependency: "zod",
   }),
   package: Object.freeze({
-    manifestSha256: TARGET_ZOD_PACKAGE_MANIFEST_SHA256,
     name: "zod",
-    version: TARGET_ZOD_VERSION,
+    versionRange: ">=4.0.0 <5.0.0",
   }),
   replacement: Object.freeze({
-    sha256: "c911907c7ad786c206ad18d7b97fc2dcd1640c9c73608a7fdc1c5151dd032d52",
-    size: 98,
+    kind: "cached-false-v1",
+    preservesLineCount: true,
   }),
   source: Object.freeze({
     path: "v4/core/util.js",
-    segment: Object.freeze({
-      sha256: "bc2fdcce2f9cd84c54f62d95823010ffe1f3ffa0a8473e4279080206c2003967",
-      size: 544,
-    }),
-    sha256: TARGET_ZOD_UTIL_SOURCE_SHA256,
-    size: 22_018,
-  }),
-  transformedSource: Object.freeze({
-    sha256: TARGET_ZOD_UTIL_TRANSFORMED_SHA256,
-    size: 21_572,
+    matcher: "exported-allows-eval-cached-function-v1",
   }),
 });
 const ASYNC_HOOKS_SHIM_SOURCE = `
@@ -1006,16 +952,178 @@ function parseJsonMaterial(contents, description) {
   }
 }
 
-function exactSubstringCount(source, substring) {
-  let count = 0;
-  for (
-    let index = source.indexOf(substring);
-    index !== -1;
-    index = source.indexOf(substring, index + substring.length)
-  ) {
-    count += 1;
+function parsedStableVersion(version) {
+  if (typeof version !== "string") return undefined;
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.exec(version);
+  if (match === null) return undefined;
+  const parsed = match.slice(1).map(Number);
+  return parsed.every((value) => Number.isSafeInteger(value)) ? parsed : undefined;
+}
+
+function supportedZodVersion(version) {
+  const parsed = parsedStableVersion(version);
+  return parsed !== undefined && parsed[0] === 4;
+}
+
+function supportedZodRootRequirement(requirement) {
+  if (typeof requirement !== "string") return false;
+  const value = requirement.trim();
+  if (value === convexWasmTargetZodJitlessTransformPolicy.package.versionRange) return true;
+  return /^(?:\^|~)?4\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
+function compareVersionTuples(left, right) {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
   }
-  return count;
+  return 0;
+}
+
+function zodVersionSatisfiesRootRequirement(version, requirement) {
+  const parsedVersion = parsedStableVersion(version);
+  if (parsedVersion === undefined || !supportedZodRootRequirement(requirement)) return false;
+  const value = requirement.trim();
+  if (value === convexWasmTargetZodJitlessTransformPolicy.package.versionRange) {
+    return parsedVersion[0] === 4;
+  }
+  const match = /^(\^|~)?(4\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/u.exec(value);
+  if (match === null) return false;
+  const base = parsedStableVersion(match[2]);
+  if (
+    base === undefined ||
+    parsedVersion[0] !== base[0] ||
+    compareVersionTuples(parsedVersion, base) < 0
+  ) return false;
+  if (match[1] === "~") return parsedVersion[1] === base[1];
+  if (match[1] === "^") return true;
+  return parsedVersion.every((component, index) => component === base[index]);
+}
+
+function isBooleanReturn(statement, value) {
+  return statement?.type === "ReturnStatement" &&
+    statement.argument?.type === "BooleanLiteral" &&
+    statement.argument.value === value;
+}
+
+function isEmptyFunctionProbe(statement) {
+  if (statement?.type !== "ExpressionStatement" || statement.expression?.type !== "NewExpression") {
+    return false;
+  }
+  const expression = statement.expression;
+  return (
+    expression.callee?.type === "Identifier" &&
+    (expression.callee.name === "F" || expression.callee.name === "Function") &&
+    expression.arguments?.length === 1 &&
+    expression.arguments[0]?.type === "StringLiteral" &&
+    expression.arguments[0].value === ""
+  );
+}
+
+function isDirectFunctionProbe(statement) {
+  return isEmptyFunctionProbe(statement) && statement.expression.callee.name === "Function";
+}
+
+function isAliasedFunctionProbe(statement) {
+  return isEmptyFunctionProbe(statement) && statement.expression.callee.name === "F";
+}
+
+function hasZodFunctionProbe(statement) {
+  if (statement?.type !== "TryStatement" || statement.handler?.body?.type !== "BlockStatement") {
+    return false;
+  }
+  const tryStatements = statement.block?.body ?? [];
+  const hasFunctionAlias = tryStatements.some(
+    (candidate) => candidate.type === "VariableDeclaration" && candidate.declarations.some(
+      (declaration) => declaration.id?.type === "Identifier" && declaration.id.name === "F" &&
+        declaration.init?.type === "Identifier" && declaration.init.name === "Function"
+    )
+  );
+  return (
+    (tryStatements.some(isDirectFunctionProbe) ||
+      (hasFunctionAlias && tryStatements.some(isAliasedFunctionProbe))) &&
+    tryStatements.some((candidate) => isBooleanReturn(candidate, true)) &&
+    statement.handler.body.body.length === 1 &&
+    isBooleanReturn(statement.handler.body.body[0], false)
+  );
+}
+
+function isZodCloudflareGuard(statement) {
+  if (statement?.type !== "IfStatement" || statement.test?.type !== "LogicalExpression" || statement.test.operator !== "&&") {
+    return false;
+  }
+  const typeCheck = statement.test.left;
+  const probe = statement.test.right;
+  const member = probe?.callee?.object;
+  return (
+    typeCheck.type === "BinaryExpression" && typeCheck.operator === "!==" &&
+    typeCheck.left?.type === "UnaryExpression" && typeCheck.left.operator === "typeof" &&
+    typeCheck.left.argument?.type === "Identifier" && typeCheck.left.argument.name === "navigator" &&
+    typeCheck.right?.type === "StringLiteral" && typeCheck.right.value === "undefined" &&
+    (probe.type === "OptionalCallExpression" || probe.type === "CallExpression") &&
+    (probe.callee?.type === "OptionalMemberExpression" || probe.callee?.type === "MemberExpression") &&
+    probe.callee.property?.type === "Identifier" && probe.callee.property.name === "includes" &&
+    (member?.type === "OptionalMemberExpression" || member?.type === "MemberExpression") &&
+    member.object?.type === "Identifier" && member.object.name === "navigator" &&
+    member.property?.type === "Identifier" && member.property.name === "userAgent" &&
+    probe.arguments?.length === 1 && probe.arguments[0]?.type === "StringLiteral" &&
+    probe.arguments[0].value === "Cloudflare" &&
+    statement.consequent?.type === "BlockStatement" && statement.consequent.body.length === 1 &&
+    isBooleanReturn(statement.consequent.body[0], false)
+  );
+}
+
+function zodAllowsEvalDeclaration(sourceText) {
+  let parsed;
+  try {
+    parsed = parseJavaScript(sourceText, { sourceType: "module" });
+  } catch {
+    fail("Zod util source is not valid JavaScript");
+  }
+  const declarations = parsed.program.body.flatMap((node) => {
+    if (node.type !== "ExportNamedDeclaration" || node.declaration?.type !== "VariableDeclaration") {
+      return [];
+    }
+    return node.declaration.declarations
+      .filter(
+        (declaration) => declaration.id?.type === "Identifier" && declaration.id.name === "allowsEval"
+      )
+      .map((declaration) => ({ declaration, node }));
+  });
+  if (declarations.length !== 1) {
+    fail(`Zod util source must contain exactly one exported allowsEval declaration; found ${declarations.length}`);
+  }
+  const { declaration, node } = declarations[0];
+  if (
+    declaration.init?.type !== "CallExpression" ||
+    declaration.init.callee?.type !== "Identifier" ||
+    declaration.init.callee.name !== "cached" ||
+    declaration.init.arguments?.length !== 1 ||
+    declaration.init.arguments[0]?.type !== "ArrowFunctionExpression" ||
+    declaration.init.arguments[0].params.length !== 0 ||
+    declaration.init.arguments[0].body?.type !== "BlockStatement"
+  ) {
+    fail("Zod util allowsEval declaration has an unsupported cached-function shape");
+  }
+  const body = declaration.init.arguments[0].body;
+  if (!body.body.some(isZodCloudflareGuard) || !body.body.some(hasZodFunctionProbe)) {
+    fail("Zod util allowsEval declaration is missing its expected eval probe");
+  }
+  return { end: node.end, start: node.start };
+}
+
+function zodJitlessReplacement(originalSource) {
+  const newline = originalSource.includes("\r\n") ? "\r\n" : "\n";
+  const lineCount = originalSource.split(/\r?\n/u).length;
+  const replacement = [
+    "export const allowsEval = /* @__PURE__*/ cached(() => {",
+    "        return false;",
+    "});",
+  ].join(newline);
+  const replacementLineCount = replacement.split(/\r?\n/u).length;
+  if (lineCount < replacementLineCount) {
+    fail("Zod allowsEval declaration is shorter than the replacement");
+  }
+  return `${replacement}${newline.repeat(lineCount - replacementLineCount)}`;
 }
 
 export function transformConvexWasmTargetZodJitlessSource({ lockfile, packageManifest, source }) {
@@ -1023,55 +1131,76 @@ export function transformConvexWasmTargetZodJitlessSource({ lockfile, packageMan
   const packageManifestBytes = materialBuffer(packageManifest, "Zod package manifest material");
   const sourceBytes = materialBuffer(source, "Zod util source material");
   const packageJson = parseJsonMaterial(packageManifestBytes, "Zod package manifest");
-  if (packageJson.name !== "zod" || packageJson.version !== TARGET_ZOD_VERSION) {
-    fail(`Zod package manifest must describe zod@${TARGET_ZOD_VERSION}`);
+  if (packageJson.name !== convexWasmTargetZodJitlessTransformPolicy.package.name) {
+    fail("Zod package manifest must describe the zod package");
   }
-  if (sha256(packageManifestBytes) !== TARGET_ZOD_PACKAGE_MANIFEST_SHA256) {
-    fail(`Zod ${TARGET_ZOD_VERSION} package manifest changed`);
-  }
-  const packageLock = parseJsonMaterial(lockfileBytes, "toolchain package lock");
-  if (
-    packageLock.lockfileVersion !== 3 ||
-    packageLock.packages?.[""]?.dependencies?.zod !==
-      convexWasmTargetZodJitlessTransformPolicy.lock.rootRequirement ||
-    canonicalJson(packageLock.packages?.["node_modules/zod"]) !==
-      canonicalJson(TARGET_ZOD_LOCK_ENTRY)
-  ) {
-    fail(`toolchain package lock must pin zod@${TARGET_ZOD_VERSION}`);
-  }
-  const sourceText = new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
-  const segmentCount = exactSubstringCount(sourceText, TARGET_ZOD_ALLOWS_EVAL_SOURCE);
-  if (segmentCount !== 1) {
+  if (!supportedZodVersion(packageJson.version)) {
     fail(
-      `Zod ${TARGET_ZOD_VERSION} util source must contain exactly one authenticated allowsEval segment; found ${segmentCount}`
+      `Zod package version ${packageJson.version} is outside the supported range ${convexWasmTargetZodJitlessTransformPolicy.package.versionRange}`
     );
   }
+  const packageLock = parseJsonMaterial(lockfileBytes, "toolchain package lock");
+  const rootRequirement = packageLock.packages?.[""]?.dependencies?.zod;
+  const packageLockEntry = packageLock.packages?.[convexWasmTargetZodJitlessTransformPolicy.lock.packagePath];
   if (
-    sourceBytes.length !== convexWasmTargetZodJitlessTransformPolicy.source.size ||
-    sha256(sourceBytes) !== convexWasmTargetZodJitlessTransformPolicy.source.sha256
+    packageLock.lockfileVersion !== 3 ||
+    !zodVersionSatisfiesRootRequirement(packageJson.version, rootRequirement)
   ) {
-    fail(`Zod ${TARGET_ZOD_VERSION} util source changed outside the authenticated segment`);
+    fail("toolchain package lock must declare the installed Zod dependency");
   }
-  const transformedText = sourceText.replace(
-    TARGET_ZOD_ALLOWS_EVAL_SOURCE,
-    TARGET_ZOD_ALLOWS_EVAL_JITLESS_SOURCE
-  );
+  if (
+    packageLockEntry?.version !== packageJson.version ||
+    typeof packageLockEntry?.resolved !== "string" ||
+    packageLockEntry.resolved.length === 0 ||
+    typeof packageLockEntry?.integrity !== "string" ||
+    !/^sha(?:1|256|512)-[A-Za-z0-9+/]+={0,2}$/u.test(packageLockEntry.integrity)
+  ) {
+    fail("toolchain package lock must authenticate the installed Zod package entry");
+  }
+  const sourceText = new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
+  const declaration = zodAllowsEvalDeclaration(sourceText);
+  const originalSegment = sourceText.slice(declaration.start, declaration.end);
+  const replacement = zodJitlessReplacement(originalSegment);
+  const transformedText = `${sourceText.slice(0, declaration.start)}${replacement}${sourceText.slice(declaration.end)}`;
   const transformedSource = Buffer.from(transformedText);
-  if (
-    transformedSource.length !== convexWasmTargetZodJitlessTransformPolicy.transformedSource.size ||
-    sha256(transformedSource) !== convexWasmTargetZodJitlessTransformPolicy.transformedSource.sha256
-  ) {
-    fail(`Zod ${TARGET_ZOD_VERSION} jitless transformed source identity changed`);
-  }
   const identity = {
-    ...convexWasmTargetZodJitlessTransformPolicy,
+    kind: convexWasmTargetZodJitlessTransformPolicy.kind,
     lock: {
-      ...convexWasmTargetZodJitlessTransformPolicy.lock,
+      packageEntry: {
+        integrity: packageLockEntry.integrity,
+        resolved: packageLockEntry.resolved,
+        version: packageLockEntry.version,
+      },
+      rootRequirement,
       material: { sha256: sha256(lockfileBytes), size: lockfileBytes.length },
     },
+    materials: {
+      lockfile: { sha256: sha256(lockfileBytes), size: lockfileBytes.length },
+      packageManifest: { sha256: sha256(packageManifestBytes), size: packageManifestBytes.length },
+      source: { sha256: sha256(sourceBytes), size: sourceBytes.length },
+    },
     package: {
-      ...convexWasmTargetZodJitlessTransformPolicy.package,
-      manifestSize: packageManifestBytes.length,
+      manifestSha256: sha256(packageManifestBytes),
+      name: packageJson.name,
+      version: packageJson.version,
+    },
+    policy: convexWasmTargetZodJitlessTransformPolicy,
+    replacement: {
+      sha256: sha256(Buffer.from(replacement)),
+      size: Buffer.byteLength(replacement),
+    },
+    source: {
+      path: convexWasmTargetZodJitlessTransformPolicy.source.path,
+      segment: {
+        sha256: sha256(Buffer.from(originalSegment)),
+        size: Buffer.byteLength(originalSegment),
+      },
+      sha256: sha256(sourceBytes),
+      size: sourceBytes.length,
+    },
+    transformedSource: {
+      sha256: sha256(transformedSource),
+      size: transformedSource.length,
     },
   };
   return {
@@ -2965,7 +3094,7 @@ function deploymentComparison(graphSession, selectedEntry, inputs, toolchain, mo
   };
 }
 
-function targetZodJitlessIdentity(toolMaterials) {
+function targetZodJitlessIdentity(toolMaterials, authenticatedIdentity) {
   const lockfile = requireObject(
     toolMaterials["toolchain/package-lock.json"],
     "target Zod jitless lockfile material"
@@ -2978,27 +3107,120 @@ function targetZodJitlessIdentity(toolMaterials) {
     toolMaterials["target-zod-jitless/v4/core/util.js"],
     "target Zod jitless source material"
   );
-  if (
-    packageManifest.sha256 !== convexWasmTargetZodJitlessTransformPolicy.package.manifestSha256 ||
-    source.sha256 !== convexWasmTargetZodJitlessTransformPolicy.source.sha256 ||
-    source.size !== convexWasmTargetZodJitlessTransformPolicy.source.size
-  ) {
-    fail("target Zod jitless tool materials changed");
-  }
-  return {
-    ...convexWasmTargetZodJitlessTransformPolicy,
-    lock: {
-      ...convexWasmTargetZodJitlessTransformPolicy.lock,
-      material: { ...lockfile },
+  const identity = {
+    kind: convexWasmTargetZodJitlessTransformPolicy.kind,
+    materials: {
+      lockfile: { ...lockfile },
+      packageManifest: { ...packageManifest },
+      source: { ...source },
     },
-    package: {
-      ...convexWasmTargetZodJitlessTransformPolicy.package,
-      manifestSize: packageManifest.size,
-    },
+    policy: convexWasmTargetZodJitlessTransformPolicy,
   };
+  if (authenticatedIdentity !== undefined) {
+    const authenticated = requireObject(
+      authenticatedIdentity,
+      "authenticated target Zod jitless transform identity"
+    );
+    for (const field of ["lock", "package", "replacement", "source", "transformedSource"]) {
+      identity[field] = structuredClone(requireObject(authenticated[field], `authenticated target Zod ${field}`));
+    }
+  }
+  return identity;
 }
 
-function pluginIdentity(toolMaterials, mode, versions) {
+function validateTargetZodJitlessTransformIdentity(identity, expected, input) {
+  requireExactKeys(
+    identity,
+    ["kind", "lock", "materials", "package", "policy", "replacement", "source", "transformedSource"],
+    "target Zod jitless transform identity"
+  );
+  if (identity.kind !== expected.kind || canonicalJson(identity.policy) !== canonicalJson(expected.policy)) {
+    fail("target Zod jitless transform policy changed");
+  }
+  if (canonicalJson(identity.materials) !== canonicalJson(expected.materials)) {
+    fail("target Zod jitless transform material identity changed");
+  }
+  for (const field of ["lock", "package", "replacement", "source", "transformedSource"]) {
+    if (expected[field] !== undefined && canonicalJson(identity[field]) !== canonicalJson(expected[field])) {
+      fail(`target Zod jitless transform ${field} identity changed`);
+    }
+  }
+  requireExactKeys(identity.package, ["manifestSha256", "name", "version"], "target Zod package identity");
+  requireSha256(identity.package.manifestSha256, "target Zod package manifest SHA-256");
+  if (
+    identity.package.name !== expected.policy.package.name ||
+    identity.package.manifestSha256 !== expected.materials.packageManifest.sha256 ||
+    !supportedZodVersion(identity.package.version)
+  ) {
+    fail("target Zod package identity is outside the authenticated supported range");
+  }
+  requireExactKeys(
+    identity.lock,
+    ["material", "packageEntry", "rootRequirement"],
+    "target Zod lock identity"
+  );
+  requireExactKeys(
+    identity.lock.material,
+    ["sha256", "size"],
+    "target Zod lock material identity"
+  );
+  requireSha256(identity.lock.material.sha256, "target Zod lock material SHA-256");
+  requirePositiveInteger(identity.lock.material.size, "target Zod lock material size");
+  if (canonicalJson(identity.lock.material) !== canonicalJson(expected.materials.lockfile)) {
+    fail("target Zod lock material identity changed");
+  }
+  if (!supportedZodRootRequirement(identity.lock.rootRequirement)) {
+    fail("target Zod root requirement is invalid");
+  }
+  requireExactKeys(
+    identity.lock.packageEntry,
+    ["integrity", "resolved", "version"],
+    "target Zod lock package entry"
+  );
+  if (
+    identity.lock.packageEntry.version !== identity.package.version ||
+    typeof identity.lock.packageEntry.resolved !== "string" ||
+    identity.lock.packageEntry.resolved.length === 0 ||
+    typeof identity.lock.packageEntry.integrity !== "string" ||
+    !/^sha(?:1|256|512)-[A-Za-z0-9+/]+={0,2}$/u.test(identity.lock.packageEntry.integrity)
+  ) {
+    fail("target Zod lock package entry does not match the package identity");
+  }
+  if (!zodVersionSatisfiesRootRequirement(identity.package.version, identity.lock.rootRequirement)) {
+    fail("target Zod package version does not satisfy its authenticated root requirement");
+  }
+  requireExactKeys(
+    identity.source,
+    ["path", "segment", "sha256", "size"],
+    "target Zod source identity"
+  );
+  if (
+    identity.source.path !== expected.policy.source.path ||
+    identity.source.sha256 !== expected.materials.source.sha256 ||
+    identity.source.size !== expected.materials.source.size
+  ) {
+    fail("target Zod source material identity changed");
+  }
+  requireExactKeys(identity.source.segment, ["sha256", "size"], "target Zod source segment identity");
+  requireSha256(identity.source.segment.sha256, "target Zod source segment SHA-256");
+  requirePositiveInteger(identity.source.segment.size, "target Zod source segment size");
+  requireExactKeys(identity.replacement, ["sha256", "size"], "target Zod replacement identity");
+  requireSha256(identity.replacement.sha256, "target Zod replacement SHA-256");
+  requirePositiveInteger(identity.replacement.size, "target Zod replacement size");
+  requireExactKeys(identity.transformedSource, ["sha256", "size"], "target Zod transformed source identity");
+  requireSha256(identity.transformedSource.sha256, "target Zod transformed source SHA-256");
+  requirePositiveInteger(identity.transformedSource.size, "target Zod transformed source size");
+  if (input !== undefined) {
+    if (
+      input.sha256 !== identity.source.sha256 ||
+      input.size !== identity.source.size
+    ) {
+      fail("compile profile target Zod input does not match its authenticated source transform");
+    }
+  }
+}
+
+function pluginIdentity(toolMaterials, mode, versions, targetZodIdentity) {
   const plugins = [
     {
       implementation: toolMaterials["compile-profile-adapter"],
@@ -3009,7 +3231,7 @@ function pluginIdentity(toolMaterials, mode, versions) {
     plugins.push({
       implementation: toolMaterials["compile-profile-adapter"],
       name: "convex-target-zod-jitless-source-transform",
-      transform: targetZodJitlessIdentity(toolMaterials),
+      transform: targetZodJitlessIdentity(toolMaterials, targetZodIdentity),
     });
     plugins.push({
       deepLeafResolution: {
@@ -3147,7 +3369,12 @@ function persistentProfileKeyIdentity({
     },
     options,
     optionsSha256: fingerprintJson(options),
-    plugins: pluginIdentity(loaded.materials, mode, loaded.toolchain),
+    plugins: pluginIdentity(
+      loaded.materials,
+      mode,
+      loaded.toolchain,
+      loaded.targetZodJitless?.identity
+    ),
     producerSha256,
     routes: selection.routes,
     selectedEntry: selection.selectedEntry,
@@ -3235,6 +3462,24 @@ async function rebindCachedCompileProfile({
   const selectedRouteExportNames = selection.routes.map(({ exportName }) => exportName);
   const selectedInventoryIdentity = canonicalJson(selection);
   await authenticateCachedProfileMaterials(cached.localProfileIdentity, loaded, session);
+  if (cached.localProfileIdentity.mode === convexWasmCompileProfileTargetAdapterMode) {
+    // Material digests alone do not authenticate the semantic package and lock claims; bind the
+    // cached identity to the transform rederived from the current authenticated files.
+    if (!Array.isArray(cached.localProfileIdentity.plugins)) {
+      fail("cached compile-profile plugins are not an array");
+    }
+    const cachedTargetZodJitless = cached.localProfileIdentity.plugins.find(
+      ({ name }) => name === "convex-target-zod-jitless-source-transform"
+    );
+    const loadedTargetZodJitless = requireObject(
+      loaded.targetZodJitless,
+      "cached target Zod jitless transform"
+    );
+    validateTargetZodJitlessTransformIdentity(
+      requireObject(cachedTargetZodJitless, "cached target Zod jitless plugin").transform,
+      targetZodJitlessIdentity(loaded.materials, loadedTargetZodJitless.identity)
+    );
+  }
   const {
     dependencyGraphSha256: cachedDependencyGraphSha256,
     ...cachedProfileIdentityWithoutProof
@@ -3400,15 +3645,31 @@ function validateProfileIdentity(identity) {
     requireSha256(material.sha256, `compile profile tool material ${name} SHA-256`);
     requirePositiveInteger(material.size, `compile profile tool material ${name} size`);
   }
-  if (
-    canonicalJson(identity.plugins) !==
-    canonicalJson(pluginIdentity(materials, mode, identity.toolchain.versions))
-  ) {
-    fail("compile profile plugin identity changed");
-  }
   const targetZodJitlessPlugin = identity.plugins.find(
     ({ name }) => name === "convex-target-zod-jitless-source-transform"
   );
+  if (
+    canonicalJson(identity.plugins) !==
+    canonicalJson(
+      pluginIdentity(
+        materials,
+        mode,
+        identity.toolchain.versions,
+        targetZodJitlessPlugin?.transform
+      )
+    )
+  ) {
+    fail("compile profile plugin identity changed");
+  }
+  if (mode === convexWasmCompileProfileTargetAdapterMode) {
+    if (targetZodJitlessPlugin === undefined) {
+      fail("target compile profile is missing the Zod jitless transform plugin");
+    }
+    validateTargetZodJitlessTransformIdentity(
+      targetZodJitlessPlugin.transform,
+      targetZodJitlessIdentity(materials, targetZodJitlessPlugin.transform)
+    );
+  }
   const inputs = requireObject(identity.inputs, "compile profile input identities");
   if (!Object.hasOwn(inputs, VIRTUAL_ENTRY_PATH)) {
     fail("compile profile input identity is missing the virtual entry");
@@ -3443,11 +3704,16 @@ function validateProfileIdentity(identity) {
       mode === convexWasmCompileProfileTargetAdapterMode &&
       (targetZodJitlessPlugin === undefined ||
         input.virtual ||
-        input.sha256 !== targetZodJitlessPlugin.transform.source.sha256 ||
-        input.size !== targetZodJitlessPlugin.transform.source.size ||
-        canonicalJson(input.transform) !== canonicalJson(targetZodJitlessPlugin.transform))
+        input.transform === undefined)
     ) {
       fail(`compile profile input ${path} does not bind the target Zod jitless transform`);
+    }
+    if (isTargetZodSource && mode === convexWasmCompileProfileTargetAdapterMode) {
+      validateTargetZodJitlessTransformIdentity(
+        input.transform,
+        targetZodJitlessPlugin.transform,
+        input
+      );
     }
     if (
       isTargetZodSource &&
@@ -3712,12 +3978,16 @@ async function buildCompileProfileInSession(entryPath, selectedExportNames, sess
   const rejectedSourcePaths = new Set();
   if (selectedMode === convexWasmCompileProfileTargetAdapterMode) {
     const targetZodJitless = requireObject(loaded.targetZodJitless, "target Zod jitless transform");
-    const expectedIdentity = targetZodJitlessIdentity(loaded.materials);
-    if (canonicalJson(targetZodJitless.identity) !== canonicalJson(expectedIdentity)) {
-      fail("target Zod jitless transform identity changed after authentication");
-    }
+    const expectedIdentity = targetZodJitlessIdentity(
+      loaded.materials,
+      targetZodJitless.identity
+    );
+    validateTargetZodJitlessTransformIdentity(
+      targetZodJitless.identity,
+      expectedIdentity
+    );
     fixedTransformedSources.set(targetZodJitless.absolutePath, targetZodJitless.contents);
-    transformedSourceIdentities.set(targetZodJitless.absolutePath, expectedIdentity);
+    transformedSourceIdentities.set(targetZodJitless.absolutePath, targetZodJitless.identity);
     rejectedSourcePaths.add(targetZodJitless.commonJsAbsolutePath);
   }
   const build = (sourcePlugin, applicationModulePlugin) =>
@@ -3749,7 +4019,12 @@ async function buildCompileProfileInSession(entryPath, selectedExportNames, sess
       entryPath,
       inventory: selection.inventory,
       mode: selectedMode,
-      plugins: pluginIdentity(loaded.materials, selectedMode, loaded.toolchain),
+      plugins: pluginIdentity(
+        loaded.materials,
+        selectedMode,
+        loaded.toolchain,
+        loaded.targetZodJitless?.identity
+      ),
       repoRoot: normalizedRoot,
       toolchain: loaded.toolchain,
       toolchainRoot: normalizedToolchainRoot,
@@ -3915,7 +4190,12 @@ async function buildCompileProfileInSession(entryPath, selectedExportNames, sess
     options: buildOptions,
     optionsSha256: fingerprintJson(buildOptions),
     output: outputs.output,
-    plugins: pluginIdentity(loaded.materials, selectedMode, loaded.toolchain),
+    plugins: pluginIdentity(
+      loaded.materials,
+      selectedMode,
+      loaded.toolchain,
+      loaded.targetZodJitless?.identity
+    ),
     ...(comparison === undefined ? {} : { deploymentGraph: comparison }),
     routes: selection.routes,
     selectedEntry: selection.selectedEntry,
