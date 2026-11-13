@@ -3,6 +3,20 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.61
+
+- Support stable Zod 4 releases (`>=4.0.0 <5.0.0`) with authenticated transform
+  identities. Validate the exact `allowsEval` declaration, preserve source line
+  endings, and reject cached profiles whose package or lockfile claims drift.
+- Reduce immutable cache-maintenance work with one fenced inventory, a reusable
+  no-pressure index, and one durable deletion journal per pressure wave. Rebuild
+  payload authority before pressure eviction and retain fail-closed closure and
+  hard-link checks.
+
+This release uses the full native release workflow because the package lockfile
+changed. The native compiler, precompiler, and bundled toolchain remain governed
+by their existing authenticated source and artifact contracts.
+
 ## 0.2.59
 
 - Compile eligible root queries and mutations in applications using components.
