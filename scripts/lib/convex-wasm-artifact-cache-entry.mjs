@@ -33,6 +33,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const immutableArtifactCacheValidationFlights = new Map();
 const artifactCacheEntryPhysicalStateFlightsByValidationMemo = new WeakMap();
 const authenticatedArtifactCacheEntryPhysicalStatesByValidationMemo = new WeakMap();
+const artifactCacheValidationFenceEntries = new WeakMap();
 const authenticatedArtifactCacheEntryJson = new WeakMap();
 const artifactCachePayloadPhysicalStateChanged = Object.freeze({
   kind: "artifact-cache-payload-physical-state-changed",
@@ -573,8 +574,48 @@ function artifactCacheEntryPhysicalStateInValidationScope(validationMemo, cacheR
   return singleFlightImmutableCacheValidation(
     flights,
     `${resolve(cacheRoot)}\0${resolve(entryPath)}`,
-    async () => await artifactCacheEntryPhysicalState(cacheRoot, entryPath)
+    async () => {
+      const fenceEntries = artifactCacheValidationFenceEntries.get(validationMemo);
+      if (fenceEntries === undefined) return await artifactCacheEntryPhysicalState(cacheRoot, entryPath);
+      const prefix = `${entryPath}/`;
+      let lower = 0;
+      let upper = fenceEntries.length;
+      while (lower < upper) {
+        const middle = Math.floor((lower + upper) / 2);
+        if (compareStrings(fenceEntries[middle][0], entryPath) < 0) lower = middle + 1;
+        else upper = middle;
+      }
+      const [entryPathInFence, directoryWitness] = fenceEntries[lower] ?? [];
+      if (
+        entryPathInFence !== entryPath ||
+        directoryWitness === undefined ||
+        directoryWitness.type !== "directory"
+      ) {
+        return undefined;
+      }
+      const files = [];
+      for (let index = lower + 1; index < fenceEntries.length; index += 1) {
+        const [path, witness] = fenceEntries[index];
+        if (!path.startsWith(prefix)) break;
+        const name = path.slice(prefix.length);
+        if (name.includes("/")) continue;
+        files.push([name, artifactCacheEntryPhysicalStatus(witness)]);
+      }
+      files.sort(([left], [right]) => compareStrings(left, right));
+      return JSON.stringify({
+        directory: artifactCacheEntryPhysicalStatus(directoryWitness),
+        files,
+      });
+    }
   );
+}
+
+export function bindArtifactCacheValidationFence(validationMemo, fenceEntries) {
+  if (!(validationMemo instanceof Map)) {
+    throw new TypeError("artifact cache validation memo must be a Map");
+  }
+  if (fenceEntries === undefined) artifactCacheValidationFenceEntries.delete(validationMemo);
+  else artifactCacheValidationFenceEntries.set(validationMemo, fenceEntries);
 }
 
 function memoizeImmutableCacheValidation(memo, key, validate) {

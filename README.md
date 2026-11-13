@@ -953,32 +953,41 @@ occupancy. Nested/concurrent phase times overlap and are not a wall-time partiti
 they never affect plan hashes or producer identities.
 Invalid unreferenced cache entries grant no retention authority; a missing or
 invalid reference from the deployed snapshot stops cleanup.
-Removal uses authenticated durable quarantine and resumes after interruption.
-Automatic maintenance also resumes pending quarantine below the high watermark.
-Each selected batch is quarantined and verified before any payload is unlinked,
-including during recovery, so shared hardlinks do not invalidate later candidates.
+Removal uses one authenticated durable journal per deletion wave and a single private
+quarantine directory for that wave. The journal is written before any root is moved;
+recovery removes only roots that actually reached that directory, so a crash cannot turn
+an unrecorded rename into deletion authority. Automatic maintenance resumes pending
+journals below the high watermark. The journal is fsynced once and the quarantine directory
+is synced at the batch move and batch removal boundaries rather than once per entry; moved
+roots are unlinked concurrently while the cache lock is held. A root that was not moved
+remains in its canonical location and is reconsidered by the next authenticated inventory.
 Work-root and quarantine removal drain every admitted child filesystem operation
 before returning on failure, so the cache lock cannot be released while deletion
-is still running. Candidate roots remain sequential; nested removal uses one bounded
-operation limit and preserves the existing durability barriers.
+is still running. Selected-root authentication and nested removal use bounded concurrent
+filesystem work; the journal remains the only durable recovery record for a wave.
 Inventory collection shares physically checked package/artifact validation and
-bounded structured interpretation. It retains compact closure facts, not complete
-parsed payloads, across waves. Surviving file state, ancestor identity, and directory
-membership must match the inventory after accounting for this invocation's removals.
-Unexpected replacement, mutation, new authority, or missing material fails closed.
-Surviving hardlinks affected by unlinking are authenticated before and after the
-wave, so legitimate link-count/ctime changes cannot hide a same-inode rewrite.
-Newly eligible roots receive current authentication, reclaim estimates, and physical
-witnesses before the next plan is minted. Deletion still starts a fresh validation
-scope and preserves exact pre-/post-quarantine comparisons; a failed comparison
-never refreshes a plan's witness. Recovery precedes the next invocation's new inventory.
+bounded structured interpretation. It retains compact closure facts, not complete parsed
+payloads, across waves. The invocation's initial physical fence supplies occupancy and
+inode/path membership; completed removals are applied to that in-memory fence instead of
+triggering another whole-cache walk. Every selected root is reauthenticated immediately
+before its rename, and only the next wave's selected roots are refreshed after shared-link
+removals. The shared cache lock is the writer boundary for supported publishers and
+builders. A mutation outside that cooperative lock is outside this contract. The journal
+records selected source roots before their atomic moves, and recovery precedes the next
+invocation's new inventory. A completed maintenance run persists a derived
+`state/v1/cache-retention/v1/immutable-inventory.json` index bound to the fenced immutable
+tree and the deployed snapshot. After a pressure sweep, the settled tree is fenced once more
+before replacing the index. An unchanged later run reuses that index instead of
+re-reading and reparsing every artifact; a missing, malformed, or physically stale index
+falls back to the full authenticated inventory and never grants deletion authority by itself.
 Pressure uses one initial immutable occupancy measurement and one per completed wave;
 the separate whole-cache report remains separately accounted.
 Artifact inventory reads use four concurrent workers. Within one locked inventory,
-private ancestor checks reuse an earlier open/fstat/path proof only after a fresh
-`lstat` confirms the same inode, owner, mode, size and timestamps. Changed ancestors
-receive a full check; leaf directories, files and later inventories retain their
-full checks. Other callers share only pending directory checks. Freshly parsed JSON
+private ancestor checks reuse the initial physical fence for the fenced cache tree;
+outside that fence, an earlier open/fstat/path proof is reused only after a fresh `lstat`
+confirms the same inode, owner, mode, size and timestamps. Selected roots and direct file
+contents retain their read-time identity checks. Other callers share only pending directory
+checks. Freshly parsed JSON
 uses a data-only canonicalization check and requires exact canonical UTF-8 bytes,
 rejecting a leading byte-order mark. Payload authentication and structured digests
 for canonical records remain unchanged.
@@ -1006,7 +1015,7 @@ npx convex-wasm-cache --cache-root "$HOME/.cache/convex-wasm-compiler" --apply -
 ```
 
 `--automatic --apply` selects new immutable evictions only above an explicitly
-configured high watermark; it also finishes pending quarantine recovery. Supply `--immutable-high-watermark-bytes` or
+configured high watermark; it also finishes pending deletion-journal recovery. Supply `--immutable-high-watermark-bytes` or
 `CONVEX_WASM_CACHE_HIGH_WATERMARK_BYTES` for either sweep mode; choose the value
 for the adopting host. The command uses the default cache root when `--cache-root`
 is omitted. Successful automatic maintenance records its policy and completion time
@@ -1016,7 +1025,7 @@ v1 start-time receipt is due once and is replaced only after success; malformed 
 linked receipts remain errors. Explicit sweeps, policy changes, and clock rollback
 bypass the interval; failed maintenance and blocked sweeps do not advance it. A
 blocked sweep remains due so that clearing a work lease permits an immediate retry.
-Pending quarantine
+Pending deletion journals
 bypasses deferral even below the watermark. Inside cooldown that call recovers only
 previously authorized deletion, without new pressure eviction or receipt advancement.
 The interval does not replace build-time disk admission or live disk limits.
@@ -1024,7 +1033,9 @@ The interval does not replace build-time disk admission or live disk limits.
 An older package rejects the v2 receipt. For a rollback, acquire the same top-level
 cache lock, authenticate the private regular `automatic-maintenance.json` file, and
 remove only that scheduling receipt before invoking the older package. This makes
-maintenance due; preserve immutable entries, work leases, and quarantine authority.
+maintenance due; preserve immutable entries, work leases, and deletion-journal authority.
+Complete or recover any pending v2 deletion journal with this package before invoking
+an older package; older recovery understands legacy per-entry records but not `journal.json`.
 A later upgrade accepts the resulting valid v1 receipt as due once. This receipt-only
 rollback has been exercised against the v1 reader; it is not cache deletion.
 

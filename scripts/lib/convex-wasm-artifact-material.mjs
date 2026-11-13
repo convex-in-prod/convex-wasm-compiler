@@ -11,6 +11,7 @@ import {
   fingerprintJson,
   requireString,
 } from "./convex-wasm-artifact-contract.mjs";
+import { isTrustedPrivateCacheFile } from "./convex-wasm-private-cache.mjs";
 
 class ConvexWasmArtifactByteLimitError extends Error {
   constructor(description, actualBytes, maximumBytes) {
@@ -108,6 +109,31 @@ async function requirePrivateDirectory(path, description) {
 async function readPrivateRegularFile(path, maximumBytes, description, authenticatedFileIdentity) {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
     fail(`${description} maximum byte limit is invalid`);
+  }
+  if (authenticatedFileIdentity === undefined && isTrustedPrivateCacheFile(path)) {
+    // Inventory runs under the cache lock after a complete physical fence. The fence owns the
+    // parent and leaf identity, so avoid repeating path/stat fences for this read. O_NOFOLLOW
+    // still protects the final component if an unsupported writer changes it.
+    const handle = await fs.open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const status = await handle.stat();
+      if (status.isSymbolicLink() || !status.isFile()) {
+        fail(`${description} is not a nonsymlink regular file: ${path}`);
+      }
+      if (status.size > maximumBytes) {
+        throw new ConvexWasmArtifactByteLimitError(`${description} has`, status.size, maximumBytes);
+      }
+      const contents = Buffer.allocUnsafe(status.size);
+      let size = (await handle.read(contents, 0, status.size, 0)).bytesRead;
+      while (size < status.size) {
+        const { bytesRead } = await handle.read(contents, size, status.size - size, size);
+        if (bytesRead === 0) fail(`${description} changed while it was read: ${path}`);
+        size += bytesRead;
+      }
+      return contents;
+    } finally {
+      await handle.close();
+    }
   }
   const beforePath =
     authenticatedFileIdentity === undefined

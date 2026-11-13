@@ -19,6 +19,7 @@ import {
 } from "./convex-wasm-artifact-material.mjs";
 import { convexWasmCacheLock } from "./convex-wasm-cache-lock.mjs";
 import {
+  bindArtifactCacheValidationFence,
   validateArtifactCacheEntryInValidationScope,
 } from "./convex-wasm-artifact-cache-entry.mjs";
 import { staticHermesLayoutCacheReferences } from "./convex-wasm-static-hermes-layout-cache.mjs";
@@ -103,6 +104,7 @@ const MAX_CERTIFICATE_CANDIDATES = 256;
 const MAX_COMPILER_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 64 * 1024;
 const MAX_SWEEP_QUARANTINE_RECORD_BYTES = 64 * 1024;
+const MAX_SWEEP_JOURNAL_BYTES = 4 * 1024 * 1024;
 const MAX_DEPLOYMENT_SNAPSHOT_CERTIFICATES = 8;
 const MAX_DEPLOYMENT_SNAPSHOT_COMPILER_OUTPUTS = 256;
 const MAX_DEPLOYMENT_SNAPSHOT_PACKAGES = 256;
@@ -114,6 +116,7 @@ const GENERIC_ARTIFACT_EXTENSIONS = new Set(["a", "c", "cwasm", "js", "json", "o
 const COMPILER_OUTPUT_GENERATED_C_EXTENSIONS = new Set(["c", "c-bundle"]);
 const COMPILER_OUTPUT_AOT_EXTENSIONS = new Set(["cwasm"]);
 const COMPILER_OUTPUT_OBJECT_EXTENSIONS = new Set(["o"]);
+const IMMUTABLE_SWEEP_JOURNAL_KIND = "convex-wasm-immutable-gc-journal-v2";
 
 // Measurements belong to the invocation, never to authenticated plan or producer material.
 // Nested/concurrent phases overlap; their totals must not be added as a wall-time partition.
@@ -523,6 +526,107 @@ async function treeStats(path, includeIdentity = true) {
     treeIdentity: sha256(canonicalBytes(physicalStates)),
     mtimeMs,
   };
+}
+
+// The maintenance fence already captured every immutable path and its physical state. Reusing
+// that state for inventory accounting avoids walking each authenticated artifact tree again.
+function treeStatsFromFence(path, fenceEntries, includeIdentity = true) {
+  const prefix = `${path}/`;
+  let lower = 0;
+  let upper = fenceEntries.length;
+  while (lower < upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (compareStrings(fenceEntries[middle][0], path) < 0) lower = middle + 1;
+    else upper = middle;
+  }
+  const entries = [];
+  for (let index = lower; index < fenceEntries.length; index += 1) {
+    const [entryPath, witness] = fenceEntries[index];
+    if (entryPath !== path && !entryPath.startsWith(prefix)) break;
+    entries.push({
+      relativePath: entryPath === path ? "" : entryPath.slice(prefix.length),
+      witness,
+    });
+  }
+  if (entries.length === 0) fail(`immutable cache tree disappeared from the authority fence: ${path}`);
+  const inodes = new Map();
+  const physicalStates = [];
+  let allocatedBytes = 0;
+  let mtimeMs = 0;
+  for (const { relativePath, witness } of entries) {
+    const currentMtimeMs = Number(witness.mtimeNs) / 1_000_000;
+    if (!Number.isFinite(currentMtimeMs) || currentMtimeMs < 0) {
+      fail(`immutable cache entry has an invalid modification time: ${path}`);
+    }
+    mtimeMs = Math.max(mtimeMs, currentMtimeMs);
+    const inode = `${String(witness.dev)}:${String(witness.ino)}`;
+    const entryAllocatedBytesBig = witness.blocks * 512n;
+    const entryAllocatedBytes = Number(entryAllocatedBytesBig);
+    if (!Number.isSafeInteger(entryAllocatedBytes) || entryAllocatedBytes < 0) {
+      fail(`immutable cache tree allocated byte count exceeds the safe integer range: ${path}`);
+    }
+    const existing = inodes.get(inode);
+    if (existing === undefined) {
+      inodes.set(inode, {
+        allocatedBytes: entryAllocatedBytes,
+        linkCount: witness.nlink,
+        references: 1,
+        regularFile: witness.type === "file",
+      });
+      allocatedBytes += entryAllocatedBytes;
+      if (!Number.isSafeInteger(allocatedBytes)) {
+        fail(`immutable cache tree allocated byte count exceeds the safe integer range: ${path}`);
+      }
+    } else {
+      if (
+        existing.allocatedBytes !== entryAllocatedBytes ||
+        existing.linkCount !== witness.nlink ||
+        existing.regularFile !== (witness.type === "file")
+      ) {
+        fail(`immutable cache inode changed during accounting: ${path}`);
+      }
+      existing.references += 1;
+    }
+    if (includeIdentity) {
+      physicalStates.push({
+        blocks: String(witness.blocks),
+        dev: String(witness.dev),
+        gid: String(witness.gid),
+        ino: String(witness.ino),
+        mode: String(witness.mode),
+        mtimeNs: String(witness.mtimeNs),
+        nlink: String(witness.nlink),
+        path: relativePath,
+        size: String(witness.size),
+        type: witness.type,
+        uid: String(witness.uid),
+        ...(relativePath === "" ? {} : { ctimeNs: String(witness.ctimeNs) }),
+      });
+    }
+  }
+  if (!includeIdentity) return { allocatedBytes };
+  let estimatedReclaimBytes = 0;
+  for (const inode of inodes.values()) {
+    if (inode.regularFile && inode.linkCount > BigInt(inode.references)) continue;
+    estimatedReclaimBytes += inode.allocatedBytes;
+    if (!Number.isSafeInteger(estimatedReclaimBytes)) {
+      fail(`immutable cache tree reclaim estimate exceeds the safe integer range: ${path}`);
+    }
+  }
+  physicalStates.sort((left, right) => compareStrings(left.path, right.path));
+  return {
+    allocatedBytes,
+    estimatedReclaimBytes,
+    identity: `${[...inodes.keys()].sort(compareStrings).join(",")}:${mtimeMs}`,
+    treeIdentity: sha256(canonicalBytes(physicalStates)),
+    mtimeMs,
+  };
+}
+
+function inventoryTreeStats(path, validation) {
+  return validation.fence === undefined
+    ? treeStats(path)
+    : treeStatsFromFence(path, validation.fenceEntries);
 }
 
 function compilerOutputReferenceKey(reference, extensions, description) {
@@ -1777,7 +1881,7 @@ async function listArtifactEntries(cacheLayout, validation) {
           metadata.kind === C_BUNDLE_ENTRY_KIND
             ? await authenticateCBundle({ cacheLayout, key, path, stage })
             : await authenticateArtifactFamily({ cacheLayout, key, metadata, path, stage, validation });
-        return { ...(await treeStats(path)), ...authenticated, authenticated: true };
+        return { ...(await inventoryTreeStats(path, validation)), ...authenticated, authenticated: true };
       } catch (error) {
         if (!(error instanceof Error)) throw error;
         // Legacy classification occurs inside cohortCapsuleArtifactClosure only after the generic
@@ -1788,7 +1892,7 @@ async function listArtifactEntries(cacheLayout, validation) {
         }
         let stats = {};
         try {
-          stats = await treeStats(path);
+          stats = await inventoryTreeStats(path, validation);
         } catch {
           // Keep an unsafe or disappearing object in the invalid set without granting authority.
         }
@@ -2248,12 +2352,12 @@ async function listPackages(cacheLayout, validation) {
     if (!status.isDirectory()) fail(`module graph package is not a directory: ${path}`);
     try {
       const verified = await authenticatePackage(cacheLayout, key, path, validation);
-      records.push({ ...(await treeStats(path)), ...verified, authenticated: true });
+      records.push({ ...(await inventoryTreeStats(path, validation)), ...verified, authenticated: true });
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       let stats = {};
       try {
-        stats = await treeStats(path);
+        stats = await inventoryTreeStats(path, validation);
       } catch {
         // Keep an unsafe or disappearing object in the invalid set without granting authority.
       }
@@ -2472,7 +2576,7 @@ async function authenticateCertificateRoot(cacheLayout, lookupKey, lookupRoot, v
     // Only package keys are needed after authentication. Superseded legacy certificates can
     // embed large manifests; retaining those payloads would multiply the planner's memory use.
     certificates.push({
-      ...(await treeStats(path)),
+      ...(await inventoryTreeStats(path, validation)),
       type: "certificate-entry",
       stage: lookupKey,
       ...(preferredSourceAtListing === `${key}\n` ? { removePreferred: true } : {}),
@@ -2516,7 +2620,7 @@ async function authenticateCertificateRoot(cacheLayout, lookupKey, lookupRoot, v
     // directories. Keep independently complete siblings available to deployed retention,
     // but do not authorize removal of the incomplete lookup root. Invalid present packages fail above.
     return {
-      ...(await treeStats(lookupRoot)),
+      ...(await inventoryTreeStats(lookupRoot, validation)),
       authenticated: false,
       certificates,
       key: lookupKey,
@@ -2528,7 +2632,7 @@ async function authenticateCertificateRoot(cacheLayout, lookupKey, lookupRoot, v
     };
   }
   return {
-    ...(await treeStats(lookupRoot)),
+    ...(await inventoryTreeStats(lookupRoot, validation)),
     path: lookupRoot,
     key: lookupKey,
     type: "certificate-root",
@@ -2570,7 +2674,7 @@ async function listCertificates(cacheLayout, validation) {
       if (!(error instanceof Error)) throw error;
       let stats = {};
       try {
-        stats = await treeStats(lookupRoot);
+        stats = await inventoryTreeStats(lookupRoot, validation);
       } catch {
         // Keep an unsafe or disappearing object in the invalid set without granting authority.
       }
@@ -2595,7 +2699,18 @@ async function listSnapshots(cacheLayout) {
   const path = join(root, "current.json");
   if (!(await exists(path))) return [];
   await requirePrivateCacheFile(cacheLayout.cacheRoot, path);
-  const fileIdentity = await fs.lstat(path);
+  const status = await fs.lstat(path);
+  // Keep the identity as JSON data because snapshots are retained in the derived inventory
+  // index. Passing fs.Stats through the index would make canonical serialization fail, while
+  // these fields are the complete identity required by readPrivateRegularFile.
+  const fileIdentity = {
+    dev: status.dev,
+    ino: status.ino,
+    mode: status.mode,
+    mtimeMs: status.mtimeMs,
+    size: status.size,
+    uid: status.uid,
+  };
   const snapshot = await readCanonical(
     path, MAX_DEPLOYMENT_SNAPSHOT_BYTES, "deployed snapshot", undefined, fileIdentity
   );
@@ -2664,6 +2779,30 @@ function immutableSweepQuarantineRecord(planSha256, candidate) {
   return record;
 }
 
+// New sweeps use one durable record for a whole deletion wave. The record contains only the
+// source roots and their authenticated candidate identities; the moved trees themselves remain
+// the recovery payload. Keeping the record at wave scope removes the per-entry marker and fsync
+// cost without allowing an unrecorded rename to become deletion authority.
+function immutableSweepJournal(plan) {
+  const entries = plan.evictions.map((candidate) => {
+    const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
+    return {
+      candidateSha256: quarantineRecord.candidateSha256,
+      path: candidate.path,
+    };
+  }).sort((left, right) => compareStrings(left.candidateSha256, right.candidateSha256));
+  const payload = {
+    entries,
+    kind: IMMUTABLE_SWEEP_JOURNAL_KIND,
+    planSha256: requireSha256(plan.planSha256, "immutable sweep journal plan SHA-256"),
+  };
+  const journal = { ...payload, journalSha256: fingerprintJson(payload) };
+  if (canonicalBytes(journal).length > MAX_SWEEP_JOURNAL_BYTES) {
+    fail(`immutable sweep journal exceeds ${MAX_SWEEP_JOURNAL_BYTES} bytes`);
+  }
+  return journal;
+}
+
 function matchesQuarantineCandidateTree(stats, candidate) {
   if (candidate.physicalStateIdentity !== undefined) {
     if (stats.treeIdentity !== candidate.physicalStateIdentity) return false;
@@ -2674,16 +2813,20 @@ function matchesQuarantineCandidateTree(stats, candidate) {
   return stats.identity === candidate.treeIdentity;
 }
 
-async function createPrivateDirectory(cacheRoot, directory) {
-  try {
-    await fs.mkdir(directory, { mode: 0o700 });
-  } catch (error) {
-    if (!(missing(error) || (error instanceof Error && error.code === "EEXIST"))) throw error;
+async function createPrivateDirectoryTree(cacheRoot, directories) {
+  for (const directory of directories) {
+    let created = false;
+    try {
+      await fs.mkdir(directory, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if (!(error instanceof Error && error.code === "EEXIST")) throw error;
+    }
+    await requirePrivateCacheDirectory(cacheRoot, directory);
+    // Persist each newly created ancestor once. The journal and batch boundaries below cover
+    // candidate moves/removals; no per-entry directory sync is needed.
+    if (created) await syncDirectory(dirname(directory));
   }
-  await requirePrivateCacheDirectory(cacheRoot, directory);
-  // Persist the directory entry in its parent before a later rename depends on this quarantine
-  // path surviving a host crash.
-  await syncDirectory(dirname(directory));
 }
 
 async function syncDirectory(path) {
@@ -2734,6 +2877,75 @@ export async function removeConvexWasmCacheTree(root) {
   await remove(root);
 }
 
+async function recoverImmutableSweepJournal(cacheLayout, planRoot, names) {
+  const journalPath = join(planRoot, "journal.json");
+  await requirePrivateCacheFile(cacheLayout.cacheRoot, journalPath);
+  const journal = await readCanonical(
+    journalPath,
+    MAX_SWEEP_JOURNAL_BYTES,
+    "immutable sweep journal"
+  );
+  requireExactKeys(journal, ["entries", "journalSha256", "kind", "planSha256"], "immutable sweep journal");
+  const { journalSha256, ...payload } = journal;
+  if (
+    journal.kind !== IMMUTABLE_SWEEP_JOURNAL_KIND ||
+    requireSha256(journal.planSha256, "immutable sweep journal plan SHA-256") !== journal.planSha256 ||
+    fingerprintJson(payload) !== journalSha256
+  ) {
+    fail(`immutable sweep journal authentication failed: ${journalPath}`);
+  }
+  const planSha256 = basename(planRoot);
+  if (journal.planSha256 !== planSha256 || !Array.isArray(journal.entries)) {
+    fail(`immutable sweep journal plan identity is invalid: ${journalPath}`);
+  }
+  const entries = journal.entries.map((entry) => {
+    requireExactKeys(entry, ["candidateSha256", "path"], "immutable sweep journal entry");
+    const candidateSha256 = requireSha256(entry.candidateSha256, "immutable sweep journal candidate SHA-256");
+    if (typeof entry.path !== "string" || !entry.path.startsWith(`${cacheLayout.immutable.root}/`)) {
+      fail(`immutable sweep journal candidate path is invalid: ${journalPath}`);
+    }
+    return { candidateSha256, path: entry.path };
+  }).sort((left, right) => compareStrings(left.candidateSha256, right.candidateSha256));
+  if (
+    canonicalJson(entries) !== canonicalJson(journal.entries) ||
+    new Set(entries.map(({ candidateSha256 }) => candidateSha256)).size !== entries.length
+  ) {
+    fail(`immutable sweep journal entries are not sorted and unique: ${journalPath}`);
+  }
+  const allowedNames = new Set(["journal.json", ...entries.map(({ candidateSha256 }) => candidateSha256)]);
+  for (const name of names) {
+    if (name.startsWith(".publish-")) {
+      await requirePrivateCacheFile(cacheLayout.cacheRoot, join(planRoot, name));
+      continue;
+    }
+    if (!allowedNames.has(name)) fail(`immutable sweep journal has an unexpected entry: ${planRoot}`);
+  }
+  const recovered = [];
+  // A canonical root that was never renamed is deliberately left alone. Only a tree that is
+  // physically below this journal's private trash directory was selected by the authenticated
+  // wave and can be removed after a crash.
+  for (const { candidateSha256, path } of entries) {
+    const trashPath = join(planRoot, candidateSha256);
+    if (!(await exists(trashPath))) {
+      recovered.push({ candidateSha256, planSha256, status: "not-moved" });
+      continue;
+    }
+    await requirePrivateCacheDirectory(cacheLayout.cacheRoot, trashPath);
+    await measureConvexWasmRetentionPhase("unlink", () => removeConvexWasmCacheTree(trashPath));
+    recovered.push({ candidateSha256, path, planSha256, status: "removed-batch-root" });
+  }
+  for (const name of names) {
+    if (name !== "journal.json" && name.startsWith(".publish-")) {
+      await fs.unlink(join(planRoot, name));
+    }
+  }
+  await fs.unlink(journalPath);
+  await syncDirectory(planRoot);
+  await fs.rmdir(planRoot);
+  await syncDirectory(dirname(planRoot));
+  return recovered;
+}
+
 async function removeQuarantinedImmutableGcCandidatesMeasured(cacheLayout) {
   const root = immutableSweepTrashRoot(cacheLayout);
   if (!(await exists(root))) return [];
@@ -2744,6 +2956,10 @@ async function removeQuarantinedImmutableGcCandidatesMeasured(cacheLayout) {
     const planRoot = join(root, planSha256);
     await requirePrivateCacheDirectory(cacheLayout.cacheRoot, planRoot);
     const names = (await fs.readdir(planRoot)).sort(compareStrings);
+    if (names.includes("journal.json")) {
+      recovered.push(...await recoverImmutableSweepJournal(cacheLayout, planRoot, names));
+      continue;
+    }
     const candidateRoots = new Set(names.filter((name) => SHA256_PATTERN.test(name)));
     const markerNames = names.filter((name) => /^[0-9a-f]{64}\.json$/u.test(name));
     const verifiedMarkerNames = new Set(
@@ -2910,8 +3126,10 @@ async function removeQuarantinedImmutableGcCandidatesMeasured(cacheLayout) {
     await fs.rmdir(planRoot);
     await syncDirectory(root);
   }
-  await fs.rmdir(root);
-  await syncDirectory(dirname(root));
+  if (await exists(root)) {
+    await fs.rmdir(root);
+    await syncDirectory(dirname(root));
+  }
   return recovered;
 }
 
@@ -3025,11 +3243,56 @@ async function reauthenticateEvictionCandidateMeasured(cacheLayout, candidate, v
   return { path, stats };
 }
 
-async function collectImmutableInventory(cacheLayout) {
+function inventoryRecordsByPath(inventory) {
+  return new Map([
+    ...inventory.certificates.flatMap((root) => [root, ...(root.certificates ?? [])]),
+    ...inventory.packages,
+    ...inventory.artifacts,
+  ].map((record) => [record.path, record]));
+}
+
+function refreshInventoryPhysicalStats(inventory, fence) {
+  const fenceEntries = [...fence].sort(([left], [right]) => compareStrings(left, right));
+  const fencedPaths = new Set(fenceEntries.map(([path]) => path));
+  for (const record of inventoryRecordsByPath(inventory).values()) {
+    // A completed wave removes records from the inventory before this refresh. Keep the helper
+    // conservative if a future caller supplies a pre-filtered snapshot: a missing record cannot
+    // contribute deletion authority for the settled tree.
+    if (!fencedPaths.has(record.path)) continue;
+    Object.assign(record, treeStatsFromFence(record.path, fenceEntries));
+  }
+}
+
+function authenticatedInventoryCandidate(candidate, record) {
+  if (
+    record === undefined ||
+    record.authenticated !== true ||
+    record.type !== candidate.type ||
+    record.allocatedBytes !== candidate.allocationBytes ||
+    record.estimatedReclaimBytes !== candidate.estimatedReclaimBytes ||
+    !matchesQuarantineCandidateTree(record, candidate) ||
+    record.mtimeMs !== candidate.mtimeMs
+  ) {
+    return undefined;
+  }
+  return { path: candidate.path, stats: record };
+}
+
+async function collectImmutableInventory(cacheLayout, fence) {
   // Packages, certificates and the artifact inventory repeatedly reach the same immutable
   // entries. Reuse the existing physical-state-fenced validators within this one locked plan,
   // instead of hashing and parsing their complete closures again for each referring root.
-  const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
+  const validation = {
+    packages: new Map(),
+    artifacts: new Map(),
+    structured: new Map(),
+    structuredBytes: 0,
+    cacheRoot: cacheLayout.cacheRoot,
+    ...(fence === undefined
+      ? {}
+      : { fence, fenceEntries: [...fence].sort(([left], [right]) => compareStrings(left, right)) }),
+  };
+  if (fence !== undefined) bindArtifactCacheValidationFence(validation.artifacts, validation.fenceEntries);
   const [allSnapshots, packages, artifacts] = await settleConcurrentWork([
     listSnapshots(cacheLayout),
     listPackages(cacheLayout, validation),
@@ -3200,6 +3463,10 @@ function sameWitness(left, right, ignored = []) {
 async function captureInventoryFence(cacheLayout) {
   return await measureConvexWasmRetentionPhase("authorityFence", async () => {
     const fence = new Map();
+    if (typeof process.getuid !== "function") {
+      fail("private cache validation requires process.getuid()");
+    }
+    const uid = process.getuid();
     // Ancestor identity is part of authority. Checking just entry inodes would miss an
     // ancestor replaced by a symlink to the same bytes. State ancestors may gain our own
     // quarantine directories, so only their identity/access state is retained here.
@@ -3225,6 +3492,12 @@ async function captureInventoryFence(cacheLayout) {
           if (root === cacheLayout.immutable.root && status.isSymbolicLink()) {
             fail(`immutable authority path is a symbolic link: ${path}`);
           }
+          if (
+            status.isDirectory() &&
+            (status.uid !== BigInt(uid) || (status.mode & 0o7777n) !== 0o700n)
+          ) {
+            fail(`immutable authority directory must be owned by the current user with mode 0700: ${path}`);
+          }
           const witness = physicalWitness(status);
           // Never follow malformed members; authentication owns their classification.
           const children = status.isDirectory() ? await fs.readdir(path) : [];
@@ -3243,98 +3516,180 @@ async function captureInventoryFence(cacheLayout) {
   });
 }
 
-function immutableAllocatedBytesFromFence(cacheLayout, fence) {
-  const inodes = new Map();
-  let bytes = 0;
-  for (const [path, witness] of fence) {
-    if (!path.startsWith(`${cacheLayout.immutable.root}/`)) continue;
-    const inode = `${witness.dev}:${witness.ino}`;
-    const previous = inodes.get(inode);
-    if (previous !== undefined) {
-      if (!sameWitness(previous, witness)) fail(`immutable inode changed during occupancy capture: ${path}`);
-      continue;
+function trustedInventoryDirectories(fence) {
+  return new Set(
+    [...fence].filter(([, witness]) => witness.type === "directory").map(([path]) => path)
+  );
+}
+
+function trustedInventoryFiles(fence) {
+  const uid = BigInt(process.getuid());
+  return new Set(
+    [...fence]
+      .filter(
+        ([, witness]) =>
+          witness.type === "file" &&
+          witness.uid === uid &&
+          (witness.mode & 0o7777n) === 0o600n
+      )
+      .map(([path]) => path)
+  );
+}
+
+function immutableInventoryIndexPath(cacheLayout) {
+  return join(cacheLayout.state.root, "cache-retention", "v1", "immutable-inventory.json");
+}
+
+function fenceIdentity(fence, cacheLayout) {
+  const roots = [cacheLayout.immutable.root, deploymentSnapshotRoot(cacheLayout.cacheRoot)];
+  const states = [...fence]
+    .filter(([path]) => roots.some((root) => path === root || path.startsWith(`${root}/`)))
+    .map(([path, witness]) => ({
+    blocks: String(witness.blocks),
+    ctimeNs: String(witness.ctimeNs),
+    dev: String(witness.dev),
+    gid: String(witness.gid),
+    ino: String(witness.ino),
+    mode: String(witness.mode),
+    mtimeNs: String(witness.mtimeNs),
+    nlink: String(witness.nlink),
+    path,
+    size: String(witness.size),
+    type: witness.type,
+    uid: String(witness.uid),
+    })).sort((left, right) => compareStrings(left.path, right.path));
+  return sha256(canonicalBytes(states));
+}
+
+function inventoryIndexPayload(cacheLayout, fence, inventory) {
+  const payload = {
+    fenceSha256: fenceIdentity(fence, cacheLayout),
+    inventory,
+    kind: "convex-wasm-immutable-gc-inventory-v1",
+  };
+  return { ...payload, indexSha256: fingerprintJson(payload) };
+}
+
+async function persistImmutableInventoryIndex(cacheLayout, fence, inventory) {
+  await createPrivateDirectoryTree(cacheLayout.cacheRoot, [
+    join(cacheLayout.cacheRoot, "state"),
+    cacheLayout.state.root,
+    join(cacheLayout.state.root, "cache-retention"),
+    join(cacheLayout.state.root, "cache-retention", "v1"),
+  ]);
+  const index = inventoryIndexPayload(cacheLayout, fence, inventory);
+  await replacePrivateDurableFile(
+    cacheLayout.cacheRoot,
+    immutableInventoryIndexPath(cacheLayout),
+    `${canonicalJson(index)}\n`
+  );
+}
+
+async function readImmutableInventoryIndex(cacheLayout, fence) {
+  const path = immutableInventoryIndexPath(cacheLayout);
+  try {
+    await requirePrivateCacheFile(cacheLayout.cacheRoot, path);
+    const index = await readCanonical(path, MAX_METADATA_BYTES * 4, "immutable inventory index");
+    const { indexSha256, ...payload } = index ?? {};
+    if (
+      index.kind !== "convex-wasm-immutable-gc-inventory-v1" ||
+      requireSha256(indexSha256, "immutable inventory index SHA-256") !== indexSha256 ||
+      fingerprintJson(payload) !== indexSha256 ||
+      index.fenceSha256 !== fenceIdentity(fence, cacheLayout) ||
+      typeof index.inventory !== "object" ||
+      index.inventory === null ||
+      !Array.isArray(index.inventory.snapshots) ||
+      !Array.isArray(index.inventory.packages) ||
+      !Array.isArray(index.inventory.artifacts) ||
+      !Array.isArray(index.inventory.certificates)
+    ) {
+      return undefined;
     }
-    inodes.set(inode, witness);
-    bytes += Number(witness.blocks * 512n);
-    if (!Number.isSafeInteger(bytes)) fail("immutable occupancy exceeds the safe integer range");
+    return index.inventory;
+  } catch (error) {
+    if (missing(error)) return undefined;
+    // The index is derived cache state. A partial or stale index must trigger the existing full
+    // authenticated inventory rather than becoming deletion authority.
+    return undefined;
   }
-  return bytes;
 }
 
-async function hashWitnessedFile(path, witness) {
-  if (!sameWitness(witness, physicalWitness(await fs.lstat(path, { bigint: true })))) {
-    fail(`immutable shared file changed before authentication: ${path}`);
+async function replacePrivateDurableFile(cacheRoot, path, contents) {
+  const temporaryPath = join(dirname(path), `.publish-${randomBytes(16).toString("hex")}-${basename(path)}`);
+  const handle = await fs.open(temporaryPath, "wx", 0o600);
+  let closed = false;
+  try {
+    await handle.writeFile(contents);
+    await handle.sync();
+    await handle.close();
+    closed = true;
+    await requirePrivateCacheFile(cacheRoot, temporaryPath);
+    if (await exists(path)) await requirePrivateCacheFile(cacheRoot, path);
+    await fs.rename(temporaryPath, path);
+    await requirePrivateCacheFile(cacheRoot, path);
+    await syncDirectory(dirname(path));
+  } finally {
+    await fs.rm(temporaryPath, { force: true });
+    if (!closed) await handle.close();
   }
-  const digest = await hashPrivateRegularFile(path, Number(witness.size), "immutable shared file");
-  if (!sameWitness(witness, physicalWitness(await fs.lstat(path, { bigint: true })))) {
-    fail(`immutable shared file changed during authentication: ${path}`);
-  }
-  return digest.sha256;
 }
 
-async function plannedWaveEffects(fence, evictions) {
+function plannedWaveRemovedPaths(fence, evictions, alreadyRemovedPaths = new Set()) {
   const roots = new Set(evictions.flatMap((candidate) => candidate.removePreferred
     ? [candidate.path, join(dirname(candidate.path), "PREFERRED")] : [candidate.path]));
-  const removedPaths = new Set();
-  const removedLinks = new Map();
-  const changedParents = new Set(evictions.map(({ path }) => dirname(path)));
+  const removedPaths = new Set(alreadyRemovedPaths);
   for (const [path, witness] of fence) {
     for (let ancestor = path; ancestor !== dirname(ancestor); ancestor = dirname(ancestor)) {
       if (!roots.has(ancestor)) continue;
       removedPaths.add(path);
-      if (witness.type === "file") {
-        const inode = `${witness.dev}:${witness.ino}`;
-        removedLinks.set(inode, (removedLinks.get(inode) ?? 0n) + 1n);
-      }
       break;
     }
   }
-  const sharedDigests = new Map();
-  for (const [path, witness] of fence) {
-    const inode = `${witness.dev}:${witness.ino}`;
-    if (witness.type !== "file" || removedPaths.has(path) || !removedLinks.has(inode) || sharedDigests.has(inode)) continue;
-    // Our unlink legitimately changes ctime on surviving hardlinks. Authenticate their
-    // bytes before and after the wave; accepting ctime solely from an nlink decrease would
-    // hide an in-place rewrite with restored mtime during the same unlink window.
-    sharedDigests.set(inode, await hashWitnessedFile(path, witness));
-  }
-  return { removedPaths, removedLinks, changedParents, sharedDigests };
+  return removedPaths;
 }
 
-async function verifyInventoryFence(previous, current, effects) {
-  const verifiedInodes = new Set();
-  for (const [path, before] of previous) {
-    if (effects?.removedPaths.has(path)) {
-      if (current.has(path)) fail(`removed immutable authority reappeared: ${path}`);
-      continue;
+function createFenceOccupancy(cacheLayout, fence) {
+  const inodes = new Map();
+  for (const [path, witness] of fence) {
+    if (!path.startsWith(`${cacheLayout.immutable.root}/`)) continue;
+    const inode = `${witness.dev}:${witness.ino}`;
+    let record = inodes.get(inode);
+    if (record === undefined) {
+      record = { allocatedBytes: Number(witness.blocks * 512n), paths: new Set() };
+      if (!Number.isSafeInteger(record.allocatedBytes) || record.allocatedBytes < 0) {
+        fail("immutable occupancy exceeds the safe integer range");
+      }
+      inodes.set(inode, record);
     }
-    const after = current.get(path);
-    const inode = `${before.dev}:${before.ino}`;
-    if (before.type === "file" && effects?.sharedDigests.has(inode)) {
-      if (!sameWitness(before, after, ["nlink", "ctimeNs"]) ||
-          after.nlink !== before.nlink - effects.removedLinks.get(inode)) {
-        fail(`immutable shared file changed outside planned unlinks: ${path}`);
-      }
-      if (!verifiedInodes.has(inode)) {
-        if (await hashWitnessedFile(path, after) !== effects.sharedDigests.get(inode)) {
-          fail(`immutable shared file bytes changed during deletion: ${path}`);
-        }
-        verifiedInodes.add(inode);
-      }
-    } else if (!sameWitness(before, after,
-      effects?.changedParents.has(path) ? ["size", "blocks", "nlink", "mtimeNs", "ctimeNs"] : [])) {
-      fail(`immutable authority changed between waves: ${path}`);
+    record.paths.add(path);
+  }
+  return {
+    allocatedBytes: [...inodes.values()].reduce((total, { allocatedBytes }) => total + allocatedBytes, 0),
+    inodes,
+  };
+}
+
+function applyFenceRemovals(occupancy, fence, removedPaths) {
+  const affected = new Set();
+  for (const path of removedPaths) {
+    const witness = fence.get(path);
+    if (witness === undefined) continue;
+    const inode = `${witness.dev}:${witness.ino}`;
+    const record = occupancy.inodes.get(inode);
+    if (record === undefined || !record.paths.delete(path)) continue;
+    affected.add(inode);
+  }
+  for (const inode of affected) {
+    const record = occupancy.inodes.get(inode);
+    if (record.paths.size === 0) {
+      occupancy.allocatedBytes -= record.allocatedBytes;
+      occupancy.inodes.delete(inode);
     }
   }
-  for (const path of current.keys()) {
-    if (previous.has(path)) continue;
-    // The first sweep may create state ancestors for quarantine. They confer no retention
-    // authority. A newly created snapshot root or any member of an inventoried tree does.
-    const ancestorOfSnapshotRoot = [...previous.keys()].some((existing) => existing.startsWith(`${path}/`));
-    if (ancestorOfSnapshotRoot) fail(`immutable authority ancestor appeared: ${path}`);
-    const witness = current.get(path);
-    if (Object.hasOwn(witness, "mtimeNs")) fail(`new immutable authority appeared between waves: ${path}`);
+  if (!Number.isSafeInteger(occupancy.allocatedBytes) || occupancy.allocatedBytes < 0) {
+    fail("immutable occupancy became invalid after planned removals");
   }
+  return occupancy.allocatedBytes;
 }
 
 function deriveImmutablePlan({ inventory, immutableAllocatedBytes, highWatermarkAllocatedBytes,
@@ -3652,35 +4007,96 @@ export async function maintainConvexWasmImmutableGc({
   requireLimit(highWatermarkAllocatedBytes, "immutable high watermark");
   if (initialImmutableAllocatedBytes !== undefined) requireLimit(initialImmutableAllocatedBytes, "initial immutable occupancy", false);
   const recovered = await removeQuarantinedImmutableGcCandidates(cacheLayout);
-  let fence = await captureInventoryFence(cacheLayout);
-  const inventory = await measureConvexWasmRetentionPhase("inventory", () =>
-    withPrivateCacheAncestorValidation(() => collectImmutableInventory(cacheLayout)));
-  const authenticatedFence = await captureInventoryFence(cacheLayout);
-  await verifyInventoryFence(fence, authenticatedFence);
-  fence = authenticatedFence;
+  const fence = await captureInventoryFence(cacheLayout);
+  let inventory = await readImmutableInventoryIndex(cacheLayout, fence);
+  let inventoryFromIndex = inventory !== undefined;
+  if (inventory !== undefined) {
+    const snapshots = await listSnapshots(cacheLayout);
+    const snapshotProjection = (values) => values.map(({ path, name, rawSnapshot, snapshot }) => ({
+      name, path, rawSnapshot, snapshot,
+    }));
+    if (canonicalJson(snapshotProjection(inventory.snapshots)) === canonicalJson(snapshotProjection(snapshots))) {
+      inventory = { ...inventory, snapshots };
+    } else {
+      inventory = undefined;
+      inventoryFromIndex = false;
+    }
+  }
+  if (inventory === undefined) {
+    inventory = await measureConvexWasmRetentionPhase("inventory", () =>
+      withPrivateCacheAncestorValidation(
+        () => collectImmutableInventory(cacheLayout, fence),
+        {
+          trustedDirectories: trustedInventoryDirectories(fence),
+          trustedFiles: trustedInventoryFiles(fence),
+          trustedNoSymlinkAncestors: new Set([dirname(cacheLayout.cacheRoot)]),
+        }
+      ));
+  }
   // The fence already observed every inode and its allocated blocks. Compute occupancy
-  // from that same measured state rather than issuing a second set of filesystem reads.
+  // from that one measured state rather than issuing another whole-tree walk. Supported cache
+  // publishers and builders are excluded by the same lock; selected roots are reauthenticated
+  // immediately before their rename.
+  const fenceOccupancy = await measureConvexWasmRetentionPhase(
+    "immutableOccupancy",
+    () => createFenceOccupancy(cacheLayout, fence)
+  );
   // Automatic admission measured earlier, before recovery and inventory authentication.
   // Reuse that measurement only if the current fence agrees: intervening cleanup must not
   // leave stale pressure authorizing eviction below the watermark. This adds no filesystem walk.
   let remainingAllocatedBytes;
   if (initialImmutableAllocatedBytes === undefined) {
-    remainingAllocatedBytes = await measureConvexWasmRetentionPhase("immutableOccupancy", () => immutableAllocatedBytesFromFence(cacheLayout, fence));
+    remainingAllocatedBytes = fenceOccupancy.allocatedBytes;
   } else {
-    remainingAllocatedBytes = immutableAllocatedBytesFromFence(cacheLayout, fence);
+    remainingAllocatedBytes = fenceOccupancy.allocatedBytes;
     if (remainingAllocatedBytes !== initialImmutableAllocatedBytes) {
       fail("immutable occupancy changed after automatic admission");
     }
   }
   const removed = [];
   const waves = [];
+  let removedAuthorityPaths = new Set();
+  let records = inventoryRecordsByPath(inventory);
   const derive = () => measureConvexWasmRetentionPhase("planDerivation", () => deriveImmutablePlan({
     inventory, immutableAllocatedBytes: remainingAllocatedBytes, highWatermarkAllocatedBytes,
     maxRetainedPackages, nowMs,
   }));
   let { plan, candidates } = await derive();
+  if (inventoryFromIndex && remainingAllocatedBytes > highWatermarkAllocatedBytes && candidates.length !== 0) {
+    // The persisted index is a performance cache, not authenticated authority. A pressure run
+    // must rebuild the complete payload-derived inventory before selecting any deletion wave;
+    // otherwise a self-consistent index edit could remove a live closure edge while retaining its
+    // valid physical witnesses. Runs below the watermark may continue using the index because
+    // they perform no deletion, and a forged index can only defer reclamation there.
+    inventory = await measureConvexWasmRetentionPhase("inventory", () =>
+      withPrivateCacheAncestorValidation(
+        () => collectImmutableInventory(cacheLayout, fence),
+        {
+          trustedDirectories: trustedInventoryDirectories(fence),
+          trustedFiles: trustedInventoryFiles(fence),
+          trustedNoSymlinkAncestors: new Set([dirname(cacheLayout.cacheRoot)]),
+        }
+      ));
+    inventoryFromIndex = false;
+    records = inventoryRecordsByPath(inventory);
+    ({ plan, candidates } = await derive());
+  }
   for (;;) {
     if (remainingAllocatedBytes <= highWatermarkAllocatedBytes || candidates.length === 0) {
+      // A removal changes directory membership and hard-link counts, so the original fence is
+      // no longer a valid index binding. Capture the settled state once and refresh surviving
+      // record witnesses before persisting the derived inventory, so hard-link changes caused by
+      // this invocation cannot turn the next index hit into stale rename authority.
+      const settledFence = removed.length === 0 ? fence : await captureInventoryFence(cacheLayout);
+      if (removed.length !== 0) refreshInventoryPhysicalStats(inventory, settledFence);
+      // Snapshot publication is excluded by the shared cache lock, so the authenticated
+      // snapshot record from this invocation remains valid while immutable roots are retired.
+      // An empty cache root is a valid no-op for explicit maintenance. Do not create a
+      // retention index (and its state ancestors) merely to record an empty inventory; callers
+      // that later publish cache material create and authenticate those roots themselves.
+      if (await exists(cacheLayout.cacheRoot)) {
+        await persistImmutableInventoryIndex(cacheLayout, settledFence, inventory);
+      }
       return {
         kind: "convex-wasm-immutable-gc-sweep-v1", plan, recovered, removed, waves, skipped: 0,
         remainingAllocatedBytes,
@@ -3689,30 +4105,27 @@ export async function maintainConvexWasmImmutableGc({
       };
     }
     if (waves.length !== 0) {
-      // Earlier unlinks can change both reclaim priority and physical witnesses. Refresh
-      // every eligible root before minting the next plan, never after a failed comparison
-      // against that plan. The first wave already has freshly authenticated inventory.
-      const records = new Map([...inventory.certificates.flatMap((root) => [root, ...(root.certificates ?? [])]), ...inventory.packages, ...inventory.artifacts].map((record) => [record.path, record]));
+      // Earlier unlinks can change the physical witnesses of roots that share hard-linked
+      // payloads. Refresh only the next wave's selected roots, rather than reopening every
+      // eligible record before deriving the plan.
       const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
       await measureConvexWasmRetentionPhase("candidateRefresh", async () => {
-        for (const candidate of candidates) {
+        for (const candidate of plan.evictions) {
           const { stats } = await authenticateEvictionRoot(cacheLayout, candidate, validation);
           Object.assign(records.get(candidate.path), stats);
         }
       });
       ({ plan, candidates } = await derive());
     }
-    await verifyInventoryFence(fence, await captureInventoryFence(cacheLayout));
-    const effects = await measureConvexWasmRetentionPhase("sharedLinkAuthentication", () => plannedWaveEffects(fence, plan.evictions));
+    const removedPaths = plannedWaveRemovedPaths(fence, plan.evictions, removedAuthorityPaths);
     const started = performance.now();
-    const wave = await sweepImmutablePlan({ cacheLayout, plan });
-    // Nothing is released on a partial wave or failed durability operation. Recovery is
-    // next invocation's first operation and is followed by a new complete authentication.
+    // Freshly collected inventory may reuse its in-memory authentication within this locked
+    // invocation. An index-derived plan is only allowed to reach this point after the complete
+    // inventory rebuild above; retain the fallback reauthentication for defensive callers.
+    const wave = await sweepImmutablePlan({ cacheLayout, plan, authenticatedCandidates: records });
     const deleted = new Set(wave.removed.map(({ path }) => path));
     if (deleted.size !== plan.evictions.length) fail("immutable wave did not remove every selected root");
-    const nextFence = await captureInventoryFence(cacheLayout);
-    await measureConvexWasmRetentionPhase("sharedLinkAuthentication", () => verifyInventoryFence(fence, nextFence, effects));
-    fence = nextFence;
+    removedAuthorityPaths = removedPaths;
     for (const family of ["certificates", "packages", "artifacts"]) {
       inventory[family] = inventory[family].filter(({ path }) => !deleted.has(path));
     }
@@ -3722,10 +4135,9 @@ export async function maintainConvexWasmImmutableGc({
       root.packageKeys = [...new Set(root.certificates.flatMap(({ packageKeys }) => packageKeys))];
     }
     removed.push(...wave.removed);
-    // Reclaim estimates exclude shared file blocks and do not add up to freed occupancy.
-    // This one measurement is also the next plan's pressure input, including the terminal
-    // empty plan; never perform another full authentication merely to discover exhaustion.
-    remainingAllocatedBytes = await measureConvexWasmRetentionPhase("immutableOccupancy", () => immutableAllocatedBytesFromFence(cacheLayout, fence));
+    // The static fence records every inode path. Applying the completed wave in memory accounts
+    // for shared hardlinks exactly, without another whole-cache occupancy walk.
+    remainingAllocatedBytes = applyFenceRemovals(fenceOccupancy, fence, removedPaths);
     waves.push({ wave: waves.length + 1, selected: plan.evictions.length, removed: wave.removed.length,
       remainingAllocatedBytes, elapsedMilliseconds: performance.now() - started });
     ({ plan, candidates } = await derive());
@@ -3734,96 +4146,93 @@ export async function maintainConvexWasmImmutableGc({
 
 // This operation executes exactly one already-minted plan. The public low-level sweeper
 // retains its one-plan contract; only top-level maintenance advances dependency waves.
-async function sweepImmutablePlan({ cacheLayout, plan }) {
+async function sweepImmutablePlan({ cacheLayout, plan, authenticatedCandidates }) {
   const removed = [];
+  if (plan.evictions.length === 0) {
+    return {
+      kind: "convex-wasm-immutable-gc-sweep-v1",
+      plan,
+      removed,
+      skipped: 0,
+    };
+  }
   const trashBaseRoot = immutableSweepTrashRoot(cacheLayout);
   const trashRoot = join(trashBaseRoot, plan.planSha256);
-  if (plan.evictions.length !== 0) {
-    // Recursive mkdir follows an existing symlink ancestor. Create and authenticate each state
-    // directory separately so a redirected `state` tree cannot receive quarantined artifacts.
-    for (const directory of [
-      join(cacheLayout.cacheRoot, "state"),
-      cacheLayout.state.root,
-      join(cacheLayout.state.root, "cache-retention"),
-      join(cacheLayout.state.root, "cache-retention", "v1"),
-      trashBaseRoot,
-      trashRoot,
-    ]) {
-      await createPrivateDirectory(cacheLayout.cacheRoot, directory);
-    }
-  }
+  // Recursive mkdir follows an existing symlink ancestor. Authenticate every known ancestor
+  // after creation so a redirected state tree cannot receive quarantined artifacts. Directory
+  // durability is covered by the single journal publication below; it need not be synced once
+  // per candidate.
+  await createPrivateDirectoryTree(cacheLayout.cacheRoot, [
+    join(cacheLayout.cacheRoot, "state"),
+    cacheLayout.state.root,
+    join(cacheLayout.state.root, "cache-retention"),
+    join(cacheLayout.state.root, "cache-retention", "v1"),
+    trashBaseRoot,
+    trashRoot,
+  ]);
   // Deletion starts a fresh scope, independent of planning. Selected roots still reopen and
-  // check their current physical state; unchanged shared dependencies need not be rehashed for
-  // every root. Quarantine and verify the whole selected batch before unlinking any file:
-  // deleting a shared payload link changes nlink/ctime in otherwise unchanged later candidates.
+  // check their current physical state. One durable journal covers the whole wave; a crash can
+  // therefore recover every root that was actually renamed without a marker and directory sync
+  // for each entry.
   const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
-  const quarantined = [];
-  for (const candidate of plan.evictions) {
-    const { path, stats } = await reauthenticateEvictionCandidate(cacheLayout, candidate, validation);
-    await measureConvexWasmRetentionPhase("quarantine", async () => {
-      const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
-      const markerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.json`);
-      const verifiedMarkerPath = join(trashRoot, `${quarantineRecord.candidateSha256}.verified.json`);
-      const trashPath = join(trashRoot, quarantineRecord.candidateSha256);
-      // The durable marker must precede the rename. Otherwise a host crash could recover the moved
-      // root without the record that authorizes its removal.
-      await writePrivateDurableFile(
-        cacheLayout.cacheRoot,
-        markerPath,
-        `${canonicalJson(quarantineRecord)}\n`
-      );
-      // A prepared but undeployed certificate can own PREFERRED. Removing that pointer before
-      // its target leaves ordinary lookup free to select the surviving deployed certificate,
-      // including if the process stops between these operations.
-      if (candidate.removePreferred) {
-        await fs.unlink(join(dirname(path), "PREFERRED"));
-        await syncDirectory(dirname(path));
+  const journal = immutableSweepJournal(plan);
+  await measureConvexWasmRetentionPhase("quarantine", () => writePrivateDurableFile(
+    cacheLayout.cacheRoot,
+    join(trashRoot, "journal.json"),
+    `${canonicalJson(journal)}\n`
+  ));
+  const quarantineEntries = plan.evictions.map((candidate) => ({
+    candidate,
+    candidateSha256: immutableSweepQuarantineRecord(plan.planSha256, candidate).candidateSha256,
+    path: candidate.path,
+  }));
+  await measureConvexWasmRetentionPhase("quarantine", async () => {
+    // A prepared but undeployed certificate can own PREFERRED. Removing that pointer before its
+    // target leaves ordinary lookup free to select the surviving deployed certificate. The
+    // pointer is small and is still covered by the existing cache lock.
+    const authenticated = await mapBounded(
+      plan.evictions,
+      16,
+      (candidate) => {
+        const fromInventory = authenticatedInventoryCandidate(
+          candidate,
+          authenticatedCandidates?.get(candidate.path)
+        );
+        return fromInventory ?? reauthenticateEvictionCandidate(cacheLayout, candidate, validation);
       }
-      await fs.rename(path, trashPath);
-      // Persist both sides of the cross-directory rename before recursive removal starts. If either
-      // sync fails, the marker still makes every crash outcome recoverable.
-      await syncDirectory(dirname(path));
-      await syncDirectory(trashRoot);
-      const movedStats = await treeStats(trashPath);
-      if (
-        movedStats.allocatedBytes !== stats.allocatedBytes ||
-        movedStats.estimatedReclaimBytes !== stats.estimatedReclaimBytes ||
-        movedStats.identity !== stats.identity ||
-        movedStats.treeIdentity !== stats.treeIdentity ||
-        movedStats.mtimeMs !== stats.mtimeMs
-      ) {
-        fail(`immutable eviction candidate changed while it was quarantined: ${path}`);
+    );
+    const authenticatedByPath = new Map(authenticated.map(({ path: authenticatedPath, stats }) => [
+      authenticatedPath,
+      stats,
+    ]));
+    await mapBounded(quarantineEntries, 16, async ({ candidate, candidateSha256, path }) => {
+      // Keep the fresh authentication paired with the rename; no second tree walk is needed
+      // after the atomic move because the cache lock excludes supported writers.
+      if (!authenticatedByPath.has(path)) fail(`immutable eviction candidate path changed: ${path}`);
+      if (candidate.removePreferred) await fs.unlink(join(dirname(path), "PREFERRED"));
+      await fs.rename(path, join(trashRoot, candidateSha256));
+    });
+  });
+  await measureConvexWasmRetentionPhase("quarantine", () => syncDirectory(trashRoot));
+  await measureConvexWasmRetentionPhase("unlink", async () => {
+    const removedFlags = await mapBounded(quarantineEntries, 16, async ({ candidateSha256 }) => {
+      const trashPath = join(trashRoot, candidateSha256);
+      if (await exists(trashPath)) {
+        await removeConvexWasmCacheTree(trashPath);
+        return true;
       }
-      // Make the post-rename authentication durable before recursive removal. Recovery may only
-      // tolerate a partial tree after this marker exists; an unverified quarantine is never deleted.
-      await writePrivateDurableFile(
-        cacheLayout.cacheRoot,
-        verifiedMarkerPath,
-        `${canonicalJson({ ...quarantineRecord, state: "verified" })}\n`
-      );
-      quarantined.push({ candidate, markerPath, verifiedMarkerPath, trashPath });
+      return false;
     });
-  }
-  for (const { candidate, markerPath, verifiedMarkerPath, trashPath } of quarantined) {
-    await measureConvexWasmRetentionPhase("unlink", async () => {
-      await removeConvexWasmCacheTree(trashPath);
-      // Do not clear the authority record until deletion of the quarantined tree is durable.
-      await syncDirectory(trashRoot);
-      // Clear the verified marker first: recovery always needs the base record, even after the
-      // tree is gone. A crash between these unlinks must leave a recoverable completed marker.
-      await fs.unlink(verifiedMarkerPath);
-      await syncDirectory(trashRoot);
-      await fs.unlink(markerPath);
-      await syncDirectory(trashRoot);
-      removed.push(candidate);
-    });
-  }
-  if (plan.evictions.length !== 0) {
-    await fs.rmdir(trashRoot);
-    await syncDirectory(trashBaseRoot);
-    await fs.rmdir(trashBaseRoot);
-    await syncDirectory(dirname(trashBaseRoot));
-  }
+    for (const [index, wasRemoved] of removedFlags.entries()) {
+      if (wasRemoved) removed.push(quarantineEntries[index].candidate);
+    }
+    await syncDirectory(trashRoot);
+  });
+  await fs.unlink(join(trashRoot, "journal.json"));
+  await syncDirectory(trashRoot);
+  await fs.rmdir(trashRoot);
+  await fs.rmdir(trashBaseRoot);
+  await syncDirectory(dirname(trashBaseRoot));
   return {
     kind: "convex-wasm-immutable-gc-sweep-v1",
     plan,

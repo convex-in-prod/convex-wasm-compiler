@@ -6,8 +6,31 @@ const PRIVATE_CACHE_FILE_IDENTITY_CONCURRENCY = 4;
 const pendingPrivateDirectoryChecks = new Map();
 const privateAncestorValidation = new AsyncLocalStorage();
 
-export function withPrivateCacheAncestorValidation(operation) {
-  return privateAncestorValidation.run(new Map(), operation);
+export function withPrivateCacheAncestorValidation(
+  operation,
+  {
+    trustedDirectories = new Set(),
+    trustedFiles = new Set(),
+    trustedNoSymlinkAncestors = new Set(),
+  } = {}
+) {
+  if (!(trustedDirectories instanceof Set)) {
+    throw new TypeError("trusted private cache directories must be a Set");
+  }
+  if (!(trustedNoSymlinkAncestors instanceof Set)) {
+    throw new TypeError("trusted private cache no-symlink ancestors must be a Set");
+  }
+  if (!(trustedFiles instanceof Set)) {
+    throw new TypeError("trusted private cache files must be a Set");
+  }
+  return privateAncestorValidation.run(
+    { checked: new Map(), trustedDirectories, trustedFiles, trustedNoSymlinkAncestors },
+    operation
+  );
+}
+
+export function isTrustedPrivateCacheFile(path) {
+  return privateAncestorValidation.getStore()?.trustedFiles.has(path) === true;
 }
 
 function fail(message) {
@@ -155,17 +178,20 @@ async function checkStablePrivateEntry(path, type, mode, uid) {
 async function requirePrivateAncestor(path, uid) {
   const scope = privateAncestorValidation.getStore();
   if (scope === undefined) return requireStablePrivateEntry(path, "directory", 0o700, uid);
+  if (scope.trustedDirectories.has(path)) return;
   const current = await fs.lstat(path);
   requireEntry(current, path, "directory", 0o700, uid);
-  const previous = scope.get(path);
+  const previous = scope.checked.get(path);
   // A locked inventory repeatedly traverses the same few ancestors. Every traversal still
   // checks current inode, ownership, mode and timestamps; only an unchanged directory can
   // reuse its earlier open/fstat/path proof. Leaf directories and files keep their full checks.
   if (previous !== undefined && samePrivateDirectory(previous, current)) return;
-  scope.set(path, await requireStablePrivateEntry(path, "directory", 0o700, uid));
+  scope.checked.set(path, await requireStablePrivateEntry(path, "directory", 0o700, uid));
 }
 
 async function requireNoSymlinkAncestors(path) {
+  const scope = privateAncestorValidation.getStore();
+  if (scope?.trustedNoSymlinkAncestors.has(path)) return;
   const { root } = parse(path);
   let current = root;
   for (const component of path.slice(root.length).split(sep).filter(Boolean)) {
@@ -208,6 +234,7 @@ export async function requirePrivateCacheFile(cacheRoot, path) {
     fail(`${path} escapes cache root ${cacheRoot}`);
   }
   const uid = currentUserId();
+  if (privateAncestorValidation.getStore()?.trustedFiles.has(path)) return;
   await requirePrivateDirectories(cacheRoot, dirname(path), uid);
   await requireStablePrivateEntry(path, "file", 0o600, uid);
 }
