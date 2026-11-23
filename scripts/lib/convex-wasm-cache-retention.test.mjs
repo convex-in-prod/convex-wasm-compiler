@@ -32,11 +32,11 @@ import {
   staticHermesLayoutCacheReferences,
 } from "./convex-wasm-static-hermes-layout-cache.mjs";
 
-async function fixture(t) {
+async function fixture(t, cacheSubdirectory = "cache") {
   const root = await fs.mkdtemp(join(tmpdir(), "convex-wasm-cache-retention-"));
   await fs.chmod(root, 0o700);
   t.after(() => fs.rm(root, { force: true, recursive: true }));
-  const cacheRoot = join(root, "cache");
+  const cacheRoot = join(root, cacheSubdirectory);
   const environment = {
     CONVEX_WASM_CACHE_LOCK_DB: join(root, "cache-lock.sqlite"),
   };
@@ -3451,6 +3451,80 @@ test("batch deletion journal recovers a wave after recursive removal is interrup
   assert.equal(retry.recovered.length, 1);
   assert.equal(retry.recovered[0].status, "removed-batch-root");
   assert.deepEqual(retry.removed, []);
+  await assert.rejects(fs.lstat(trashRoot), { code: "ENOENT" });
+});
+
+test("automatic maintenance splits oversized journals and recovers an interrupted later wave", async (t) => {
+  // Long escaped paths reach the real journal limit with fewer on-disk entries. Multibyte
+  // names make the UTF-8 byte count differ from the canonical JSON string length.
+  const component = `cache-${"\u0001".repeat(210)}-${"é".repeat(12)}`;
+  const value = await fixture(t, join(component, component));
+  const cacheLayout = value.layout("bounded-journal-waves");
+  const stage = `journal-${"\u0002".repeat(198)}-${"共".repeat(12)}`;
+  const stageRoot = join(cacheLayout.immutable.artifacts, stage);
+  const maxJournalBytes = 4 * 1024 * 1024;
+  const digest = "0".repeat(64);
+  const emptyJournalBytes = Buffer.byteLength(`${canonicalJson({
+    entries: [], journalSha256: digest, kind: "convex-wasm-immutable-gc-journal-v2", planSha256: digest,
+  })}\n`);
+  const entryBytes = Buffer.byteLength(canonicalJson({ candidateSha256: digest, path: join(stageRoot, digest) }));
+  const firstWaveCount = Math.floor((maxJournalBytes - emptyJournalBytes + 1) / (entryBytes + 1));
+  const total = firstWaveCount + 3;
+  for (let first = 0; first < total; first += 16) {
+    await Promise.all(Array.from({ length: Math.min(16, total - first) }, (_, offset) => writeGenericArtifact({
+      cacheLayout, extension: "wasm", identity: { index: first + offset }, metadata: {}, payload: "fixture", stage,
+    })));
+  }
+  // Publication scratch contributes to occupancy and remains outside the eviction candidates.
+  const scratch = join(stageRoot, ".publish-scratch");
+  await fs.mkdir(scratch, { mode: 0o700 });
+  await fs.writeFile(join(scratch, "payload"), "fixture", { mode: 0o600 });
+
+  const trashRoot = join(cacheLayout.state.root, "cache-retention", "v1", "immutable-sweep-trash");
+  const journals = [];
+  const originalLink = fs.link;
+  const originalRename = fs.rename;
+  let interruptedPath;
+  fs.link = async (from, to) => {
+    await originalLink(from, to);
+    if (!to.startsWith(`${trashRoot}/`) || !to.endsWith("/journal.json")) return;
+    const bytes = await fs.readFile(to);
+    const journal = JSON.parse(bytes.toString("utf8"));
+    journals.push({ size: bytes.length, ...journal });
+    if (journals.length === 2) interruptedPath = journal.entries[0].path;
+  };
+  fs.rename = async (from, to) => {
+    if (from === interruptedPath) throw new Error("synthetic later wave interruption");
+    await originalRename(from, to);
+  };
+  const options = maintenanceOptions(value, {
+    apply: true, automaticImmutableSweep: true, immutableHighWatermarkAllocatedBytes: 1,
+  });
+  try {
+    await assert.rejects(maintainConvexWasmCache(options), /synthetic later wave interruption/u);
+  } finally {
+    fs.link = originalLink;
+    fs.rename = originalRename;
+  }
+  assert.equal(journals.length, 2);
+  const [firstWave, interruptedWave] = journals;
+  assert.equal(firstWave.entries.length, firstWaveCount);
+  assert.ok(firstWave.size <= maxJournalBytes);
+  assert.ok(firstWave.size + entryBytes + 1 > maxJournalBytes);
+  assert.equal(interruptedWave.entries.length, 3);
+  assert.ok(interruptedWave.size <= maxJournalBytes);
+  assert.notEqual(firstWave.planSha256, interruptedWave.planSha256);
+  assert.equal(new Set(journals.flatMap(({ entries }) => entries.map(({ path }) => path))).size, total);
+  assert.deepEqual(await fs.readdir(trashRoot), [interruptedWave.planSha256]);
+  await fs.lstat(interruptedPath);
+
+  const retry = await maintainConvexWasmCache(options);
+  assert.deepEqual(retry.immutable.sweep.recovered.map(({ status }) => status).sort(), [
+    "not-moved", "removed-batch-root", "removed-batch-root",
+  ]);
+  assert.deepEqual(retry.immutable.sweep.removed.map(({ path }) => path), [interruptedPath]);
+  assert.equal(retry.immutable.sweep.termination, "no-eligible-candidates");
+  assert.deepEqual(await fs.readdir(stageRoot), [".publish-scratch"]);
   await assert.rejects(fs.lstat(trashRoot), { code: "ENOENT" });
 });
 

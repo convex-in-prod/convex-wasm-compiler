@@ -929,11 +929,11 @@ their artifacts. Newly unreachable dependencies become eligible on later
 waves. One maintenance invocation authenticates a single inventory under the cache
 lock and derives successive plans from its surviving records. Only completed durable
 removals release dependency edges. It stops when measured occupancy reaches the high
-watermark or no eligible entries remain. The low-level `sweepConvexWasmImmutableGc` executes one plan. There is no
-entry-count or reclaimed-byte ceiling. Roots take priority over independent
-artifacts, and each plan stops selecting entries when estimated reclaim covers
-the excess above the high watermark. Maintenance retains only the latest
-confirmed deployment and its complete closure.
+watermark or no eligible entries remain. The low-level `sweepConvexWasmImmutableGc`
+executes one plan. Roots take priority over independent artifacts. Each plan stops
+selecting entries when estimated reclaim covers the excess above the high watermark
+or the next entry would exceed the 4 MiB deletion journal limit. Maintenance retains
+only the latest confirmed deployment and its complete closure.
 There is no age-based reuse or failure-recovery retention. Call
 `recordConvexWasmSuccessfulDeployment` under the cache lock after activation is
 confirmed, never after compilation or preparation alone. Keep builds and activation

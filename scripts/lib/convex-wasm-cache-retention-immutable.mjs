@@ -117,6 +117,7 @@ const COMPILER_OUTPUT_GENERATED_C_EXTENSIONS = new Set(["c", "c-bundle"]);
 const COMPILER_OUTPUT_AOT_EXTENSIONS = new Set(["cwasm"]);
 const COMPILER_OUTPUT_OBJECT_EXTENSIONS = new Set(["o"]);
 const IMMUTABLE_SWEEP_JOURNAL_KIND = "convex-wasm-immutable-gc-journal-v2";
+const SWEEP_JOURNAL_SHA256_PLACEHOLDER = "0".repeat(64);
 
 // Measurements belong to the invocation, never to authenticated plan or producer material.
 // Nested/concurrent phases overlap; their totals must not be added as a wall-time partition.
@@ -2783,25 +2784,22 @@ function immutableSweepQuarantineRecord(planSha256, candidate) {
 // source roots and their authenticated candidate identities; the moved trees themselves remain
 // the recovery payload. Keeping the record at wave scope removes the per-entry marker and fsync
 // cost without allowing an unrecorded rename to become deletion authority.
-function immutableSweepJournal(plan) {
-  const entries = plan.evictions.map((candidate) => {
-    const quarantineRecord = immutableSweepQuarantineRecord(plan.planSha256, candidate);
-    return {
-      candidateSha256: quarantineRecord.candidateSha256,
-      path: candidate.path,
-    };
-  }).sort((left, right) => compareStrings(left.candidateSha256, right.candidateSha256));
+function immutableSweepJournal(planSha256, quarantineEntries) {
+  const entries = quarantineEntries.map(({ candidateSha256, path }) => ({ candidateSha256, path }))
+    .sort((left, right) => compareStrings(left.candidateSha256, right.candidateSha256));
   const payload = {
     entries,
     kind: IMMUTABLE_SWEEP_JOURNAL_KIND,
-    planSha256: requireSha256(plan.planSha256, "immutable sweep journal plan SHA-256"),
+    planSha256: requireSha256(planSha256, "immutable sweep journal plan SHA-256"),
   };
-  const journal = { ...payload, journalSha256: fingerprintJson(payload) };
-  if (canonicalBytes(journal).length > MAX_SWEEP_JOURNAL_BYTES) {
+  const bytes = canonicalBytes({ ...payload, journalSha256: fingerprintJson(payload) });
+  if (bytes.length > MAX_SWEEP_JOURNAL_BYTES) {
     fail(`immutable sweep journal exceeds ${MAX_SWEEP_JOURNAL_BYTES} bytes`);
   }
-  return journal;
+  return bytes;
 }
+
+const EMPTY_SWEEP_JOURNAL_BYTES = immutableSweepJournal(SWEEP_JOURNAL_SHA256_PLACEHOLDER, []).length;
 
 function matchesQuarantineCandidateTree(stats, candidate) {
   if (candidate.physicalStateIdentity !== undefined) {
@@ -3863,7 +3861,18 @@ function deriveImmutablePlan({ inventory, immutableAllocatedBytes, highWatermark
     ? immutableAllocatedBytes - highWatermarkAllocatedBytes
     : 0;
   if (diskPressure) {
+    let journalBytes = EMPTY_SWEEP_JOURNAL_BYTES;
     for (const candidate of candidates) {
+      // A digest always occupies 64 ASCII bytes and sorting the journal entries changes no
+      // byte counts. Budget the canonical path encoding and separators before hashing the plan.
+      journalBytes += Buffer.byteLength(canonicalJson({
+        candidateSha256: SWEEP_JOURNAL_SHA256_PLACEHOLDER,
+        path: candidate.path,
+      })) + (evictions.length === 0 ? 0 : 1);
+      if (journalBytes > MAX_SWEEP_JOURNAL_BYTES) {
+        if (evictions.length === 0) fail("immutable sweep journal cannot fit a single candidate");
+        break;
+      }
       evictions.push(candidate);
       estimatedReclaimBytes += candidate.estimatedReclaimBytes;
       if (estimatedReclaimBytes >= reclaimToHighWatermarkBytes) break;
@@ -4158,6 +4167,12 @@ async function sweepImmutablePlan({ cacheLayout, plan, authenticatedCandidates }
   }
   const trashBaseRoot = immutableSweepTrashRoot(cacheLayout);
   const trashRoot = join(trashBaseRoot, plan.planSha256);
+  const quarantineEntries = plan.evictions.map((candidate) => ({
+    candidate,
+    candidateSha256: immutableSweepQuarantineRecord(plan.planSha256, candidate).candidateSha256,
+    path: candidate.path,
+  }));
+  const journal = immutableSweepJournal(plan.planSha256, quarantineEntries);
   // Recursive mkdir follows an existing symlink ancestor. Authenticate every known ancestor
   // after creation so a redirected state tree cannot receive quarantined artifacts. Directory
   // durability is covered by the single journal publication below; it need not be synced once
@@ -4175,17 +4190,11 @@ async function sweepImmutablePlan({ cacheLayout, plan, authenticatedCandidates }
   // therefore recover every root that was actually renamed without a marker and directory sync
   // for each entry.
   const validation = { packages: new Map(), artifacts: new Map(), structured: new Map(), structuredBytes: 0, cacheRoot: cacheLayout.cacheRoot };
-  const journal = immutableSweepJournal(plan);
   await measureConvexWasmRetentionPhase("quarantine", () => writePrivateDurableFile(
     cacheLayout.cacheRoot,
     join(trashRoot, "journal.json"),
-    `${canonicalJson(journal)}\n`
+    journal
   ));
-  const quarantineEntries = plan.evictions.map((candidate) => ({
-    candidate,
-    candidateSha256: immutableSweepQuarantineRecord(plan.planSha256, candidate).candidateSha256,
-    path: candidate.path,
-  }));
   await measureConvexWasmRetentionPhase("quarantine", async () => {
     // A prepared but undeployed certificate can own PREFERRED. Removing that pointer before its
     // target leaves ordinary lookup free to select the surviving deployed certificate. The
