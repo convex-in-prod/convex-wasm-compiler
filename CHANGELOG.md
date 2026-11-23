@@ -3,6 +3,12 @@
 Release changes and upgrade notes. For the complete history, see
 [GitHub releases](https://github.com/convex-in-prod/convex-wasm-compiler/releases).
 
+## 0.2.63
+
+- Split oversized immutable cache sweeps across deletion journals. Automatic
+  maintenance continues in the same invocation when the next entry would exceed
+  4 MiB and can resume after an interrupted wave.
+
 ## 0.2.61
 
 - Support stable Zod 4 releases (`>=4.0.0 <5.0.0`) with authenticated transform
